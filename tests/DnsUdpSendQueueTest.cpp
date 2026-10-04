@@ -136,7 +136,7 @@ TEST(DnsUdpSendQueueTest, SerializesSlowSendersInFifoOrder) {
 
     EXPECT_EQ(outcome.err, IoErr::None);
     EXPECT_FALSE(outcome.entered_before_release);
-    ASSERT_EQ(outcome.order_size, 3u);
+    ASSERT_EQ(outcome.order_size, 3U);
     EXPECT_EQ(outcome.order[0], 1);
     EXPECT_EQ(outcome.order[1], 2);
     EXPECT_EQ(outcome.order[2], 3);
@@ -162,7 +162,7 @@ TEST(DnsUdpSendQueueTest, CloseCancelsQueuedSendersAndAllowsReset) {
     group.join();
 
     EXPECT_EQ(outcome.err, IoErr::None);
-    EXPECT_EQ(outcome.canceled, 2u);
+    EXPECT_EQ(outcome.canceled, 2U);
     EXPECT_TRUE(outcome.idle);
     EXPECT_TRUE(outcome.reusable);
 }

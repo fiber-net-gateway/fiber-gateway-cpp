@@ -33,7 +33,7 @@ const GcString *as_string(const JsValue &value) { return js_value_heap_ptr<const
 
 std::string string_to_utf8(const JsValue &value) {
     std::string out;
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -54,10 +54,10 @@ TEST(ScriptValueOpsTest, ConcatKeepsCanonicalUtf8ForNativeUtf8) {
     auto status = fiber::script::run::Binaries::plus(heap, lhs, rhs, result);
     ASSERT_EQ(status, CallResult::Success);
     ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
-    auto *str = as_string(result.value);
+    const auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
-    EXPECT_EQ(str->utf16_len, 2u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4u);
+    EXPECT_EQ(str->utf16_len, 2U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4U);
 
     const char expected_bytes[] = {
             static_cast<char>(0xC3),
@@ -79,10 +79,10 @@ TEST(ScriptValueOpsTest, ConcatKeepsCanonicalUtf8ForWideCharacters) {
     auto status = fiber::script::run::Binaries::plus(heap, lhs, rhs, result);
     ASSERT_EQ(status, CallResult::Success);
     ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
-    auto *str = as_string(result.value);
+    const auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
-    EXPECT_EQ(str->utf16_len, 2u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4u);
+    EXPECT_EQ(str->utf16_len, 2U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4U);
 
     const char expected_bytes[] = {
             static_cast<char>(0xE2),
@@ -103,10 +103,10 @@ TEST(ScriptValueOpsTest, ConcatHeapAndNative) {
     auto status = fiber::script::run::Binaries::plus(heap, lhs, rhs, result);
     ASSERT_EQ(status, CallResult::Success);
     ASSERT_EQ(js_value_type(result.value), JsNodeType::String);
-    auto *str = as_string(result.value);
+    const auto *str = as_string(result.value);
     ASSERT_NE(str, nullptr);
-    EXPECT_EQ(str->utf16_len, 4u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4u);
+    EXPECT_EQ(str->utf16_len, 4U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(str), 4U);
 
     const char expected_bytes[] = {'h', 'i', '!', '!'};
     std::string expected(expected_bytes, sizeof(expected_bytes));
@@ -136,7 +136,7 @@ TEST(ScriptValueOpsTest, ConcatCanonicalizesSurrogatePairBoundary) {
     ResultPayload result;
     ASSERT_EQ(fiber::script::run::Binaries::plus(heap, lhs, rhs, result), CallResult::Success);
     EXPECT_EQ(as_string(result.value), as_string(*expected));
-    EXPECT_EQ(fiber::script::gc_string_byte_len(as_string(result.value)), 4u);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(as_string(result.value)), 4U);
     EXPECT_EQ(string_to_utf8(result.value), "\xF0\x9F\x98\x80");
 }
 

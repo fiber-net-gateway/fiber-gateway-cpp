@@ -101,7 +101,7 @@ TEST(JsonParseTest, ParsesAndOwnsBasicValues) {
         std::string_view text = "old";
         const std::string json = R"("x\u0000y")";
         ASSERT_EQ(parse_complete<fiber::json::parse_text>(json, pool, text, parser), ParseStatus::Done);
-        ASSERT_EQ(text.size(), 3u);
+        ASSERT_EQ(text.size(), 3U);
         EXPECT_EQ(text[0], 'x');
         EXPECT_EQ(text[1], '\0');
         EXPECT_EQ(text[2], 'y');
@@ -181,7 +181,7 @@ TEST(JsonParseTest, CheckedIntegralRejectsTypeMismatchAndOverflow) {
         EXPECT_EQ(
                 parse_complete<fiber::json::parse_integral<std::uint64_t>>("18446744073709551616", pool, value, parser),
                 ParseStatus::Error);
-        EXPECT_EQ(value, 7u);
+        EXPECT_EQ(value, 7U);
         EXPECT_STREQ(parser.error().message, "integer out of range");
     }
 
@@ -209,7 +209,7 @@ TEST(JsonParseTest, ParsesArrayIntoContiguousPoolStorage) {
     JsonParser parser;
     JsonArray<std::int64_t> array;
     ASSERT_EQ(parse_complete<parse_integer_array>(json, pool, array, parser), ParseStatus::Done);
-    ASSERT_EQ(array.size(), 300u);
+    ASSERT_EQ(array.size(), 300U);
     for (std::size_t i = 0; i < array.size(); ++i) {
         EXPECT_EQ(array[i], static_cast<std::int64_t>(i));
     }
@@ -221,12 +221,12 @@ TEST(JsonParseTest, ComposesNestedArrayParsers) {
     JsonArray<JsonArray<std::int64_t>> matrix;
     ASSERT_EQ(parse_complete<parse_integer_matrix>("[[1,2],[],[3]]", pool, matrix, parser), ParseStatus::Done);
 
-    ASSERT_EQ(matrix.size(), 3u);
-    ASSERT_EQ(matrix[0].size(), 2u);
+    ASSERT_EQ(matrix.size(), 3U);
+    ASSERT_EQ(matrix[0].size(), 2U);
     EXPECT_EQ(matrix[0][0], 1);
     EXPECT_EQ(matrix[0][1], 2);
     EXPECT_TRUE(matrix[1].empty());
-    ASSERT_EQ(matrix[2].size(), 1u);
+    ASSERT_EQ(matrix[2].size(), 1U);
     EXPECT_EQ(matrix[2][0], 3);
 }
 
@@ -237,7 +237,7 @@ TEST(JsonParseTest, ObjectPreservesOrderAndDuplicateKeys) {
     ASSERT_EQ(parse_complete<parse_integer_object>(R"({"a":1,"\u0061":2,"b":3})", pool, object, parser),
               ParseStatus::Done);
 
-    ASSERT_EQ(object.size(), 3u);
+    ASSERT_EQ(object.size(), 3U);
     EXPECT_EQ(object[0].key, "a");
     EXPECT_EQ(object[1].key, "a");
     EXPECT_EQ(object[2].key, "b");
@@ -250,6 +250,7 @@ TEST(JsonParseTest, ObjectPreservesOrderAndDuplicateKeys) {
 }
 
 TEST(JsonParseTest, SupportsOptionalAndThreeStateNullableValues) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     BufPool pool;
 
     {
@@ -281,13 +282,14 @@ TEST(JsonParseTest, SupportsOptionalAndThreeStateNullableValues) {
         JsonParser parser;
         JsonArray<Nullable<std::int64_t>> values;
         ASSERT_EQ(parse_complete<parse_nullable_integer_array>("[1,null,2]", pool, values, parser), ParseStatus::Done);
-        ASSERT_EQ(values.size(), 3u);
+        ASSERT_EQ(values.size(), 3U);
         EXPECT_TRUE(values[0].is_present());
         EXPECT_TRUE(values[1].is_null());
         EXPECT_TRUE(values[2].is_present());
         EXPECT_FALSE(values[0].is_absent());
         EXPECT_FALSE(values[1].is_absent());
     }
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(JsonParseTest, CustomStructDistinguishesAbsentNullAndPresent) {
@@ -319,7 +321,7 @@ TEST(JsonParseTest, ObjectFieldParserSkipsUnknownFieldsAndCommitsTransactionally
     config.timeout.set_present(9);
 
     std::string long_field(160, 'x');
-    const std::string json = "{\"" + long_field + "\":[{\"nested\":true}],\"name\":{}}";
+    const std::string json = "{\"" + long_field + R"(":[{"nested":true}],"name":{}})";
     JsonParser parser;
     EXPECT_EQ(parse_complete<parse_config>(json, pool, config, parser), ParseStatus::Error);
 
@@ -343,7 +345,7 @@ TEST(JsonParseTest, ParsesArbitraryJsonIntoPoolBackedTree) {
 
     ASSERT_TRUE(value.is_object());
     const JsonObject<JsonAny> &object = value.as_object();
-    ASSERT_EQ(object.size(), 7u);
+    ASSERT_EQ(object.size(), 7U);
 
     ASSERT_NE(object.find("null"), nullptr);
     EXPECT_TRUE(object.find("null")->value.is_null());
@@ -357,7 +359,7 @@ TEST(JsonParseTest, ParsesArbitraryJsonIntoPoolBackedTree) {
     const auto *text = object.find("text");
     ASSERT_NE(text, nullptr);
     ASSERT_TRUE(text->value.is_text());
-    ASSERT_EQ(text->value.as_text().size(), 3u);
+    ASSERT_EQ(text->value.as_text().size(), 3U);
     EXPECT_EQ(text->value.as_text()[0], 'x');
     EXPECT_EQ(text->value.as_text()[1], '\0');
     EXPECT_EQ(text->value.as_text()[2], 'y');
@@ -365,7 +367,7 @@ TEST(JsonParseTest, ParsesArbitraryJsonIntoPoolBackedTree) {
     const auto *array = object.find("array");
     ASSERT_NE(array, nullptr);
     ASSERT_TRUE(array->value.is_array());
-    ASSERT_EQ(array->value.as_array().size(), 2u);
+    ASSERT_EQ(array->value.as_array().size(), 2U);
     EXPECT_EQ(array->value.as_array()[0].as_integer(), 1);
     ASSERT_TRUE(array->value.as_array()[1].is_object());
     const auto *nested = array->value.as_array()[1].as_object().find("nested");
@@ -400,7 +402,7 @@ TEST(JsonParseTest, ReportsSemanticErrorsAndLeavesOutputUnchanged) {
         EXPECT_EQ(value, 9);
         ASSERT_NE(parser.error().message, nullptr);
         EXPECT_STREQ(parser.error().message, "expected integer");
-        EXPECT_EQ(parser.error().offset, 0u);
+        EXPECT_EQ(parser.error().offset, 0U);
     }
 
     {

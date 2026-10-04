@@ -35,7 +35,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -71,7 +71,7 @@ AbiResult call_host(const char *name, JsValue arg) {
         return AbiResult::abort(ScriptAbortReason::Internal);
     }
     Library::HostCallFrame frame(heap, JsValue::make_undefined(), nullptr);
-    Library::Arguments args{ConstValueHandle(storage), 1};
+    Library::Arguments args{.args = ConstValueHandle(storage), .argc = 1};
     return match.callable->function(match.callable->userdata, frame, args);
 }
 
@@ -102,7 +102,7 @@ TEST(BinaryFuncsTest, HexOfGetUtf8Bytes) {
     expect_script_string("return binary.hex(binary.getUtf8Bytes(\"abc\"));", "616263");
 }
 TEST(BinaryFuncsTest, HexNonBinaryIsCatchable) {
-    expect_caught("try { binary.hex(123); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.hex(123); return "no"; } catch (e) { return "caught"; })");
 }
 
 // ---- binary.fromHex (String -> Binary, strict) ----
@@ -112,13 +112,13 @@ TEST(BinaryFuncsTest, FromHexRoundTrips) {
 }
 TEST(BinaryFuncsTest, FromHexEmptyIsEmpty) { expect_script_string("return binary.hex(binary.fromHex(\"\"));", ""); }
 TEST(BinaryFuncsTest, FromHexOddLengthRaises) {
-    expect_caught("try { binary.fromHex(\"abc\"); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.fromHex("abc"); return "no"; } catch (e) { return "caught"; })");
 }
 TEST(BinaryFuncsTest, FromHexNonHexCharRaises) {
-    expect_caught("try { binary.fromHex(\"xy\"); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.fromHex("xy"); return "no"; } catch (e) { return "caught"; })");
 }
 TEST(BinaryFuncsTest, FromHexNonStringIsCatchable) {
-    expect_caught("try { binary.fromHex(123); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.fromHex(123); return "no"; } catch (e) { return "caught"; })");
 }
 
 // ---- binary.base64Encode (Binary -> base64 String) ----
@@ -161,15 +161,15 @@ TEST(BinaryFuncsTest, Base64DecodeNonStringIsUndefined) {
 }
 TEST(BinaryFuncsTest, Base64DecodeInvalidRaises) {
     // length not a multiple of 4
-    expect_caught("try { binary.base64Decode(\"A\"); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.base64Decode("A"); return "no"; } catch (e) { return "caught"; })");
     // overlong padding
-    expect_caught("try { binary.base64Decode(\"A===\"); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.base64Decode("A==="); return "no"; } catch (e) { return "caught"; })");
     // '=' in the middle
-    expect_caught("try { binary.base64Decode(\"AB=C\"); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.base64Decode("AB=C"); return "no"; } catch (e) { return "caught"; })");
     // non-alphabet characters
-    expect_caught("try { binary.base64Decode(\"####\"); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.base64Decode("####"); return "no"; } catch (e) { return "caught"; })");
     // whitespace is not tolerated
-    expect_caught("try { binary.base64Decode(\"SGVs bG8=\"); return \"no\"; } catch (e) { return \"caught\"; }");
+    expect_caught(R"(try { binary.base64Decode("SGVs bG8="); return "no"; } catch (e) { return "caught"; })");
 }
 
 // ---- binary.getUtf8Bytes (any -> Binary = JsonUtil.toString(value)) ----

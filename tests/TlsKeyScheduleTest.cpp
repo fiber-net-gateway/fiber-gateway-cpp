@@ -4,6 +4,7 @@
 #include <openssl/hmac.h>
 
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <span>
 #include <string>
@@ -254,7 +255,7 @@ TEST(TlsKeySchedule13Psk, ExternalBinderDiffersFromResumptionBinder) {
     auto res = res_ks.binder_key(TlsPskBinderKind::Resumption);
     ASSERT_TRUE(ext.has_value());
     ASSERT_TRUE(res.has_value());
-    EXPECT_EQ(32u, ext->len());
+    EXPECT_EQ(32U, ext->len());
     EXPECT_NE(0, std::memcmp(ext->bytes().data(), res->bytes().data(), 32));
 }
 
@@ -379,13 +380,13 @@ TEST(Tls13TrafficKeys, Rfc8448Section3KeysProtectRecords) {
                           out);
     ASSERT_EQ(TlsRecordCipher::Status::Ok, o1.status);
     EXPECT_EQ(TlsContentType::Handshake, o1.inner_type);
-    EXPECT_EQ(5u, o1.plain_len);
+    EXPECT_EQ(5U, o1.plain_len);
 
     auto o2 = reader.open(TlsContentType::ApplicationData, 0x0303, static_cast<std::uint16_t>(sealed2.size()), sealed2,
                           out);
     ASSERT_EQ(TlsRecordCipher::Status::Ok, o2.status);
     EXPECT_EQ(TlsContentType::ApplicationData, o2.inner_type);
-    EXPECT_EQ(300u, o2.plain_len);
+    EXPECT_EQ(300U, o2.plain_len);
     EXPECT_EQ(0, std::memcmp(out.data(), second.data(), second.size()));
 
     // A fresh reader (seq 0) cannot open the seq-1 record: nonce binding.
@@ -444,9 +445,18 @@ TEST(Tls12Prf, MasterKeyBlockVerifyDataMatchReference) {
         std::uint8_t key_len;
         std::uint8_t iv_len; // fixed-IV slice: 4 GCM / 12 ChaCha (RFC 7905 §2)
     } cases[] = {
-            {TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsHashAlgorithm::Sha256, 16, 4},
-            {TlsCipherSuiteId::EcdheRsaAes256GcmSha384, TlsHashAlgorithm::Sha384, 32, 4},
-            {TlsCipherSuiteId::EcdheRsaChacha20Poly1305, TlsHashAlgorithm::Sha256, 32, 12},
+            {.suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256,
+             .hash = TlsHashAlgorithm::Sha256,
+             .key_len = 16,
+             .iv_len = 4},
+            {.suite = TlsCipherSuiteId::EcdheRsaAes256GcmSha384,
+             .hash = TlsHashAlgorithm::Sha384,
+             .key_len = 32,
+             .iv_len = 4},
+            {.suite = TlsCipherSuiteId::EcdheRsaChacha20Poly1305,
+             .hash = TlsHashAlgorithm::Sha256,
+             .key_len = 32,
+             .iv_len = 12},
     };
     for (const auto &c: cases) {
         const auto z = ramp(32, 0x60);
@@ -456,10 +466,10 @@ TEST(Tls12Prf, MasterKeyBlockVerifyDataMatchReference) {
 
         auto master = tls12_master_secret(c.suite, z, cr, sr);
         ASSERT_TRUE(master.has_value());
-        EXPECT_EQ(48u, master->len());
+        EXPECT_EQ(48U, master->len());
         expect_eq_bytes(master->bytes(), ref_p_hash(c.hash, z, label_seed("master secret", concat({cr, sr})), 48));
 
-        const std::size_t block_len = 2 * c.key_len + 2 * c.iv_len;
+        const std::size_t block_len = (2 * c.key_len) + (2 * c.iv_len);
         const auto ref_block =
                 ref_p_hash(c.hash, master->bytes(), label_seed("key expansion", concat({sr, cr})), block_len);
         auto keys = tls12_key_block(c.suite, *master, cr, sr);
@@ -468,12 +478,14 @@ TEST(Tls12Prf, MasterKeyBlockVerifyDataMatchReference) {
         EXPECT_EQ(c.iv_len, keys->server.iv_len);
         expect_eq_bytes({keys->client.key.data(), c.key_len}, {ref_block.data(), c.key_len});
         expect_eq_bytes({keys->server.key.data(), c.key_len}, {ref_block.data() + c.key_len, c.key_len});
-        expect_eq_bytes({keys->client.iv.data(), c.iv_len}, {ref_block.data() + 2 * c.key_len, c.iv_len});
-        expect_eq_bytes({keys->server.iv.data(), c.iv_len}, {ref_block.data() + 2 * c.key_len + c.iv_len, c.iv_len});
+        expect_eq_bytes({keys->client.iv.data(), c.iv_len},
+                        {ref_block.data() + (static_cast<ptrdiff_t>(2 * c.key_len)), c.iv_len});
+        expect_eq_bytes({keys->server.iv.data(), c.iv_len},
+                        {ref_block.data() + (static_cast<ptrdiff_t>(2 * c.key_len)) + c.iv_len, c.iv_len});
 
         auto vd_c = tls12_verify_data(c.suite, *master, true, hh);
         ASSERT_TRUE(vd_c.has_value());
-        EXPECT_EQ(12u, vd_c->size());
+        EXPECT_EQ(12U, vd_c->size());
         expect_eq_bytes(*vd_c, ref_p_hash(c.hash, master->bytes(), label_seed("client finished", hh), 12));
         auto vd_s = tls12_verify_data(c.suite, *master, false, hh);
         ASSERT_TRUE(vd_s.has_value());
@@ -488,8 +500,8 @@ TEST(Tls12Prf, ExtendedMasterSecretMatchesReference) {
         TlsCipherSuiteId suite;
         TlsHashAlgorithm hash;
     } cases[] = {
-            {TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsHashAlgorithm::Sha256},
-            {TlsCipherSuiteId::EcdheRsaAes256GcmSha384, TlsHashAlgorithm::Sha384},
+            {.suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256, .hash = TlsHashAlgorithm::Sha256},
+            {.suite = TlsCipherSuiteId::EcdheRsaAes256GcmSha384, .hash = TlsHashAlgorithm::Sha384},
     };
     for (const auto &c: cases) {
         const auto z = ramp(32, 0xA0);
@@ -499,7 +511,7 @@ TEST(Tls12Prf, ExtendedMasterSecretMatchesReference) {
 
         auto ems = tls12_extended_master_secret(c.suite, z, session_hash);
         ASSERT_TRUE(ems.has_value());
-        EXPECT_EQ(48u, ems->len());
+        EXPECT_EQ(48U, ems->len());
         expect_eq_bytes(ems->bytes(), ref_p_hash(c.hash, z, label_seed("extended master secret", session_hash), 48));
 
         // A distinct construction from the classic master secret (label and
@@ -549,7 +561,7 @@ TEST(Tls12KeyBlock, DirectionalMaterialPinnedByRecordCipher) {
     auto o1 = peer_reader.open(TlsContentType::ApplicationData, 0x0303, static_cast<std::uint16_t>(sealed.size()),
                                sealed, out);
     ASSERT_EQ(TlsRecordCipher::Status::Ok, o1.status);
-    ASSERT_EQ(40u, o1.plain_len);
+    ASSERT_EQ(40U, o1.plain_len);
     EXPECT_EQ(0, std::memcmp(out.data(), plain.data(), plain.size()));
 
     auto o2 = wrong_reader.open(TlsContentType::ApplicationData, 0x0303, static_cast<std::uint16_t>(sealed.size()),
@@ -562,8 +574,9 @@ TEST(Tls12KeyBlock, DirectionalMaterialPinnedByRecordCipher) {
 // ---------------------------------------------------------------------------
 
 TEST(TlsSuiteRegistry, CoversTheNineImplementedSuites) {
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange) unregistered id is the input under test
     EXPECT_EQ(nullptr, tls_suite_info(static_cast<TlsCipherSuiteId>(0x0000)));
-    EXPECT_EQ(9u, kTlsSuiteRegistry.size());
+    EXPECT_EQ(9U, kTlsSuiteRegistry.size());
 
     const auto check = [](TlsCipherSuiteId suite, TlsAeadAlgorithm aead, TlsHashAlgorithm hash, std::uint8_t key_len,
                           bool tls13) {

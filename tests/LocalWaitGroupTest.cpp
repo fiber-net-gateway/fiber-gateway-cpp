@@ -32,7 +32,7 @@ DetachedTask done_later(LocalWaitGroup *group, std::chrono::milliseconds delay, 
     *done_flag = true;
 }
 
-DetachedTask join_then_report(LocalWaitGroup *group, bool *done_flag, std::promise<JoinObservation> *promise) {
+DetachedTask join_then_report(LocalWaitGroup *group, const bool *done_flag, std::promise<JoinObservation> *promise) {
     JoinObservation observation{};
     co_await group->join();
     observation.resumed_after_last_done = *done_flag;

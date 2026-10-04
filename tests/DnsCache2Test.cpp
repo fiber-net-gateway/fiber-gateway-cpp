@@ -17,7 +17,7 @@ using fiber::dns::DnsCacheOutKind;
 using fiber::net::IpAddress;
 using fiber::net::IpFamily;
 
-DnsCacheKey key(std::string_view name) { return {name, fiber::dns::dns_cache_hash(name)}; }
+DnsCacheKey key(std::string_view name) { return {.normalized_name = name, .hash = fiber::dns::dns_cache_hash(name)}; }
 
 } // namespace
 
@@ -89,7 +89,7 @@ TEST(DnsCache2Test, ExpiresAddressFamiliesIndependently) {
 
     ASSERT_EQ(cache.lookup(key("expiry.example"), now + std::chrono::seconds(21), out), IoErr::None);
     EXPECT_EQ(out.kind, DnsCacheOutKind::Miss);
-    EXPECT_EQ(cache.entry_count(), 0u);
+    EXPECT_EQ(cache.entry_count(), 0U);
 }
 
 TEST(DnsCache2Test, DistinguishesNoDataFromMissingFamily) {
@@ -213,7 +213,7 @@ TEST(DnsCache2Test, ExpiresNxDomainEntries) {
 
     ASSERT_EQ(cache.lookup(key("missing.example"), now + std::chrono::seconds(10), out), IoErr::None);
     EXPECT_EQ(out.kind, DnsCacheOutKind::Miss);
-    EXPECT_EQ(cache.entry_count(), 0u);
+    EXPECT_EQ(cache.entry_count(), 0U);
 }
 
 TEST(DnsCache2Test, EvictsEntryWithNearestExpirationAtEntryLimit) {
@@ -338,7 +338,7 @@ TEST(DnsCache2Test, SizesDefaultBucketsForHalfMaximumLoad) {
     options.max_bytes = 4096;
     ASSERT_TRUE(cache.init(options));
 
-    EXPECT_EQ(cache.bucket_count(), 8u);
+    EXPECT_EQ(cache.bucket_count(), 8U);
 }
 
 TEST(DnsCache2Test, RejectsOverflowInDefaultBucketSizing) {
@@ -348,8 +348,8 @@ TEST(DnsCache2Test, RejectsOverflowInDefaultBucketSizing) {
     options.max_bytes = std::numeric_limits<std::size_t>::max();
 
     EXPECT_FALSE(cache.init(options));
-    EXPECT_EQ(cache.bucket_count(), 0u);
-    EXPECT_EQ(cache.bytes_used(), 0u);
+    EXPECT_EQ(cache.bucket_count(), 0U);
+    EXPECT_EQ(cache.bytes_used(), 0U);
 }
 
 TEST(DnsCache2Test, ComparesNamesWhenHashesCollide) {
@@ -357,8 +357,8 @@ TEST(DnsCache2Test, ComparesNamesWhenHashesCollide) {
     ASSERT_TRUE(cache.init());
 
     const auto now = std::chrono::steady_clock::now();
-    const DnsCacheKey first_key{"first-collision.example", 42};
-    const DnsCacheKey second_key{"second-collision.example", 42};
+    const DnsCacheKey first_key{.normalized_name = "first-collision.example", .hash = 42};
+    const DnsCacheKey second_key{.normalized_name = "second-collision.example", .hash = 42};
     const IpAddress first = IpAddress::v4({10, 0, 0, 1});
     const IpAddress second = IpAddress::v4({10, 0, 0, 2});
     ASSERT_EQ(cache.upsert_address_set(first_key, IpFamily::V4, &first, 1, now + std::chrono::seconds(60)),
@@ -391,6 +391,7 @@ TEST(DnsCache2Test, RejectsMixedOrOversizedAddressSets) {
     EXPECT_EQ(cache.upsert_address_set(key("oversized.example"), IpFamily::V4, oversized.data(), oversized.size(),
                                        expire_at),
               IoErr::MessageTooLarge);
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange) invalid family value is the input under test
     EXPECT_EQ(
             cache.upsert_address_set(key("invalid-family.example"), static_cast<IpFamily>(255), nullptr, 0, expire_at),
             IoErr::Invalid);
@@ -409,9 +410,9 @@ TEST(DnsCache2Test, ReinitializesWithEmptyInlineExpiryHeap) {
               IoErr::None);
 
     cache.release();
-    EXPECT_EQ(cache.entry_count(), 0u);
-    EXPECT_EQ(cache.bytes_used(), 0u);
-    EXPECT_EQ(cache.bucket_count(), 0u);
+    EXPECT_EQ(cache.entry_count(), 0U);
+    EXPECT_EQ(cache.bytes_used(), 0U);
+    EXPECT_EQ(cache.bucket_count(), 0U);
 
     ASSERT_TRUE(cache.init());
     DnsCacheOut out{};
@@ -420,5 +421,5 @@ TEST(DnsCache2Test, ReinitializesWithEmptyInlineExpiryHeap) {
     ASSERT_EQ(cache.upsert_address_set(key("after-release.example"), IpFamily::V4, &address, 1,
                                        now + std::chrono::seconds(60)),
               IoErr::None);
-    EXPECT_EQ(cache.entry_count(), 1u);
+    EXPECT_EQ(cache.entry_count(), 1U);
 }

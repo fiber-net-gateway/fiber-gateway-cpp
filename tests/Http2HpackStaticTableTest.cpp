@@ -31,34 +31,34 @@ TEST(Http2HpackStaticTableTest, FindNameReturnsSmallestMatchingIndex) {
     std::uint32_t index = 0;
 
     ASSERT_TRUE(Http2HpackStaticTable::find_name(":Method", index));
-    EXPECT_EQ(index, 2u);
+    EXPECT_EQ(index, 2U);
 
     const std::uint64_t name_hash = fiber::http::http_header_name_hash("Content-Type");
     ASSERT_TRUE(Http2HpackStaticTable::find_name("Content-Type", name_hash, index));
-    EXPECT_EQ(index, 31u);
+    EXPECT_EQ(index, 31U);
 
     EXPECT_FALSE(Http2HpackStaticTable::find_name("x-not-found", index));
 }
 
 TEST(Http2HpackStaticTableTest, FindReturnsExactAndNameMatches) {
     const auto exact = Http2HpackStaticTable::find(":status", fiber::http::http_header_name_hash(":status"), "200");
-    EXPECT_EQ(exact.exact_index, 8u);
-    EXPECT_EQ(exact.name_index, 8u);
+    EXPECT_EQ(exact.exact_index, 8U);
+    EXPECT_EQ(exact.name_index, 8U);
 
     const auto name_only = Http2HpackStaticTable::find(
             "content-type", fiber::http::http_header_name_hash("content-type"), "text/plain");
-    EXPECT_EQ(name_only.exact_index, 0u);
-    EXPECT_EQ(name_only.name_index, 31u);
+    EXPECT_EQ(name_only.exact_index, 0U);
+    EXPECT_EQ(name_only.name_index, 31U);
 
     const auto mixed_case = Http2HpackStaticTable::find(
             "Content-Type", fiber::http::http_header_name_hash("Content-Type"), "text/plain");
-    EXPECT_EQ(mixed_case.exact_index, 0u);
-    EXPECT_EQ(mixed_case.name_index, 31u);
+    EXPECT_EQ(mixed_case.exact_index, 0U);
+    EXPECT_EQ(mixed_case.name_index, 31U);
 
     const auto missing = Http2HpackStaticTable::find("x-powered-by", fiber::http::http_header_name_hash("x-powered-by"),
                                                      "openresty");
-    EXPECT_EQ(missing.exact_index, 0u);
-    EXPECT_EQ(missing.name_index, 0u);
+    EXPECT_EQ(missing.exact_index, 0U);
+    EXPECT_EQ(missing.name_index, 0U);
 }
 
 TEST(Http2HpackStaticTableTest, FindResolvesEveryStaticEntry) {

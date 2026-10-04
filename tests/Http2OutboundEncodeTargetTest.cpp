@@ -94,7 +94,7 @@ TEST(Http2OutboundEncodeTargetTest, FreshBufferTakesCapacityHintAndJoinsOnCommit
         ASSERT_EQ(target.acquire(3, 256, dst, room), IoErr::None);
         EXPECT_GE(room, 256U);
         EXPECT_TRUE(chain.empty());
-        std::memcpy(dst, "abc", 3);
+        std::memcpy(dst, "abc", 3); // NOLINT(bugprone-not-null-terminated-result) raw binary region, not a C string
         target.commit(3);
         ASSERT_EQ(chain.size(), 1U);
 

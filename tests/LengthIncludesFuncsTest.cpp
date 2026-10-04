@@ -65,17 +65,17 @@ TEST(LengthFuncTest, ScalarAndNullLengthIsZero) {
 // ---- includes ----
 
 TEST(IncludesFuncTest, TextSubstring) {
-    expect_script_bool("return includes(\"abcabc\", \"cab\");", true);
-    expect_script_bool("return includes(\"abc\", \"d\");", false);
+    expect_script_bool(R"(return includes("abcabc", "cab");)", true);
+    expect_script_bool(R"(return includes("abc", "d");)", false);
     expect_script_bool("return includes(\"abc\");", true); // no items -> vacuously true
 }
 
 TEST(IncludesFuncTest, TextItemMustBeString) { expect_script_bool("return includes(\"abc\", 1);", false); }
 
 TEST(IncludesFuncTest, ArrayMembershipStrictEqual) {
-    expect_script_bool("return includes([\"aa\", \"bb\", \"cc\"], \"aa\");", true);
+    expect_script_bool(R"(return includes(["aa", "bb", "cc"], "aa");)", true);
     expect_script_bool("return includes([\"a\", 1], 1);", true);
-    expect_script_bool("return includes([\"aa\", \"bb\"], \"a\");", false); // substring != element
+    expect_script_bool(R"(return includes(["aa", "bb"], "a");)", false); // substring != element
     expect_script_bool("return includes([1, 2], 3);", false);
 }
 

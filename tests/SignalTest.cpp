@@ -8,8 +8,8 @@
 #include <initializer_list>
 #include <thread>
 
+#include <csignal>
 #include <pthread.h>
-#include <signal.h>
 #include <unistd.h>
 
 #include <fiber/async/CoroutinePromiseBase.h>

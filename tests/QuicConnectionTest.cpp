@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -117,7 +118,7 @@ struct KeepaliveTimerSnapshot {
 
 std::size_t count_pending_frame_type(const fiber::quic::QuicConnection &conn, fiber::quic::QuicFrameType type);
 
-void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+void destroy_test_stream(void * /*unused*/, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
 fiber::quic::QuicStream::Lease make_test_stream() noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
@@ -171,7 +172,7 @@ void destroy_poisoned_stream(void *owner, fiber::quic::QuicStream &stream) noexc
     ++static_cast<PoisonedStreamFactory *>(owner)->destroyed;
 }
 
-fiber::quic::QuicStream::Lease create_poisoned_stream(void *owner, std::uint64_t) noexcept {
+fiber::quic::QuicStream::Lease create_poisoned_stream(void *owner, std::uint64_t /*unused*/) noexcept {
     auto *factory = static_cast<PoisonedStreamFactory *>(owner);
     if (factory->created != factory->destroyed) {
         return {}; // the storage still holds a live stream
@@ -183,7 +184,7 @@ fiber::quic::QuicStream::Lease create_poisoned_stream(void *owner, std::uint64_t
 
 // Rejects every peer stream the moment it attaches, as an HTTP/3 server
 // does while draining (H3_REQUEST_REJECTED).
-void reject_peer_stream(void *, fiber::quic::QuicStream &stream) noexcept { stream.close(0x010b); }
+void reject_peer_stream(void * /*unused*/, fiber::quic::QuicStream &stream) noexcept { stream.close(0x010b); }
 
 fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackState &state) noexcept {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
@@ -254,9 +255,7 @@ struct OpsObserver {
 void observe_state_change(void *owner, fiber::quic::QuicConnection &conn) noexcept {
     auto *observer = static_cast<OpsObserver *>(owner);
     ++observer->state_depth;
-    if (observer->state_depth > observer->max_state_depth) {
-        observer->max_state_depth = observer->state_depth;
-    }
+    observer->max_state_depth = std::max(observer->state_depth, observer->max_state_depth);
     observer->states.push_back(conn.state());
     if (observer->shutdown_on_established && conn.state() == fiber::quic::QuicConnectionState::Established) {
         observer->shutdown_on_established = false;
@@ -268,9 +267,7 @@ void observe_state_change(void *owner, fiber::quic::QuicConnection &conn) noexce
 void observe_capacity_change(void *owner, fiber::quic::QuicConnection &conn) noexcept {
     auto *observer = static_cast<OpsObserver *>(owner);
     ++observer->capacity_depth;
-    if (observer->capacity_depth > observer->max_capacity_depth) {
-        observer->max_capacity_depth = observer->capacity_depth;
-    }
+    observer->max_capacity_depth = std::max(observer->capacity_depth, observer->max_capacity_depth);
     ++observer->capacity_calls;
     observer->last_bidi_slots = conn.available_local_stream_slots(fiber::quic::QuicStreamType::Bidirectional);
     if (observer->shutdown_on_capacity) {
@@ -283,7 +280,9 @@ void observe_capacity_change(void *owner, fiber::quic::QuicConnection &conn) noe
 
 // Peer-stream factory that ignores the owner, so a connection can point its
 // owner at an OpsObserver and still accept peer streams.
-fiber::quic::QuicStream::Lease create_stream_plain(void *, std::uint64_t) noexcept { return make_test_stream(); }
+fiber::quic::QuicStream::Lease create_stream_plain(void * /*unused*/, std::uint64_t /*unused*/) noexcept {
+    return make_test_stream();
+}
 
 fiber::quic::QuicConnection::Options observed_options(OpsObserver &observer) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
@@ -515,6 +514,7 @@ TEST(QuicConnectionTest, TryAttachLocalStreamAssignsClientBidirectionalStream) {
         auto attached = conn.try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Bidirectional);
 
         ASSERT_TRUE(attached.has_value()) << static_cast<int>(attached.error());
+        // NOLINTNEXTLINE(bugprone-use-after-move) moved-from inspection is the test subject
         EXPECT_FALSE(stream);
         EXPECT_EQ((*attached)->stream_id(), 0U);
         EXPECT_TRUE((*attached)->stream_id_assigned());
@@ -535,8 +535,10 @@ TEST(QuicConnectionTest, TryAttachLocalStreamReturnsBusyBeforeEstablished) {
 
         ASSERT_FALSE(attached.has_value());
         EXPECT_EQ(attached.error(), fiber::common::IoErr::Busy);
+        // NOLINTBEGIN(bugprone-use-after-move) moved-from inspection is the test subject
         ASSERT_TRUE(stream);
         EXPECT_FALSE(stream->stream_id_assigned());
+        // NOLINTEND(bugprone-use-after-move)
         EXPECT_EQ(conn.active_stream_count(), 0U);
     });
 }
@@ -593,8 +595,10 @@ TEST(QuicConnectionTest, TryAttachLocalStreamQueuesStreamsBlockedAtLimit) {
 
         ASSERT_FALSE(attached.has_value());
         EXPECT_EQ(attached.error(), fiber::common::IoErr::Busy);
+        // NOLINTBEGIN(bugprone-use-after-move) moved-from inspection is the test subject
         ASSERT_TRUE(stream);
         EXPECT_FALSE(stream->stream_id_assigned());
+        // NOLINTEND(bugprone-use-after-move)
         EXPECT_EQ(conn.active_stream_count(), 0U);
         EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 0), 1U);
     });
@@ -695,12 +699,12 @@ TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
         auto written = (*stream)->try_write(iobuf_of("abc"));
 
         ASSERT_TRUE(written.has_value());
-        EXPECT_EQ(*written, 3u);
+        EXPECT_EQ(*written, 3U);
         auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
         ASSERT_FALSE(space.pending_frames.empty());
         ASSERT_NE(space.pending_frames.front(), nullptr);
         EXPECT_EQ(space.pending_frames.front()->type, fiber::quic::QuicFrameType::Stream);
-        EXPECT_EQ(space.pending_frames.front()->u.stream.stream_id, 0u);
+        EXPECT_EQ(space.pending_frames.front()->u.stream.stream_id, 0U);
     });
 }
 
@@ -1775,7 +1779,7 @@ TEST(QuicConnectionTest, ClientVersionNegotiationWithoutV1FailsConnect) {
         packet.type = fiber::quic::QuicPacketType::VersionNegotiation;
         packet.dcid = options.local_connection_id;
         packet.scid = options.original_destination_connection_id;
-        packet.version_list = {versions, sizeof(versions)};
+        packet.version_list = {.data = versions, .len = sizeof(versions)};
 
         EXPECT_TRUE(conn.handle_version_negotiation(packet));
         EXPECT_EQ(conn.connect_failure(), fiber::common::IoErr::NotSupported);
@@ -1797,7 +1801,7 @@ TEST(QuicConnectionTest, ClientIgnoresVersionNegotiationContainingV1) {
         packet.type = fiber::quic::QuicPacketType::VersionNegotiation;
         packet.dcid = options.local_connection_id;
         packet.scid = options.original_destination_connection_id;
-        packet.version_list = {versions, sizeof(versions)};
+        packet.version_list = {.data = versions, .len = sizeof(versions)};
 
         EXPECT_FALSE(conn.handle_version_negotiation(packet));
         EXPECT_EQ(conn.connect_failure(), fiber::common::IoErr::None);
@@ -1912,7 +1916,7 @@ TEST(QuicConnectionTest, RetainedStorageUsesConnectionAndParentBudgets) {
         frame.has_offset = true;
         frame.length = 1;
 
-        auto received = conn.recv_stream_frame(frame, trackable_slice_of("x", 64 * 1024));
+        auto received = conn.recv_stream_frame(frame, trackable_slice_of("x", static_cast<std::size_t>(64 * 1024)));
 
         ASSERT_TRUE(received.has_value());
         EXPECT_EQ(conn.retained_recv_storage_capacity(), 1U);
@@ -1939,7 +1943,7 @@ TEST(QuicConnectionTest, RetainedStoragePressureDoesNotBecomeFlowControlError) {
         frame.has_offset = true;
         frame.length = 1;
 
-        auto received = conn.recv_stream_frame(frame, trackable_slice_of("x", 64 * 1024));
+        auto received = conn.recv_stream_frame(frame, trackable_slice_of("x", static_cast<std::size_t>(64 * 1024)));
 
         ASSERT_FALSE(received.has_value());
         EXPECT_EQ(received.error(), fiber::common::IoErr::NoMem);

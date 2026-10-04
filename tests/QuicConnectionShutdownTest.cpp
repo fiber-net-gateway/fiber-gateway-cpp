@@ -31,7 +31,7 @@ fiber::mem::IoBuf slice_of(std::string_view value) {
 
 struct ShutdownCallbackState {};
 
-void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+void destroy_test_stream(void * /*unused*/, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
 fiber::quic::QuicStream::Lease create_stream(void * /*owner*/, std::uint64_t /*stream_id*/) noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
@@ -418,7 +418,8 @@ fiber::async::DetachedTask run_graceful_close_completion(fiber::quic::QuicConnec
     // Closing transition must be deferred (audit #3): state stays GracefulClosing
     // and the close timer is armed for "now".
     stream->close();
-    before_pump->set_value(DeferredCloseSnapshot{conn->state(), conn->close_timer_armed()});
+    before_pump->set_value(
+            DeferredCloseSnapshot{.state = conn->state(), .close_timer_armed = conn->close_timer_armed()});
     // Pump the loop so the deferred on_close_timer fires enter_closing().
     co_await fiber::async::sleep(std::chrono::milliseconds(2));
     after_pump->set_value(conn->state());
@@ -641,11 +642,11 @@ TEST(QuicConnectionShutdownTest, ConnectionCloseDoesNotQueueStreamControlFrames)
 // general 0x0100 | alert encoding already covers.
 TEST(QuicConnectionShutdownTest, CryptoErrorCodeMapsAlertToTransportError) {
     ::fiber::test::run_in_quic_loop([&](::fiber::mem::IoBufNodePool &) {
-        EXPECT_EQ(fiber::quic::quic_crypto_error_code(0), 0x0100u);
-        EXPECT_EQ(fiber::quic::quic_crypto_error_code(40), 0x0128u); // handshake_failure
-        EXPECT_EQ(fiber::quic::quic_crypto_error_code(109), 0x016Du); // missing_extension
-        EXPECT_EQ(fiber::quic::quic_crypto_error_code(120), 0x0178u); // no_application_protocol
-        EXPECT_EQ(fiber::quic::quic_crypto_error_code(255), 0x01FFu);
+        EXPECT_EQ(fiber::quic::quic_crypto_error_code(0), 0x0100U);
+        EXPECT_EQ(fiber::quic::quic_crypto_error_code(40), 0x0128U); // handshake_failure
+        EXPECT_EQ(fiber::quic::quic_crypto_error_code(109), 0x016DU); // missing_extension
+        EXPECT_EQ(fiber::quic::quic_crypto_error_code(120), 0x0178U); // no_application_protocol
+        EXPECT_EQ(fiber::quic::quic_crypto_error_code(255), 0x01FFU);
     });
 }
 
@@ -690,13 +691,13 @@ TEST(QuicConnectionShutdownTest, TlsAlertCloseStagesCryptoErrorAndSchedulesSend)
     group.join();
 
     EXPECT_TRUE(conn.terminal_closing());
-    EXPECT_EQ(static_cast<std::uint64_t>(conn.close_error()), 0x0100u | 120u);
+    EXPECT_EQ(static_cast<std::uint64_t>(conn.close_error()), 0x0100U | 120U);
 
     const auto *cc = find_pending_frame_of_type(conn, fiber::quic::QuicEncryptionLevel::Application,
                                                 fiber::quic::QuicFrameType::ConnectionClose);
     ASSERT_NE(cc, nullptr);
-    EXPECT_EQ(cc->u.close.error_code, 0x0100u | 120u);
-    EXPECT_EQ(cc->u.close.frame_type, 0u);
+    EXPECT_EQ(cc->u.close.error_code, 0x0100U | 120U);
+    EXPECT_EQ(cc->u.close.frame_type, 0U);
 
     EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicEncryptionLevel::Application,
                                        fiber::quic::QuicFrameType::ConnectionClose),
@@ -933,7 +934,7 @@ void store_peer_token(fiber::quic::QuicConnection &conn, std::uint64_t sequence,
 // accepts it as a 1-RTT short header; the body is garbage so decryption fails.
 void fill_reset_datagram(std::array<std::uint8_t, 48> &out, const std::uint8_t *tail_token) {
     out.fill(0x11);
-    out[0] = static_cast<std::uint8_t>(fiber::quic::kPacketFlagFixed) | 0x03u; // short header, pn_len field = 4
+    out[0] = static_cast<std::uint8_t>(fiber::quic::kPacketFlagFixed) | 0x03U; // short header, pn_len field = 4
     for (std::size_t i = 1; i <= 8; ++i) {
         out[i] = static_cast<std::uint8_t>(0x30U + i); // 8-byte DCID (value unused on the decrypt-failure path)
     }

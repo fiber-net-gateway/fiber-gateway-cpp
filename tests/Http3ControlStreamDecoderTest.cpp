@@ -48,7 +48,7 @@ std::vector<std::uint8_t> settings_payload(std::uint64_t blocked_streams) {
 } // namespace
 
 TEST(Http3ControlStreamDecoderTest, ParsesInitialSettings) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> bytes;
         append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings), settings_payload(8));
 
@@ -65,7 +65,7 @@ TEST(Http3ControlStreamDecoderTest, ParsesInitialSettings) {
 }
 
 TEST(Http3ControlStreamDecoderTest, RejectsMissingInitialSettings) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> bytes;
         append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Data));
 
@@ -81,7 +81,7 @@ TEST(Http3ControlStreamDecoderTest, RejectsMissingInitialSettings) {
 }
 
 TEST(Http3ControlStreamDecoderTest, RejectsDuplicateSettingsFrame) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> bytes;
         append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
         append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
@@ -99,7 +99,7 @@ TEST(Http3ControlStreamDecoderTest, RejectsDuplicateSettingsFrame) {
 }
 
 TEST(Http3ControlStreamDecoderTest, DrainsUnknownFrameAfterSettings) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> bytes;
         append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
         append_frame(bytes, 0x21, {1, 2, 3});
@@ -117,7 +117,7 @@ TEST(Http3ControlStreamDecoderTest, DrainsUnknownFrameAfterSettings) {
 }
 
 TEST(Http3ControlStreamDecoderTest, ParsesGoawayAndMaxPushId) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> bytes;
         append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
         std::vector<std::uint8_t> goaway_payload;
@@ -144,7 +144,7 @@ TEST(Http3ControlStreamDecoderTest, ParsesGoawayAndMaxPushId) {
 }
 
 TEST(Http3ControlStreamDecoderTest, RejectsMalformedGoawayPayload) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> bytes;
         append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
         append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Goaway), {0x00, 0x00});

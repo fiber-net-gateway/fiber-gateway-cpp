@@ -149,7 +149,7 @@ std::vector<std::uint8_t> extract_opcodes(const fiber::script::ir::Compiled &com
 }
 
 std::size_t operand_at(const fiber::script::ir::Compiled &compiled, std::size_t index) {
-    return static_cast<std::size_t>(static_cast<std::uint32_t>(compiled.codes()[index]) >> 8u);
+    return static_cast<std::size_t>(static_cast<std::uint32_t>(compiled.codes()[index]) >> 8U);
 }
 
 std::unique_ptr<fiber::script::ast::Expression> binary_chain(std::size_t depth) {
@@ -168,7 +168,7 @@ std::unique_ptr<fiber::script::ast::Expression> binary_chain(std::size_t depth) 
 TEST(ScriptCompilerTest, EmitsArithmeticExpressionStatement) {
     auto compiled = compile_script("1 + 2;");
     auto ops = extract_opcodes(compiled);
-    ASSERT_GE(ops.size(), 5u);
+    ASSERT_GE(ops.size(), 5U);
 
     EXPECT_EQ(ops[0], fiber::script::ir::Code::LOAD_CONST);
     EXPECT_EQ(ops[1], fiber::script::ir::Code::LOAD_CONST);
@@ -182,7 +182,7 @@ TEST(ScriptCompilerTest, EmitsArithmeticExpressionStatement) {
 TEST(ScriptCompilerTest, EmitsShortCircuitAnd) {
     auto compiled = compile_script("1 && 2;");
     auto ops = extract_opcodes(compiled);
-    ASSERT_GE(ops.size(), 7u);
+    ASSERT_GE(ops.size(), 7U);
 
     EXPECT_EQ(ops[0], fiber::script::ir::Code::LOAD_CONST);
     EXPECT_EQ(ops[1], fiber::script::ir::Code::DUMP);
@@ -197,7 +197,7 @@ TEST(ScriptCompilerTest, EmitsShortCircuitAnd) {
 TEST(ScriptCompilerTest, EmitsIfElseControlFlow) {
     auto compiled = compile_script("if (1) { return 2; } else { return 3; }");
     auto ops = extract_opcodes(compiled);
-    ASSERT_GE(ops.size(), 6u);
+    ASSERT_GE(ops.size(), 6U);
 
     std::size_t if_jump = 0;
     std::size_t else_jump = 0;
@@ -235,8 +235,8 @@ TEST(ScriptCompilerTest, EmitsForeachLoopWithBreakContinue) {
             jump_if_false = i;
         }
     }
-    ASSERT_GT(iterate_next, 0u);
-    ASSERT_GT(jump_if_false, 0u);
+    ASSERT_GT(iterate_next, 0U);
+    ASSERT_GT(jump_if_false, 0U);
 
     std::size_t loop_end = operand_at(compiled, jump_if_false);
     bool has_back_edge = false;

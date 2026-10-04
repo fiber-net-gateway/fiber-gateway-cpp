@@ -25,7 +25,7 @@ std::string make_socket_path() {
     }
     ::close(fd);
     ::unlink(pattern);
-    return std::string(pattern);
+    return {pattern};
 }
 
 DetachedTask accept_once(fiber::event::EventLoop *loop, fiber::net::UnixAddress address,

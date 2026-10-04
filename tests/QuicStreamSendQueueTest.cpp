@@ -56,13 +56,13 @@ TEST(QuicStreamSendQueueTest, FinOnlyFrameEncodesWhileBodyInflight) {
         ASSERT_TRUE(body.has_value());
         ASSERT_TRUE(body->encoded);
         ASSERT_FALSE(body->fin);
-        ASSERT_EQ(queue.ready_bytes(), 0u);
-        ASSERT_EQ(queue.inflight_bytes(), 5u);
+        ASSERT_EQ(queue.ready_bytes(), 0U);
+        ASSERT_EQ(queue.inflight_bytes(), 5U);
 
         // Terminal write: zero-length append carrying the FIN (final_size = 5).
         fiber::mem::IoBuf fin_chunk;
         ASSERT_TRUE(queue.try_append(fin_chunk, true).has_value());
-        ASSERT_EQ(queue.final_size(), 5u);
+        ASSERT_EQ(queue.final_size(), 5U);
 
         // The FIN-only frame must be encodable while the body is still inflight:
         // offsets are absolute and the peer reassembles out of order. The old
@@ -72,9 +72,9 @@ TEST(QuicStreamSendQueueTest, FinOnlyFrameEncodesWhileBodyInflight) {
         ASSERT_TRUE(fin.has_value());
         EXPECT_TRUE(fin->encoded);
         EXPECT_TRUE(fin->fin);
-        EXPECT_EQ(fin->offset, 5u);
-        EXPECT_EQ(fin->data_len, 0u);
-        EXPECT_GT(fin->encoded_len, 0u);
+        EXPECT_EQ(fin->offset, 5U);
+        EXPECT_EQ(fin->data_len, 0U);
+        EXPECT_GT(fin->encoded_len, 0U);
 
         // Loss of the FIN-only frame: mark_failed resets fin_inflight_ so it re-encodes.
         ASSERT_TRUE(fiber::quic::QuicStreamSendQueueTestAccess::mark_failed(queue, fin->offset, fin->data_len, fin->fin)
@@ -84,7 +84,7 @@ TEST(QuicStreamSendQueueTest, FinOnlyFrameEncodesWhileBodyInflight) {
         ASSERT_TRUE(retransmit.has_value());
         EXPECT_TRUE(retransmit->encoded);
         EXPECT_TRUE(retransmit->fin);
-        EXPECT_EQ(retransmit->offset, 5u);
+        EXPECT_EQ(retransmit->offset, 5U);
 
         // ACK of body and FIN clears the queue.
         ASSERT_TRUE(
@@ -93,7 +93,7 @@ TEST(QuicStreamSendQueueTest, FinOnlyFrameEncodesWhileBodyInflight) {
         ASSERT_TRUE(fiber::quic::QuicStreamSendQueueTestAccess::mark_acked(queue, retransmit->offset,
                                                                            retransmit->data_len, retransmit->fin)
                             .has_value());
-        EXPECT_EQ(queue.buffered_bytes(), 0u);
+        EXPECT_EQ(queue.buffered_bytes(), 0U);
         EXPECT_TRUE(queue.fin_acked());
         EXPECT_TRUE(queue.empty());
     });
@@ -104,7 +104,7 @@ TEST(QuicStreamSendQueueTest, AppendReturnsWouldBlockWhenBufferFull) {
         fiber::quic::QuicStreamSendQueue queue(pool, {.buffer_limit = 5});
 
         ASSERT_TRUE(queue.try_append(iobuf_of("hello")).has_value());
-        EXPECT_EQ(queue.buffer_available(), 0u);
+        EXPECT_EQ(queue.buffer_available(), 0U);
 
         auto result = queue.try_append(iobuf_of("!"));
         ASSERT_FALSE(result.has_value());
@@ -123,15 +123,15 @@ TEST(QuicStreamSendQueueTest, AckReleasesBufferedBytes) {
                 fiber::quic::QuicStreamSendQueueTestAccess::encode_stream_frame(queue, 4, out.data(), out.size());
         ASSERT_TRUE(encoded.has_value());
         ASSERT_TRUE(encoded->encoded);
-        ASSERT_EQ(encoded->data_len, 5u);
+        ASSERT_EQ(encoded->data_len, 5U);
 
         auto acked = fiber::quic::QuicStreamSendQueueTestAccess::mark_acked(queue, encoded->offset, encoded->data_len,
                                                                             encoded->fin);
         ASSERT_TRUE(acked.has_value());
 
-        EXPECT_EQ(queue.buffer_available(), 5u);
-        EXPECT_EQ(queue.inflight_bytes(), 0u);
-        EXPECT_EQ(queue.ready_bytes(), 0u);
+        EXPECT_EQ(queue.buffer_available(), 5U);
+        EXPECT_EQ(queue.inflight_bytes(), 0U);
+        EXPECT_EQ(queue.ready_bytes(), 0U);
     });
 }
 
@@ -153,11 +153,11 @@ TEST(QuicStreamSendQueueTest, ResetClearsBufferedDataAndRejectsFurtherAppend) {
 
         auto reset = queue.reset(42);
         ASSERT_TRUE(reset.has_value());
-        EXPECT_EQ(*reset, 5u);
+        EXPECT_EQ(*reset, 5U);
         EXPECT_TRUE(queue.reset_sent());
-        EXPECT_EQ(queue.final_size(), 5u);
-        EXPECT_EQ(queue.reset_error_code(), 42u);
-        EXPECT_EQ(queue.buffer_available(), 5u);
+        EXPECT_EQ(queue.final_size(), 5U);
+        EXPECT_EQ(queue.reset_error_code(), 42U);
+        EXPECT_EQ(queue.buffer_available(), 5U);
 
         auto append_after_reset = queue.try_append(iobuf_of("x"));
         ASSERT_FALSE(append_after_reset.has_value());

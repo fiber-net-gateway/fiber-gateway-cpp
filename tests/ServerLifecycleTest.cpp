@@ -76,7 +76,7 @@ public:
         }
     }
 
-    fiber::common::IoResult<void> on_start(Server &) noexcept override {
+    fiber::common::IoResult<void> on_start(Server & /*server*/) noexcept override {
         config_.trace->start_calls.fetch_add(1, std::memory_order_relaxed);
         if (config_.start_error != IoErr::None) {
             return std::unexpected(config_.start_error);
@@ -314,13 +314,13 @@ TEST(ServerLifecycleTest, WorkerSlotsFollowGroupLoops) {
     ASSERT_NE(server.add_endpoint<TestEndpoint>(TestEndpoint::Config{.trace = &second}), nullptr);
     ASSERT_TRUE(server.start().has_value());
 
-    EXPECT_EQ(server.worker_count(), 3u);
-    EXPECT_EQ(server.endpoint_count(), 2u);
+    EXPECT_EQ(server.worker_count(), 3U);
+    EXPECT_EQ(server.endpoint_count(), 2U);
     EXPECT_EQ(first.workers_created.load(), 3);
     EXPECT_EQ(second.workers_created.load(), 3);
     {
         std::lock_guard guard(first.worker_loops_mu);
-        ASSERT_EQ(first.worker_loops.size(), 3u);
+        ASSERT_EQ(first.worker_loops.size(), 3U);
         for (std::size_t i = 0; i < 3; ++i) {
             EXPECT_EQ(first.worker_loops[i], &group.at(i));
         }
@@ -345,10 +345,10 @@ TEST(ServerLifecycleTest, WithoutWorkerGroupTheOwnerLoopIsTheOnlyWorker) {
     ASSERT_NE(server.add_endpoint<TestEndpoint>(TestEndpoint::Config{.trace = &trace}), nullptr);
     ASSERT_TRUE(server.start().has_value());
 
-    EXPECT_EQ(server.worker_count(), 1u);
+    EXPECT_EQ(server.worker_count(), 1U);
     {
         std::lock_guard guard(trace.worker_loops_mu);
-        ASSERT_EQ(trace.worker_loops.size(), 1u);
+        ASSERT_EQ(trace.worker_loops.size(), 1U);
         EXPECT_EQ(trace.worker_loops[0], &group.at(0));
     }
 

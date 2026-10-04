@@ -429,7 +429,7 @@ DetachedTask gso_send_segments(fiber::event::EventLoop *loop, std::promise<GsoOu
     GsoOutcome outcome{.err = fiber::common::IoErr::None};
     constexpr std::string_view expected[3] = {"abc", "def", "ghi"};
     outcome.ordered_segments = true;
-    for (std::size_t i = 0; i < 3; ++i) {
+    for (auto i: expected) {
         std::array<char, 8> buf{};
         auto received = co_await server.recv_from(buf.data(), buf.size(), std::chrono::seconds(2));
         if (!received) {
@@ -437,8 +437,7 @@ DetachedTask gso_send_segments(fiber::event::EventLoop *loop, std::promise<GsoOu
             outcome.ordered_segments = false;
             break;
         }
-        outcome.ordered_segments =
-                outcome.ordered_segments && std::string_view(buf.data(), received->size) == expected[i];
+        outcome.ordered_segments = outcome.ordered_segments && std::string_view(buf.data(), received->size) == i;
     }
     client.close();
     server.close();
@@ -851,7 +850,7 @@ TEST(UdpSocketTest, ReadCallbackWakesOnIncomingPacket) {
     auto registered_future = registered_promise.get_future();
     auto callback_future = callback_promise.get_future();
     auto client_future = client_promise.get_future();
-    ReadCallbackContext ctx{&server, &callback_promise};
+    ReadCallbackContext ctx{.socket = &server, .done_promise = &callback_promise};
 
     fiber::async::spawn(group.at(0), [&]() { return register_udp_read_callback(&server, &ctx, &registered_promise); });
     ASSERT_EQ(registered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);

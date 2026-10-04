@@ -79,7 +79,7 @@ TEST(DnsMessageTest, EncodeQueryWithEdns) {
 
     auto encoded = fiber::dns::encode_query(options, question, buf.data(), buf.size());
     ASSERT_TRUE(encoded.has_value()) << fiber::common::io_err_name(encoded.error());
-    ASSERT_EQ(*encoded, 44u);
+    ASSERT_EQ(*encoded, 44U);
 
     EXPECT_EQ(buf[0], 0x12);
     EXPECT_EQ(buf[1], 0x34);
@@ -146,17 +146,17 @@ TEST(DnsMessageTest, ParseMessageWithCompressedOwnerNames) {
     ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
 
     EXPECT_TRUE(parsed->header.is_response());
-    EXPECT_EQ(parsed->question_count, 1u);
-    EXPECT_EQ(parsed->answer_count, 2u);
-    EXPECT_EQ(parsed->additional_count, 1u);
+    EXPECT_EQ(parsed->question_count, 1U);
+    EXPECT_EQ(parsed->answer_count, 2U);
+    EXPECT_EQ(parsed->additional_count, 1U);
     EXPECT_EQ(parsed->questions[0].name, "www.example.com");
     EXPECT_EQ(parsed->questions[0].type, static_cast<std::uint16_t>(RecordType::A));
     EXPECT_EQ(parsed->answers[0].name, "www.example.com");
     EXPECT_EQ(parsed->answers[0].type, static_cast<std::uint16_t>(RecordType::CNAME));
-    EXPECT_EQ(parsed->answers[0].ttl, 60u);
+    EXPECT_EQ(parsed->answers[0].ttl, 60U);
     EXPECT_EQ(parsed->answers[1].name, "edge.example.com");
     EXPECT_EQ(parsed->answers[1].type, static_cast<std::uint16_t>(RecordType::A));
-    ASSERT_EQ(parsed->answers[1].rdata_len, 4u);
+    ASSERT_EQ(parsed->answers[1].rdata_len, 4U);
     EXPECT_EQ(parsed->answers[1].rdata[0], 0x01);
     EXPECT_EQ(parsed->answers[1].rdata[1], 0x02);
     EXPECT_EQ(parsed->answers[1].rdata[2], 0x03);
@@ -188,9 +188,9 @@ TEST(DnsMessageTest, ScannerValidatesRecordsBeyondMaterializationCapacity) {
 
     auto scanned = parser.scan(packet.data(), packet.size());
     ASSERT_TRUE(scanned.has_value()) << fiber::common::io_err_name(scanned.error());
-    EXPECT_EQ(scanned->answers.count, 1u);
-    EXPECT_EQ(scanned->authorities.count, 13u);
-    EXPECT_EQ(scanned->additionals.count, 10u);
+    EXPECT_EQ(scanned->answers.count, 1U);
+    EXPECT_EQ(scanned->authorities.count, 13U);
+    EXPECT_EQ(scanned->additionals.count, 10U);
 
     MessageParser::RecordCursor cursor = MessageParser::cursor(scanned->answers);
     std::array<char, 256> owner_storage{};

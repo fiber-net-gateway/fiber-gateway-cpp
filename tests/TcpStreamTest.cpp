@@ -54,6 +54,7 @@ bool send_all(int fd, const char *data, size_t len) {
 bool recv_all(int fd, char *data, size_t len) {
     size_t offset = 0;
     while (offset < len) {
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test-side blocking helper
         ssize_t rc = ::recv(fd, data + offset, len - offset, 0);
         if (rc > 0) {
             offset += static_cast<size_t>(rc);

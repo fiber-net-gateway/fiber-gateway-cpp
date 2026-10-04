@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -179,7 +180,7 @@ TEST(QuicDataReassemblerTest, FrameCrossingFormerBlockBoundaryStaysInOneExtentAn
         fiber::quic::QuicDataReassembler reassembler;
         reassembler.init(pool);
 
-        constexpr std::size_t block = 4 * 1024;
+        constexpr std::size_t block = static_cast<const std::size_t>(4 * 1024);
         std::string payload(32, 'x');
         payload.replace(0, 4, "abcd");
         payload.replace(payload.size() - 4, 4, "wxyz");
@@ -362,7 +363,7 @@ TEST(QuicDataReassemblerTest, SmallSliceFromLargeBackingIsCompacted) {
                               .storage_budget = &budget,
                       });
 
-        fiber::mem::IoBuf packet = trackable_slice_of("x", 64 * 1024);
+        fiber::mem::IoBuf packet = trackable_slice_of("x", static_cast<std::size_t>(64 * 1024));
         auto inserted = reassembler.insert(4, std::move(packet));
         ASSERT_TRUE(inserted.has_value());
         EXPECT_EQ(*inserted, 1U);

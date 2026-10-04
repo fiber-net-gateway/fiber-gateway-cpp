@@ -126,9 +126,12 @@ struct DecoderRecorder {
 
     static const fiber::http::Http2HpackDecoder::Ops &ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kOps{
-                &DecoderRecorder::on_indexed_field, &DecoderRecorder::on_indexed_name,
-                &DecoderRecorder::on_name_raw,      &DecoderRecorder::on_name_huffman,
-                &DecoderRecorder::on_value_raw,     &DecoderRecorder::on_value_huffman,
+                .on_indexed_field = &DecoderRecorder::on_indexed_field,
+                .on_indexed_name = &DecoderRecorder::on_indexed_name,
+                .on_name_raw = &DecoderRecorder::on_name_raw,
+                .on_name_huffman = &DecoderRecorder::on_name_huffman,
+                .on_value_raw = &DecoderRecorder::on_value_raw,
+                .on_value_huffman = &DecoderRecorder::on_value_huffman,
         };
         return kOps;
     }

@@ -313,6 +313,7 @@ TEST(IntrusiveRbTreeTest, DestroyRootRepeatedlyPreservesTree) {
 }
 
 TEST(IntrusiveRbTreeTest, RandomInsertEraseUnlinkAndDestructionPreserveInvariants) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     TestTree tree;
     std::array<std::optional<TestNode>, 64> nodes{};
     std::array<bool, 64> expected_linked{};
@@ -345,6 +346,8 @@ TEST(IntrusiveRbTreeTest, RandomInsertEraseUnlinkAndDestructionPreserveInvariant
                         expected_linked[index] = true;
                     }
                     break;
+                default:
+                    break;
             }
         }
 
@@ -365,6 +368,7 @@ TEST(IntrusiveRbTreeTest, RandomInsertEraseUnlinkAndDestructionPreserveInvariant
             EXPECT_EQ(const_tree.next_of(*node), tree.next_of(*node));
         }
     }
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(IntrusiveRbTreeDeathTest, TreeMustOutliveLinkedNodes) {

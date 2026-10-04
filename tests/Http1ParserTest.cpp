@@ -226,6 +226,7 @@ TEST(Http1HeaderLineGeneratedParserTest, ReportsCompletePartialHeaderDoneAndInva
     EXPECT_EQ(fiber_http1_header_line_execute(&parser, header_done.data(), header_done.data() + header_done.size()),
               FIBER_HTTP1_HEADER_LINE_HEADERS_COMPLETE);
 
+    // NOLINTNEXTLINE(bugprone-string-constructor) embedded NUL is the input
     const std::string nul{"X-Test: alpha\0beta\r\n", 21};
     state = {};
     ASSERT_EQ(fiber_http1_header_line_init(&parser), 0);
@@ -282,7 +283,7 @@ TEST(Http1ParserTest, HeaderLineLlparseComputesLowercaseHashAndInvalidNameFlag) 
     constexpr std::string_view valid = "ConTent-Length: 42\r\n";
     const HeaderParseSnapshot parsed = parse_header_in_chunks(valid, 1);
     ASSERT_EQ(parsed.code, fiber::http::ParseCode::Ok);
-    ASSERT_EQ(parsed.lowcase_index, 14u);
+    ASSERT_EQ(parsed.lowcase_index, 14U);
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(parsed.lowcase_header.data()), parsed.lowcase_index),
               "content-length");
 
@@ -359,8 +360,8 @@ TEST(Http1ParserTest, HeaderLineParserResumesForMultipleLinesInOneBuffer) {
 TEST(Http1ParserTest, HeaderLineLlparseLengthLimitMatchesEveryChunkSize) {
     const std::string at_limit = "X: " + std::string(27, 'a') + "\r\n";
     const std::string over_limit = "X: " + std::string(28, 'a') + "\r\n";
-    ASSERT_EQ(at_limit.size(), 32u);
-    ASSERT_GT(over_limit.size(), 32u);
+    ASSERT_EQ(at_limit.size(), 32U);
+    ASSERT_GT(over_limit.size(), 32U);
 
     for (std::size_t chunk_size = 1; chunk_size <= over_limit.size(); ++chunk_size) {
         EXPECT_EQ(parse_header_with_limit(at_limit, chunk_size), fiber::http::ParseCode::Ok)
@@ -377,12 +378,12 @@ TEST(Http1ParserTest, ChunkedBodyParserSpansBuffersAndTrailers) {
     fiber::mem::IoBuf first = make_buf("4;foo=bar\r\nWi");
     ASSERT_TRUE(first);
     EXPECT_EQ(parser.execute(&first), fiber::http::ParseCode::Ok);
-    EXPECT_EQ(parser.remaining(), 4u);
+    EXPECT_EQ(parser.remaining(), 4U);
     EXPECT_EQ(readable_view(first), "Wi");
 
     first.consume(2);
     parser.consume(2);
-    EXPECT_EQ(parser.remaining(), 2u);
+    EXPECT_EQ(parser.remaining(), 2U);
     EXPECT_FALSE(parser.done());
 
     fiber::mem::IoBuf second = make_buf("ki\r\n");
@@ -392,20 +393,20 @@ TEST(Http1ParserTest, ChunkedBodyParserSpansBuffersAndTrailers) {
 
     second.consume(2);
     parser.consume(2);
-    EXPECT_EQ(parser.remaining(), 0u);
+    EXPECT_EQ(parser.remaining(), 0U);
     EXPECT_FALSE(parser.done());
     EXPECT_EQ(parser.execute(&second), fiber::http::ParseCode::Again);
-    EXPECT_EQ(second.readable(), 0u);
+    EXPECT_EQ(second.readable(), 0U);
 
     fiber::mem::IoBuf third = make_buf("5;ext=value\r\npedia\r\n0;done=yes\r\nX-Test: yes\r\n\r\n");
     ASSERT_TRUE(third);
     EXPECT_EQ(parser.execute(&third), fiber::http::ParseCode::Ok);
-    EXPECT_EQ(parser.remaining(), 5u);
+    EXPECT_EQ(parser.remaining(), 5U);
     EXPECT_EQ(readable_view(third), "pedia\r\n0;done=yes\r\nX-Test: yes\r\n\r\n");
 
     third.consume(5);
     parser.consume(5);
-    EXPECT_EQ(parser.remaining(), 0u);
+    EXPECT_EQ(parser.remaining(), 0U);
     EXPECT_FALSE(parser.done());
     EXPECT_EQ(parser.execute(&third), fiber::http::ParseCode::BodyDone);
     EXPECT_FALSE(parser.done());
@@ -425,26 +426,26 @@ TEST(Http1ParserTest, ChunkedBodyParserSplitSizeLineDoesNotSurfacePartialSize) {
     fiber::mem::IoBuf first = make_buf("2");
     ASSERT_TRUE(first);
     EXPECT_EQ(parser.execute(&first), fiber::http::ParseCode::Again);
-    EXPECT_EQ(first.readable(), 0u);
-    EXPECT_EQ(parser.remaining(), 0u);
+    EXPECT_EQ(first.readable(), 0U);
+    EXPECT_EQ(parser.remaining(), 0U);
 
     // The size line completes without any payload byte behind it yet.
     fiber::mem::IoBuf second = make_buf("8\r\n");
     ASSERT_TRUE(second);
     EXPECT_EQ(parser.execute(&second), fiber::http::ParseCode::Again);
-    EXPECT_EQ(second.readable(), 0u);
-    EXPECT_EQ(parser.remaining(), 0x28u);
+    EXPECT_EQ(second.readable(), 0U);
+    EXPECT_EQ(parser.remaining(), 0x28U);
 
     // Payload flows once it arrives, and the trailing framing still terminates the body.
     const std::string payload(0x28, 'x');
     fiber::mem::IoBuf third = make_buf(payload + "\r\n0\r\n\r\n");
     ASSERT_TRUE(third);
     EXPECT_EQ(parser.execute(&third), fiber::http::ParseCode::Ok);
-    EXPECT_EQ(parser.remaining(), 0x28u);
+    EXPECT_EQ(parser.remaining(), 0x28U);
 
     third.consume(payload.size());
     parser.consume(payload.size());
-    EXPECT_EQ(parser.remaining(), 0u);
+    EXPECT_EQ(parser.remaining(), 0U);
     EXPECT_EQ(parser.execute(&third), fiber::http::ParseCode::BodyDone);
 }
 
@@ -471,7 +472,7 @@ TEST(Http1ParserTest, ResponseLineParserParsesCompleteStatusLine) {
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(state.reason_start),
                                static_cast<std::size_t>(state.reason_end - state.reason_start)),
               "OK");
-    EXPECT_EQ(buf.readable(), 0u);
+    EXPECT_EQ(buf.readable(), 0U);
 }
 
 TEST(Http1ParserTest, ResponseLineParserSpansBuffersAndSupportsReplace) {
@@ -497,7 +498,7 @@ TEST(Http1ParserTest, ResponseLineParserSpansBuffersAndSupportsReplace) {
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(state.reason_start),
                                static_cast<std::size_t>(state.reason_end - state.reason_start)),
               "Not Found");
-    EXPECT_EQ(grown.readable(), 0u);
+    EXPECT_EQ(grown.readable(), 0U);
 }
 
 TEST(Http1ParserTest, ResponseLineParserReplaceDuringReasonParsing) {
@@ -531,7 +532,7 @@ TEST(Http1ParserTest, ResponseLineParserReplaceDuringReasonParsing) {
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(state.reason_start),
                                static_cast<std::size_t>(state.reason_end - state.reason_start)),
               "Not Found Yet");
-    EXPECT_EQ(grown.readable(), 0u);
+    EXPECT_EQ(grown.readable(), 0U);
 }
 
 TEST(Http1ParserTest, ResponseLineParserAcceptsIisStyleStatusExtension) {
@@ -573,15 +574,15 @@ TEST(Http1ParserTest, BodyParserTracksContentLength) {
 
     EXPECT_EQ(parser.type(), fiber::http::BodyParser::Type::ContentLength);
     EXPECT_FALSE(parser.done());
-    EXPECT_EQ(parser.remaining(), 5u);
+    EXPECT_EQ(parser.remaining(), 5U);
     EXPECT_EQ(parser.execute(nullptr), fiber::http::ParseCode::Ok);
 
     parser.consume(3);
     EXPECT_FALSE(parser.done());
-    EXPECT_EQ(parser.remaining(), 2u);
+    EXPECT_EQ(parser.remaining(), 2U);
 
     parser.consume(2);
     EXPECT_TRUE(parser.done());
-    EXPECT_EQ(parser.remaining(), 0u);
+    EXPECT_EQ(parser.remaining(), 0U);
     EXPECT_EQ(parser.execute(nullptr), fiber::http::ParseCode::Done);
 }

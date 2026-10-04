@@ -28,7 +28,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -73,7 +73,7 @@ TEST(ObjectsFuncsTest, AssignReturnsTarget) {
 TEST(ObjectsFuncsTest, AssignSkipsNonObjectSources) {
     // Only the {b: 2} source contributes; integer, string, and null sources are skipped.
     expect_script_string(
-            "let t = {a: 1}; Object.assign(t, 123, \"x\", {b: 2}, null); return array.join(Object.keys(t), \",\");",
+            R"(let t = {a: 1}; Object.assign(t, 123, "x", {b: 2}, null); return array.join(Object.keys(t), ",");)",
             "a,b");
 }
 
@@ -92,12 +92,12 @@ TEST(ObjectsFuncsTest, ValuesIndexableAndSum) {
 }
 
 TEST(ObjectsFuncsTest, ValuesPreserveScalarTextForm) {
-    expect_script_string("return array.join(Object.values({a: true, b: \"x\"}), \",\");", "true,x");
+    expect_script_string(R"(return array.join(Object.values({a: true, b: "x"}), ",");)", "true,x");
 }
 
 TEST(ObjectsFuncsTest, DeletePropertiesRemovesKey) {
     expect_script_string(
-            "let t = {a: 1, b: 2, c: 3}; Object.deleteProperties(t, \"b\"); return array.join(Object.keys(t), \",\");",
+            R"(let t = {a: 1, b: 2, c: 3}; Object.deleteProperties(t, "b"); return array.join(Object.keys(t), ",");)",
             "a,c");
 }
 
@@ -110,13 +110,13 @@ TEST(ObjectsFuncsTest, DeletePropertiesVariadic) {
 TEST(ObjectsFuncsTest, DeletePropertiesSkipsNonStringKeys) {
     // 123 is not textual -> skipped; "a" is removed.
     expect_script_string(
-            "let t = {a: 1, b: 2}; Object.deleteProperties(t, 123, \"a\"); return array.join(Object.keys(t), \",\");",
+            R"(let t = {a: 1, b: 2}; Object.deleteProperties(t, 123, "a"); return array.join(Object.keys(t), ",");)",
             "b");
 }
 
 TEST(ObjectsFuncsTest, DeletePropertiesMissingKeyIsNoOp) {
     expect_script_string(
-            "let t = {a: 1, b: 2}; Object.deleteProperties(t, \"zzz\"); return array.join(Object.keys(t), \",\");",
+            R"(let t = {a: 1, b: 2}; Object.deleteProperties(t, "zzz"); return array.join(Object.keys(t), ",");)",
             "a,b");
 }
 
@@ -127,12 +127,11 @@ TEST(ObjectsFuncsTest, DeletePropertiesReturnsTarget) {
 }
 
 TEST(ObjectsFuncsTest, NonObjectTargetRaisesCatchableTypeError) {
-    expect_script_string("try { Object.assign(123, {a: 1}); return \"no-throw\"; } catch (e) { return \"caught\"; }",
+    expect_script_string(R"(try { Object.assign(123, {a: 1}); return "no-throw"; } catch (e) { return "caught"; })",
                          "caught");
-    expect_script_string("try { Object.keys(123); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_script_string("try { Object.values(\"x\"); return \"no-throw\"; } catch (e) { return \"caught\"; }",
-                         "caught");
+    expect_script_string(R"(try { Object.keys(123); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_script_string(R"(try { Object.values("x"); return "no-throw"; } catch (e) { return "caught"; })", "caught");
     expect_script_string(
-            "try { Object.deleteProperties(null, \"a\"); return \"no-throw\"; } catch (e) { return \"caught\"; }",
+            R"(try { Object.deleteProperties(null, "a"); return "no-throw"; } catch (e) { return "caught"; })",
             "caught");
 }

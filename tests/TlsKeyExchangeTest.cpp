@@ -53,8 +53,8 @@ TEST(TlsKeyExchange, X25519AgreesBothWays) {
     ASSERT_NE(nullptr, b.get());
     ASSERT_TRUE(a->generate().has_value());
     ASSERT_TRUE(b->generate().has_value());
-    EXPECT_EQ(32u, a->public_value().len);
-    EXPECT_EQ(32u, b->public_value().len);
+    EXPECT_EQ(32U, a->public_value().len);
+    EXPECT_EQ(32U, b->public_value().len);
 
     const TlsKxShared za = a->decap(b->public_value().bytes());
     const TlsKxShared zb = b->decap(a->public_value().bytes());
@@ -105,9 +105,9 @@ TEST(TlsKeyExchange, P256AgreesBothWays) {
     ASSERT_NE(nullptr, b.get());
     ASSERT_TRUE(a->generate().has_value());
     ASSERT_TRUE(b->generate().has_value());
-    EXPECT_EQ(65u, a->public_value().len);
+    EXPECT_EQ(65U, a->public_value().len);
     EXPECT_EQ(0x04, a->public_value().buf[0]); // uncompressed marker
-    EXPECT_EQ(65u, b->public_value().len);
+    EXPECT_EQ(65U, b->public_value().len);
 
     const TlsKxShared za = a->decap(b->public_value().bytes());
     const TlsKxShared zb = b->decap(a->public_value().bytes());
@@ -131,7 +131,7 @@ TEST(TlsKeyExchange, P256InteropWithBoringSSLDerive) {
     const EC_KEY *peer_ec = EVP_PKEY_get0_EC_KEY(peer);
     ASSERT_NE(nullptr, peer_ec);
     std::vector<std::uint8_t> peer_pub(65);
-    ASSERT_EQ(65u, EC_POINT_point2oct(EC_KEY_get0_group(peer_ec), EC_KEY_get0_public_key(peer_ec),
+    ASSERT_EQ(65U, EC_POINT_point2oct(EC_KEY_get0_group(peer_ec), EC_KEY_get0_public_key(peer_ec),
                                       POINT_CONVERSION_UNCOMPRESSED, peer_pub.data(), 65, nullptr));
 
     auto ours = make_kx(TlsNamedGroup::Secp256r1);
@@ -142,7 +142,7 @@ TEST(TlsKeyExchange, P256InteropWithBoringSSLDerive) {
 
     // BoringSSL derives with our public key.
     const auto our_pub = ours->public_value().bytes();
-    ASSERT_EQ(65u, our_pub.size());
+    ASSERT_EQ(65U, our_pub.size());
     EVP_PKEY_CTX *derive = EVP_PKEY_CTX_new(peer, nullptr);
     ASSERT_NE(nullptr, derive);
     ASSERT_EQ(1, EVP_PKEY_derive_init(derive));
@@ -166,7 +166,7 @@ TEST(TlsKeyExchange, P256InteropWithBoringSSLDerive) {
     EVP_PKEY_free(our_pkey);
     EVP_PKEY_free(peer);
 
-    ASSERT_EQ(32u, z2_len);
+    ASSERT_EQ(32U, z2_len);
     EXPECT_EQ(0, std::memcmp(z1.z.data(), z2, 32));
 }
 
@@ -199,15 +199,15 @@ TEST(TlsKeyExchange, P384AgreesBothWays) {
     EXPECT_EQ(TlsNamedGroup::Secp384r1, a->group());
     ASSERT_TRUE(a->generate().has_value());
     ASSERT_TRUE(b->generate().has_value());
-    EXPECT_EQ(97u, a->public_value().len);
+    EXPECT_EQ(97U, a->public_value().len);
     EXPECT_EQ(0x04, a->public_value().buf[0]);
 
     const TlsKxShared za = a->decap(b->public_value().bytes());
     const TlsKxShared zb = b->decap(a->public_value().bytes());
     ASSERT_EQ(TlsKxStatus::Ok, za.status);
     ASSERT_EQ(TlsKxStatus::Ok, zb.status);
-    EXPECT_EQ(48u, za.len);
-    EXPECT_EQ(48u, za.bytes().size());
+    EXPECT_EQ(48U, za.len);
+    EXPECT_EQ(48U, za.bytes().size());
     EXPECT_EQ(0, std::memcmp(za.z.data(), zb.z.data(), 48));
 }
 
@@ -217,7 +217,7 @@ TEST(TlsKeyExchange, P384InteropWithBoringSSLDerive) {
     ASSERT_NE(nullptr, peer_ec);
     ASSERT_EQ(1, EC_KEY_generate_key(peer_ec));
     std::vector<std::uint8_t> peer_pub(97);
-    ASSERT_EQ(97u, EC_POINT_point2oct(EC_KEY_get0_group(peer_ec), EC_KEY_get0_public_key(peer_ec),
+    ASSERT_EQ(97U, EC_POINT_point2oct(EC_KEY_get0_group(peer_ec), EC_KEY_get0_public_key(peer_ec),
                                       POINT_CONVERSION_UNCOMPRESSED, peer_pub.data(), 97, nullptr));
 
     auto ours = make_kx(TlsNamedGroup::Secp384r1);
@@ -227,7 +227,7 @@ TEST(TlsKeyExchange, P384InteropWithBoringSSLDerive) {
     ASSERT_EQ(TlsKxStatus::Ok, z1.status);
 
     const auto our_pub = ours->public_value().bytes();
-    ASSERT_EQ(97u, our_pub.size());
+    ASSERT_EQ(97U, our_pub.size());
     EC_POINT *our_point = EC_POINT_new(EC_KEY_get0_group(peer_ec));
     ASSERT_NE(nullptr, our_point);
     ASSERT_EQ(1, EC_POINT_oct2point(EC_KEY_get0_group(peer_ec), our_point, our_pub.data(), 97, nullptr));
@@ -236,7 +236,7 @@ TEST(TlsKeyExchange, P384InteropWithBoringSSLDerive) {
     EC_POINT_free(our_point);
     EC_KEY_free(peer_ec);
 
-    ASSERT_EQ(48u, z1.len);
+    ASSERT_EQ(48U, z1.len);
     EXPECT_EQ(0, std::memcmp(z1.z.data(), z2, 48));
 }
 
@@ -271,11 +271,11 @@ TEST(TlsKeyExchange, P384EncapAgreesWithDecap) {
 
     const TlsKxShared zs = server->encap(client->public_value().bytes());
     ASSERT_EQ(TlsKxStatus::Ok, zs.status);
-    EXPECT_EQ(97u, server->public_value().len);
+    EXPECT_EQ(97U, server->public_value().len);
     const TlsKxShared zc = client->decap(server->public_value().bytes());
     ASSERT_EQ(TlsKxStatus::Ok, zc.status);
-    ASSERT_EQ(48u, zs.len);
-    ASSERT_EQ(48u, zc.len);
+    ASSERT_EQ(48U, zs.len);
+    ASSERT_EQ(48U, zc.len);
     EXPECT_EQ(0, std::memcmp(zs.z.data(), zc.z.data(), 48));
 }
 
@@ -293,7 +293,7 @@ TEST(TlsKeyExchange, X25519EncapAgreesWithDecap) {
     const TlsKxShared zs = server->encap(client->public_value().bytes());
     ASSERT_EQ(TlsKxStatus::Ok, zs.status);
     EXPECT_EQ(TlsNamedGroup::X25519, server->group());
-    EXPECT_EQ(32u, server->public_value().len); // encap produced the share
+    EXPECT_EQ(32U, server->public_value().len); // encap produced the share
 
     const TlsKxShared zc = client->decap(server->public_value().bytes());
     ASSERT_EQ(TlsKxStatus::Ok, zc.status);
@@ -310,7 +310,7 @@ TEST(TlsKeyExchange, P256EncapAgreesWithDecap) {
     const TlsKxShared zs = server->encap(client->public_value().bytes());
     ASSERT_EQ(TlsKxStatus::Ok, zs.status);
     EXPECT_EQ(TlsNamedGroup::Secp256r1, server->group());
-    EXPECT_EQ(65u, server->public_value().len);
+    EXPECT_EQ(65U, server->public_value().len);
     EXPECT_EQ(0x04, server->public_value().buf[0]);
 
     const TlsKxShared zc = client->decap(server->public_value().bytes());
@@ -374,7 +374,7 @@ TEST(TlsKeyExchange, P256FreshInstanceFreesTheKeyHandle) {
     a = make_kx(TlsNamedGroup::Secp256r1); // destruction frees the EVP_PKEY handle
     ASSERT_NE(nullptr, a.get());
     ASSERT_TRUE(a->generate().has_value());
-    EXPECT_EQ(65u, a->public_value().len);
+    EXPECT_EQ(65U, a->public_value().len);
 }
 
 // ---------------------------------------------------------------------------

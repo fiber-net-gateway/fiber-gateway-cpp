@@ -72,7 +72,9 @@ struct BlockedConnectTraits {
         return fds[0];
     }
 
-    static fiber::common::IoErr connect_once(int, const Address &) { return fiber::common::IoErr::WouldBlock; }
+    static fiber::common::IoErr connect_once(int /*unused*/, const Address & /*unused*/) {
+        return fiber::common::IoErr::WouldBlock;
+    }
 };
 
 using BlockedConnect = fiber::net::detail::ConnectFd<BlockedConnectTraits>;

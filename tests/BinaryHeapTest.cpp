@@ -91,7 +91,7 @@ std::vector<int> drain_sorted(TestHeap &heap) {
 TEST(BinaryHeapTest, EmptyHeapInitially) {
     TestHeap heap;
     EXPECT_TRUE(heap.empty());
-    EXPECT_EQ(heap.size(), 0u);
+    EXPECT_EQ(heap.size(), 0U);
     EXPECT_EQ(heap.min(), nullptr);
 }
 
@@ -108,6 +108,7 @@ TEST(BinaryHeapTest, InsertAscendingExtractsAscending) {
 
     std::vector<int> keys = drain_sorted(heap);
     std::vector<int> expected;
+    expected.reserve(nodes.size());
     for (std::size_t i = 0; i < nodes.size(); ++i) {
         expected.push_back(static_cast<int>(i));
     }
@@ -132,11 +133,11 @@ TEST(BinaryHeapTest, InsertDescendingExtractsAscending) {
 TEST(BinaryHeapTest, InsertPseudoRandomPreservesHeapProperty) {
     TestHeap heap;
     std::vector<TestNode> nodes(200);
-    std::uint64_t state = 0x9E3779B97F4A7C15ull;
-    for (std::size_t i = 0; i < nodes.size(); ++i) {
-        state = state * 6364136223846793005ull + 1442695040888963407ull;
-        nodes[i].key = static_cast<int>(state >> 33) % 1000;
-        heap.insert(nodes[i]);
+    std::uint64_t state = 0x9E3779B97F4A7C15ULL;
+    for (auto &node: nodes) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        node.key = static_cast<int>(state >> 33) % 1000;
+        heap.insert(node);
         expect_heap_valid(heap);
     }
     EXPECT_EQ(heap.size(), nodes.size());
@@ -210,7 +211,7 @@ TEST(BinaryHeapTest, SingleNode) {
     node.key = 42;
     heap.insert(node);
     EXPECT_FALSE(heap.empty());
-    EXPECT_EQ(heap.size(), 1u);
+    EXPECT_EQ(heap.size(), 1U);
     ASSERT_NE(heap.min(), nullptr);
     EXPECT_EQ(heap.min()->key, 42);
     heap.remove(node);

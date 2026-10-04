@@ -35,7 +35,7 @@ TEST(HttpHeadersTest, ExposesConstructionPoolForPoolBackedViews) {
 
     constexpr std::string_view lowcase_name = "authorization";
     constexpr uint64_t hash = fiber::http::http_header_name_hash(lowcase_name);
-    ASSERT_NE(headers.set_view("Authorization", std::string_view(storage, value.size()), lowcase_name.data(), hash),
+    ASSERT_NE(headers.set_view("Authorization", std::string_view(storage, value.size()), "authorization", hash),
               nullptr);
     EXPECT_EQ(headers.get(lowcase_name, hash), value);
 }
@@ -64,7 +64,7 @@ TEST(HttpHeadersTest, SetReusesPreparedLowercaseKeyToReplaceAllCaseVariants) {
     EXPECT_EQ(field->lowcase_view(), "content-type");
     EXPECT_EQ(headers.get("content-type"), "replacement");
     EXPECT_EQ(headers.get("other"), "kept");
-    EXPECT_EQ(headers.size(), 2u);
+    EXPECT_EQ(headers.size(), 2U);
 }
 
 TEST(HttpHeadersTest, ConvenienceGetAllRemainsCaseInsensitive) {
@@ -123,12 +123,12 @@ TEST(HttpHeadersTest, RehashPreservesBucketAndInsertionOrderLinks) {
     }
 
     headers.clear();
-    EXPECT_EQ(headers.size(), 0u);
+    EXPECT_EQ(headers.size(), 0U);
     ASSERT_NE(headers.add("after-clear", "1"), nullptr);
     EXPECT_EQ(headers.get("after-clear"), "1");
 
     headers.release();
-    EXPECT_EQ(headers.size(), 0u);
+    EXPECT_EQ(headers.size(), 0U);
     ASSERT_NE(headers.add("after-release", "2"), nullptr);
     EXPECT_EQ(headers.get("after-release"), "2");
 }
@@ -152,7 +152,7 @@ TEST(HttpHeadersTest, EraseConstIteratorSupportsRemovalDuringFullTraversal) {
     }
 
     EXPECT_EQ((std::vector<std::string_view>{"a", "c"}), kept);
-    EXPECT_EQ(headers.size(), 2u);
+    EXPECT_EQ(headers.size(), 2U);
     EXPECT_FALSE(headers.contains("b"));
     EXPECT_FALSE(headers.contains("d"));
 }
@@ -176,8 +176,8 @@ TEST(HttpHeadersTest, EraseMatchIteratorSupportsRemovalDuringFilteredTraversal) 
         ++removed;
     }
 
-    EXPECT_EQ(removed, 3u);
-    EXPECT_EQ(headers.size(), 1u);
+    EXPECT_EQ(removed, 3U);
+    EXPECT_EQ(headers.size(), 1U);
     EXPECT_FALSE(headers.contains("x-test"));
     EXPECT_TRUE(headers.contains("other"));
 }
@@ -192,8 +192,8 @@ TEST(HttpHeadersTest, RemoveByLowercaseNameAndHashUsesCachedLookup) {
     const std::string_view key = "content-type";
     const uint64_t hash = fiber::http::http_header_name_hash(key);
 
-    EXPECT_EQ(headers.remove(key, hash), 2u);
-    EXPECT_EQ(headers.size(), 1u);
+    EXPECT_EQ(headers.remove(key, hash), 2U);
+    EXPECT_EQ(headers.size(), 1U);
     EXPECT_FALSE(headers.contains("content-type"));
     EXPECT_TRUE(headers.contains("host"));
 }
@@ -207,11 +207,11 @@ TEST(HttpHeadersTest, RemoveHeaderFieldDeletesOnlyThatNode) {
     ASSERT_NE(second, nullptr);
 
     EXPECT_TRUE(headers.remove(*second));
-    EXPECT_EQ(headers.size(), 1u);
+    EXPECT_EQ(headers.size(), 1U);
     EXPECT_EQ(headers.get("set-cookie"), "a=1");
     EXPECT_FALSE(headers.remove(*second));
     EXPECT_TRUE(headers.remove(*first));
-    EXPECT_EQ(headers.size(), 0u);
+    EXPECT_EQ(headers.size(), 0U);
 }
 
 } // namespace

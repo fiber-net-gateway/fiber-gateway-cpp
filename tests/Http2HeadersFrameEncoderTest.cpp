@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <future>
 #include <string>
@@ -28,11 +29,11 @@ using fiber::http::Http2HeadersFrameEncoder;
 
 class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
-    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds /*timeout*/) override {
         co_return fiber::common::IoResult<void>{};
     }
 
-    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds /*timeout*/) override {
         co_return fiber::common::IoResult<void>{};
     }
 
@@ -86,7 +87,7 @@ private:
     EncodeCase &test_case_;
 };
 
-fiber::common::IoErr EncodeOperation::on_encode(const fiber::http::Http2OutboundEncodeRequest &,
+fiber::common::IoErr EncodeOperation::on_encode(const fiber::http::Http2OutboundEncodeRequest & /*unused*/,
                                                 fiber::http::Http2OutboundEncodeTarget &target,
                                                 fiber::http::Http2OutboundEncodeResult &result) noexcept {
     Http2HeadersFrameEncoder frame_encoder(test_case_.options);
@@ -253,7 +254,7 @@ TEST(Http2HeadersFrameEncoderTest, EncodesSmallHeaderBlockIntoOwnedBuffer) {
 
 TEST(Http2HeadersFrameEncoderTest, GrowsOutputBufferForLargeHuffmanValueWithinFrame) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
-        std::string value(16 * 1024, 'x');
+        std::string value(std::size_t{16} * 1024, 'x');
         EncodeCase test_case{
                 .status_code = 200,
                 .options =

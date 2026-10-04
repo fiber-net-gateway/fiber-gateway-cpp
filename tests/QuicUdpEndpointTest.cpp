@@ -233,17 +233,19 @@ fiber::quic::QuicConnectionId cid_from_hex(std::string_view value) {
 
 fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
-void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+void destroy_test_stream(void * /*unused*/, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
-fiber::quic::QuicStream::Lease make_test_stream(void *, std::uint64_t) noexcept {
+fiber::quic::QuicStream::Lease make_test_stream(void * /*unused*/, std::uint64_t /*unused*/) noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
                                                          fiber::quic::QuicStream(nullptr, destroy_test_stream));
 }
 
-void destroy_heap_connection(void *, fiber::quic::QuicConnection &connection) noexcept { delete &connection; }
+void destroy_heap_connection(void * /*unused*/, fiber::quic::QuicConnection &connection) noexcept {
+    delete &connection;
+}
 
 fiber::quic::QuicConnection::Lease
-create_heap_connection(void *, fiber::quic::QuicUdpEndpoint &endpoint,
+create_heap_connection(void * /*unused*/, fiber::quic::QuicUdpEndpoint &endpoint,
                        const fiber::quic::QuicConnection::Options &options) noexcept {
     fiber::quic::QuicConnection::Options owned_options = options;
     owned_options.destroy_owner = nullptr;
@@ -487,8 +489,8 @@ exercise_delayed_application_ack(fiber::event::EventLoop *loop, fiber::quic::Qui
     spec.dcid = connection->local_connection_id();
     spec.frames = &ping;
     spec.frame_count = 1;
-    auto encoded = fiber::quic::quic_encode_packet(peer, spec, {plaintext.data(), plaintext.size()}, datagram.data(),
-                                                   datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(peer, spec, {.data = plaintext.data(), .capacity = plaintext.size()},
+                                                   datagram.data(), datagram.size());
     if (!encoded) {
         done_promise->set_value(std::unexpected(encoded.error()));
         co_return;
@@ -662,7 +664,7 @@ DetachedTask start_endpoint(fiber::quic::QuicUdpEndpoint *endpoint,
 
 DetachedTask recv_endpoint_twice(fiber::quic::QuicUdpEndpoint *endpoint,
                                  std::promise<TwoEndpointResults> *done_promise) {
-    TwoEndpointResults results{co_await endpoint->recv_once(), co_await endpoint->recv_once()};
+    TwoEndpointResults results{.first = co_await endpoint->recv_once(), .second = co_await endpoint->recv_once()};
     done_promise->set_value(results);
 }
 
@@ -747,7 +749,7 @@ send_datagram_recv_response_with_port(fiber::event::EventLoop *loop, std::uint16
     }
 
     client.close();
-    done_promise->set_value(PortResponseResult{local_port, received->size});
+    done_promise->set_value(PortResponseResult{.port = local_port, .response_len = received->size});
 }
 
 DetachedTask
@@ -841,7 +843,7 @@ DetachedTask send_initial_then_retry_initial(fiber::event::EventLoop *loop, std:
         co_return;
     }
 
-    done_promise->set_value(RetryInitialResult{retry->scid, retry->token.len});
+    done_promise->set_value(RetryInitialResult{.retry_scid = retry->scid, .token_len = retry->token.len});
     client.close();
 }
 
@@ -1195,9 +1197,12 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
         co_return;
     }
 
-    done_promise->set_value(CoalescedPacketSummary{received->size, first->header.packet_len, first->header.type,
-                                                   second->header.type, first_summary->ack_eliciting,
-                                                   second_summary->ack_eliciting});
+    done_promise->set_value(CoalescedPacketSummary{.datagram_len = received->size,
+                                                   .first_packet_len = first->header.packet_len,
+                                                   .first_type = first->header.type,
+                                                   .second_type = second->header.type,
+                                                   .first_ack_eliciting = first_summary->ack_eliciting,
+                                                   .second_ack_eliciting = second_summary->ack_eliciting});
     client.close();
 }
 
@@ -1299,14 +1304,15 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
 
     const fiber::quic::QuicOutputFrame *first_sent = space.sent_frames.front();
     done_promise->set_value(ManyFramePacketSummary{
-            decoded_summary->frame_count,
-            sent_count,
-            received->ecn,
-            space.pending_frames.empty(),
-            space.sending_frames.empty(),
-            !space.ack_frame.hook.linked(),
-            first_sent != nullptr && fiber::quic::quic_output_frame_ack_eliciting(first_sent->type) &&
-                    first_sent->packet_len != 0,
+            .decoded_frame_count = decoded_summary->frame_count,
+            .sent_frame_count = sent_count,
+            .ecn = received->ecn,
+            .pending_empty = space.pending_frames.empty(),
+            .sending_empty = space.sending_frames.empty(),
+            .ack_frame_available = !space.ack_frame.hook.linked(),
+            .packet_accounted_by_ack_eliciting_frame = first_sent != nullptr &&
+                                                       fiber::quic::quic_output_frame_ack_eliciting(first_sent->type) &&
+                                                       first_sent->packet_len != 0,
     });
     client.close();
 }
@@ -1410,18 +1416,18 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
     const fiber::quic::QuicOutputFrame *sent = space.sent_frames.front();
     const fiber::quic::QuicOutputFrame *pending = space.pending_frames.front();
     done_promise->set_value(SplitFramePacketSummary{
-            decoded_summary->frame_count,
-            sent != nullptr && sent->data ? sent->data.readable() : 0,
-            pending != nullptr && pending->data ? pending->data.readable() : 0,
-            pending != nullptr && pending->data,
-            space.sending_frames.empty(),
-            server.congestion().in_flight,
-            sent != nullptr && pending != nullptr && sent->data.same_storage(pending->data),
-            sent != nullptr && pending != nullptr &&
-                    sent->data.readable() + pending->data.readable() == crypto_data.size() &&
-                    std::memcmp(sent->data.readable_data(), crypto_data.data(), sent->data.readable()) == 0 &&
-                    std::memcmp(pending->data.readable_data(), crypto_data.data() + sent->data.readable(),
-                                pending->data.readable()) == 0,
+            .decoded_frame_count = decoded_summary->frame_count,
+            .sent_crypto_len = sent != nullptr && sent->data ? sent->data.readable() : 0,
+            .pending_crypto_len = pending != nullptr && pending->data ? pending->data.readable() : 0,
+            .pending_owned = pending != nullptr && pending->data,
+            .sending_empty = space.sending_frames.empty(),
+            .in_flight = server.congestion().in_flight,
+            .shares_storage = sent != nullptr && pending != nullptr && sent->data.same_storage(pending->data),
+            .payload_matches = sent != nullptr && pending != nullptr &&
+                               sent->data.readable() + pending->data.readable() == crypto_data.size() &&
+                               std::memcmp(sent->data.readable_data(), crypto_data.data(), sent->data.readable()) == 0 &&
+                               std::memcmp(pending->data.readable_data(), crypto_data.data() + sent->data.readable(),
+                                           pending->data.readable()) == 0,
     });
     client.close();
 }
@@ -1519,14 +1525,14 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
     const auto loss_timer =
             fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0}, server.pto_count());
     done_promise->set_value(AckOnlyPacketSummary{
-            received->size,
-            decoded_summary->frame_count,
-            decoded_summary->ack_eliciting,
-            space.pending_frames.front() == ping,
-            space.sending_frames.empty(),
-            space.sent_frames.empty(),
-            loss_timer.mode == fiber::quic::QuicLossTimerMode::None,
-            server.congestion().in_flight,
+            .datagram_len = received->size,
+            .decoded_frame_count = decoded_summary->frame_count,
+            .ack_eliciting = decoded_summary->ack_eliciting,
+            .data_pending = space.pending_frames.front() == ping,
+            .sending_empty = space.sending_frames.empty(),
+            .sent_empty = space.sent_frames.empty(),
+            .loss_timer_none = loss_timer.mode == fiber::quic::QuicLossTimerMode::None,
+            .in_flight = server.congestion().in_flight,
     });
     client.close();
 }
@@ -1870,14 +1876,14 @@ DetachedTask recv_initial_ack_only_without_min_initial_padding(
     const auto loss_timer =
             fiber::quic::quic_loss_detection_timer(server, fiber::quic::QuicTime{0}, server.pto_count());
     done_promise->set_value(AckOnlyPacketSummary{
-            received->size,
-            decoded_summary->frame_count,
-            decoded_summary->ack_eliciting,
-            !space.pending_frames.empty(),
-            space.sending_frames.empty(),
-            space.sent_frames.empty(),
-            loss_timer.mode == fiber::quic::QuicLossTimerMode::None,
-            server.congestion().in_flight,
+            .datagram_len = received->size,
+            .decoded_frame_count = decoded_summary->frame_count,
+            .ack_eliciting = decoded_summary->ack_eliciting,
+            .data_pending = !space.pending_frames.empty(),
+            .sending_empty = space.sending_frames.empty(),
+            .sent_empty = space.sent_frames.empty(),
+            .loss_timer_none = loss_timer.mode == fiber::quic::QuicLossTimerMode::None,
+            .in_flight = server.congestion().in_flight,
     });
     client.close();
 }
@@ -1940,7 +1946,8 @@ recv_twice_after_send_from_distinct_clients(fiber::event::EventLoopGroup &group,
     EXPECT_EQ(recv_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     auto send_result = send_future.get();
     EXPECT_TRUE(send_result.has_value()) << static_cast<int>(send_result.error());
-    return TwoEndpointResultsWithPorts{recv_future.get(), send_result.value_or(std::array<std::uint16_t, 2>{})};
+    return TwoEndpointResultsWithPorts{.results = recv_future.get(),
+                                       .ports = send_result.value_or(std::array<std::uint16_t, 2>{})};
 }
 
 void close_endpoint_on_loop(fiber::event::EventLoopGroup &group, fiber::quic::QuicUdpEndpoint &endpoint) {
@@ -2924,7 +2931,7 @@ TEST(QuicUdpEndpointTest, RetryResponsesAreRateLimited) {
     fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.retry = true;
-    options.stateless_response_limits.retry = {2, 1};
+    options.stateless_response_limits.retry = {.endpoint_per_second = 2, .peer_per_second = 1};
     ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("1020304050607080");
@@ -2975,7 +2982,8 @@ TEST(QuicUdpEndpointTest, GarbageInitialTokenIsAcceptedAsUnvalidatedWithoutRetry
     const auto scid = cid_from_hex("31323334");
     std::array<std::uint8_t, 8> garbage_token{0xde, 0xad, 0xbe, 0xef, 0x10, 0x20, 0x30, 0x40};
     std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
-    build_initial_datagram(datagram, dcid, scid, 1, fiber::quic::QuicSlice{garbage_token.data(), garbage_token.size()});
+    build_initial_datagram(datagram, dcid, scid, 1,
+                           fiber::quic::QuicSlice{.data = garbage_token.data(), .len = garbage_token.size()});
 
     auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
     ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
@@ -2999,7 +3007,7 @@ TEST(QuicUdpEndpointTest, InvalidRetryTokenCloseResponsesAreRateLimited) {
     for (std::size_t i = 0; i < options.address_validation_key.size(); ++i) {
         options.address_validation_key[i] = static_cast<std::uint8_t>(0x60U + i);
     }
-    options.stateless_response_limits.invalid_token_close = {2, 1};
+    options.stateless_response_limits.invalid_token_close = {.endpoint_per_second = 2, .peer_per_second = 1};
     ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("4041424344454647");
@@ -3172,7 +3180,8 @@ TEST(QuicUdpEndpointTest, SendsNewTokenWhenPathValidationCompletes) {
     app_spec.dcid = connection->local_connection_id();
     app_spec.frames = &path_response;
     app_spec.frame_count = 1;
-    auto encoded_app = fiber::quic::quic_encode_packet(peer, app_spec, {app_plaintext.data(), app_plaintext.size()},
+    auto encoded_app = fiber::quic::quic_encode_packet(peer, app_spec,
+                                                       {.data = app_plaintext.data(), .capacity = app_plaintext.size()},
                                                        app_datagram.data(), app_datagram.size());
     ASSERT_TRUE(encoded_app.has_value()) << static_cast<int>(encoded_app.error());
 
@@ -3713,8 +3722,8 @@ TEST(QuicUdpEndpointTest, SendsStatelessResetForUnknownShortHeaderDcid) {
     EXPECT_LT(len, fiber::quic::kQuicStatelessResetMaxPacket);
 
     // Shaped as a short header: fixed bit set, long-header bit clear.
-    EXPECT_NE(response[0] & fiber::quic::kPacketFlagFixed, 0u);
-    EXPECT_EQ(response[0] & fiber::quic::kPacketFlagLong, 0u);
+    EXPECT_NE(response[0] & fiber::quic::kPacketFlagFixed, 0U);
+    EXPECT_EQ(response[0] & fiber::quic::kPacketFlagLong, 0U);
 
     // Final 16 bytes == HMAC-SHA256(secret, [len|dcid])[:16].
     std::array<std::uint8_t, fiber::quic::kStatelessResetTokenLength> expected_token{};
@@ -3882,7 +3891,7 @@ TEST(QuicUdpEndpointTest, VersionNegotiationResponsesAreRateLimited) {
 
     fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    options.stateless_response_limits.version_negotiation = {2, 1};
+    options.stateless_response_limits.version_negotiation = {.endpoint_per_second = 2, .peer_per_second = 1};
     ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708");
@@ -4036,7 +4045,7 @@ TEST(QuicUdpEndpointTest, StatelessResetIsRateLimited) {
 
     const std::size_t resets = count_future.get();
     // A flood far larger than the capacity produces a bounded number of resets.
-    EXPECT_GE(resets, 1u);
+    EXPECT_GE(resets, 1U);
     EXPECT_LE(resets, fiber::quic::kQuicStatelessResetRateLimitCapacity);
     EXPECT_GT(endpoint.rate_limited_stateless_response_count(), 0U);
 
@@ -4076,6 +4085,7 @@ TEST_P(QuicUdpEndpointSocketErrorTest, DetachesConnectionsAndWaitsForOutstanding
         if (!shutdown_started) {
             EXPECT_EQ(lease->close_info().error_code,
                       static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::InternalError));
+            // NOLINTNEXTLINE(bugprone-use-after-move) manual awaiter drive; single use of task
             std::move(task).operator co_await().await_suspend(std::noop_coroutine()).resume();
         }
         EXPECT_FALSE(endpoint.valid());

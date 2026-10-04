@@ -36,7 +36,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -103,7 +103,7 @@ AbiResult call_host_on(GcHeap &heap, const char *name, JsValue arg) {
         return AbiResult::abort(ScriptAbortReason::Internal);
     }
     Library::HostCallFrame frame(heap, JsValue::make_undefined(), nullptr);
-    Library::Arguments args{ConstValueHandle(storage), 1};
+    Library::Arguments args{.args = ConstValueHandle(storage), .argc = 1};
     return match.callable->function(match.callable->userdata, frame, args);
 }
 

@@ -84,8 +84,12 @@ struct DecodeRecorder {
 
     static const Http3QpackDecoder::Ops &ops() noexcept {
         static const Http3QpackDecoder::Ops kOps{
-                &DecodeRecorder::on_indexed_field, &DecodeRecorder::on_indexed_name, &DecodeRecorder::on_name_raw,
-                &DecodeRecorder::on_name_huffman,  &DecodeRecorder::on_value_raw,    &DecodeRecorder::on_value_huffman,
+                .on_indexed_field = &DecodeRecorder::on_indexed_field,
+                .on_indexed_name = &DecodeRecorder::on_indexed_name,
+                .on_name_raw = &DecodeRecorder::on_name_raw,
+                .on_name_huffman = &DecodeRecorder::on_name_huffman,
+                .on_value_raw = &DecodeRecorder::on_value_raw,
+                .on_value_huffman = &DecodeRecorder::on_value_huffman,
         };
         return kOps;
     }

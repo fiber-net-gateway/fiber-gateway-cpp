@@ -30,7 +30,7 @@ std::vector<Pair> decode(std::string_view header) {
 
 TEST(CookieCodecTest, DecodesPairs) {
     auto pairs = decode("a=1; b=2; c=3");
-    ASSERT_EQ(pairs.size(), 3u);
+    ASSERT_EQ(pairs.size(), 3U);
     EXPECT_EQ(pairs[0].name, "a");
     EXPECT_EQ(pairs[0].value, "1");
     EXPECT_EQ(pairs[1].name, "b");
@@ -41,7 +41,7 @@ TEST(CookieCodecTest, DecodesPairs) {
 
 TEST(CookieCodecTest, DecodesWithoutEquals) {
     auto pairs = decode("flag; name=value");
-    ASSERT_EQ(pairs.size(), 2u);
+    ASSERT_EQ(pairs.size(), 2U);
     EXPECT_EQ(pairs[0].name, "flag");
     EXPECT_EQ(pairs[0].value, "");
     EXPECT_EQ(pairs[1].name, "name");
@@ -52,7 +52,7 @@ TEST(CookieCodecTest, DecodesTrimsWhitespaceAroundSeparators) {
     // Whitespace around the ';' separators is trimmed; spaces around '=' are not (a cookie
     // pair has no such spaces in practice).
     auto pairs = decode("a=1 ;  b=2 ");
-    ASSERT_EQ(pairs.size(), 2u);
+    ASSERT_EQ(pairs.size(), 2U);
     EXPECT_EQ(pairs[0].name, "a");
     EXPECT_EQ(pairs[0].value, "1");
     EXPECT_EQ(pairs[1].name, "b");
@@ -61,7 +61,7 @@ TEST(CookieCodecTest, DecodesTrimsWhitespaceAroundSeparators) {
 
 TEST(CookieCodecTest, DecodeSkipsEmptySegments) {
     auto pairs = decode(";;a=1;;;");
-    ASSERT_EQ(pairs.size(), 1u);
+    ASSERT_EQ(pairs.size(), 1U);
     EXPECT_EQ(pairs[0].name, "a");
 }
 

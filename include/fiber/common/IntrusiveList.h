@@ -25,6 +25,7 @@ struct IntrusiveListHook {
     IntrusiveListHook(IntrusiveListHook &&) = delete;
     IntrusiveListHook &operator=(IntrusiveListHook &&) = delete;
 
+    // NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult) FP: designated aggregate new
     [[nodiscard]] bool linked() const noexcept { return next != this; }
 
     void unlink_self() noexcept {

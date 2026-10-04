@@ -36,14 +36,14 @@ struct Fixture {
 
     Fixture() {
         for (std::size_t i = 0; i < master13.size(); ++i) {
-            master13[i] = static_cast<std::uint8_t>(i * 7 + 1);
+            master13[i] = static_cast<std::uint8_t>((i * 7) + 1);
         }
         for (std::size_t i = 0; i < master12.size(); ++i) {
-            master12[i] = static_cast<std::uint8_t>(i * 5 + 3);
+            master12[i] = static_cast<std::uint8_t>((i * 5) + 3);
         }
         for (std::size_t i = 0; i < key_bytes.size(); ++i) {
-            key_bytes[i] = static_cast<std::uint8_t>(i * 11 + 5);
-            key_bytes2[i] = static_cast<std::uint8_t>(i * 13 + 9);
+            key_bytes[i] = static_cast<std::uint8_t>((i * 11) + 5);
+            key_bytes2[i] = static_cast<std::uint8_t>((i * 13) + 9);
         }
     }
 
@@ -78,7 +78,7 @@ struct Fixture {
 
     [[nodiscard]] std::vector<std::uint8_t> mint(TlsTicketService &service, const TlsTicketRequest &req) {
         const std::size_t len = TlsTicketService::mint_thunk(&service, req, scratch);
-        EXPECT_GT(len, 0u);
+        EXPECT_GT(len, 0U);
         return {scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(len)};
     }
 };
@@ -91,9 +91,9 @@ TEST(TlsTicketService, EmptyKeySetIsInvalid) {
     Fixture fx;
     TlsTicketService service(std::span<const TlsTicketKeyMaterial>{}, TlsTicketKeyPolicy{});
     EXPECT_FALSE(service.valid());
-    EXPECT_EQ(0u, service.key_count());
+    EXPECT_EQ(0U, service.key_count());
     // The minter hook stays safe: every mint declines.
-    EXPECT_EQ(0u, TlsTicketService::mint_thunk(&service, fx.request13(), fx.scratch));
+    EXPECT_EQ(0U, TlsTicketService::mint_thunk(&service, fx.request13(), fx.scratch));
 }
 
 TEST(TlsTicketService, DuplicateIdsAreInvalid) {
@@ -118,7 +118,7 @@ TEST(TlsTicketService, OverflowKeepsNewestEight) {
     TlsTicketService service(many, TlsTicketKeyPolicy{});
     ASSERT_TRUE(service.valid());
     EXPECT_EQ(TlsTicketService::kMaxKeys, service.key_count());
-    EXPECT_EQ(10u, key_id_of(fx.mint(service, fx.request13("example.com", 3600, 9'000))));
+    EXPECT_EQ(10U, key_id_of(fx.mint(service, fx.request13("example.com", 3600, 9'000))));
 }
 
 TEST(TlsTicketService, RandomKeyMintsFreshMaterial) {
@@ -127,7 +127,7 @@ TEST(TlsTicketService, RandomKeyMintsFreshMaterial) {
     TlsTicketKeyMaterial b{};
     ASSERT_TRUE(TlsTicketService::random_key(9, kNow, a));
     ASSERT_TRUE(TlsTicketService::random_key(9, kNow, b));
-    EXPECT_EQ(9u, a.id);
+    EXPECT_EQ(9U, a.id);
     EXPECT_EQ(kNow, a.created_ms);
     EXPECT_NE(a.bytes, b.bytes); // fresh entropy per call
 
@@ -147,17 +147,17 @@ TEST(TlsTicketService, Mint13RoundtripCarriesDerivedPsk) {
     ASSERT_TRUE(service.valid());
     const std::vector<std::uint8_t> ticket = fx.mint(service, fx.request13());
     EXPECT_GT(ticket.size(), kHeaderLen + 16);
-    EXPECT_EQ(7u, key_id_of(ticket)); // the injected key's id rides the container
+    EXPECT_EQ(7U, key_id_of(ticket)); // the injected key's id rides the container
 
     TlsTicketContents contents;
     ASSERT_EQ(TlsTicketService::OpenStatus::Ok, service.open(ticket, "example.com", kNow + 1000, contents));
     EXPECT_EQ(TlsProtocolVersion::Tls13, contents.version);
     EXPECT_EQ(TlsCipherSuiteId::TlsAes128GcmSha256, contents.suite);
     EXPECT_EQ("h2", contents.alpn_view());
-    EXPECT_EQ(0xdeadbeefu, contents.ticket_age_add);
-    EXPECT_EQ(0u, contents.max_early_data);
+    EXPECT_EQ(0xdeadbeefU, contents.ticket_age_add);
+    EXPECT_EQ(0U, contents.max_early_data);
     EXPECT_EQ(kNow, contents.issued_ms);
-    EXPECT_EQ(3600u, contents.timeout_s);
+    EXPECT_EQ(3600U, contents.timeout_s);
     // The payload holds the DERIVED psk — the same Expand-Label the client
     // runs over the received NST — not the resumption master.
     const std::array<std::uint8_t, 1> nonce{0};
@@ -175,12 +175,12 @@ TEST(TlsTicketService, Mint12RoundtripCarriesMaster) {
     TlsTicketContents contents;
     ASSERT_EQ(TlsTicketService::OpenStatus::Ok, service.open(ticket, "example.com", kNow + 1000, contents));
     EXPECT_EQ(TlsProtocolVersion::Tls12, contents.version);
-    EXPECT_EQ(48u, contents.secret.len());
+    EXPECT_EQ(48U, contents.secret.len());
     EXPECT_TRUE(secrets_equal(TlsSecret::from_bytes(fx.master12), contents.secret));
     EXPECT_EQ("h2", contents.alpn_view());
     // 1.2 payload has no age/early-data fields; defaults ride through.
-    EXPECT_EQ(0u, contents.ticket_age_add);
-    EXPECT_EQ(0u, contents.max_early_data);
+    EXPECT_EQ(0U, contents.ticket_age_add);
+    EXPECT_EQ(0U, contents.max_early_data);
 }
 
 // Two mints of one request differ in nonce (fresh randomness per ticket), and
@@ -270,14 +270,14 @@ TEST(TlsTicketService, RotationHandsOverAtBirthAndRetainsThenDrops) {
     }};
     TlsTicketService service(keys, policy);
     ASSERT_TRUE(service.valid());
-    EXPECT_EQ(2u, service.key_count());
+    EXPECT_EQ(2U, service.key_count());
 
     // Before the successor is born, the current key mints.
     const std::vector<std::uint8_t> t1 = fx.mint(service, fx.request13("example.com", 3600, 0));
-    EXPECT_EQ(1u, key_id_of(t1));
+    EXPECT_EQ(1U, key_id_of(t1));
     // At the successor's birth the pick flips — no future-key minting early.
     const std::vector<std::uint8_t> t2 = fx.mint(service, fx.request13("example.com", 3600, 10'000));
-    EXPECT_EQ(2u, key_id_of(t2));
+    EXPECT_EQ(2U, key_id_of(t2));
     EXPECT_NE(t1, t2);
 
     TlsTicketContents c;
@@ -297,7 +297,7 @@ TEST(TlsTicketService, MintStopsWhenAllKeysPastWindow) {
     ASSERT_TRUE(service.valid());
     const std::vector<std::uint8_t> early = fx.mint(service, fx.request13("example.com", 3600, 5'000));
     EXPECT_FALSE(early.empty());
-    EXPECT_EQ(0u, TlsTicketService::mint_thunk(&service, fx.request13("example.com", 3600, 20'000), fx.scratch));
+    EXPECT_EQ(0U, TlsTicketService::mint_thunk(&service, fx.request13("example.com", 3600, 20'000), fx.scratch));
 }
 
 // ---- expiry ----
@@ -330,32 +330,32 @@ TEST(TlsTicketService, BadInputsMintNothing) {
     TlsTicketRequest bad12 = fx.request12();
     const std::array<std::uint8_t, 47> short_master{};
     bad12.resumption_master = short_master;
-    EXPECT_EQ(0u, mint_len(bad12, fx.scratch.size()));
+    EXPECT_EQ(0U, mint_len(bad12, fx.scratch.size()));
 
     // 1.3 master must be a hash-length secret.
     TlsTicketRequest bad13 = fx.request13();
     bad13.resumption_master = short_master;
-    EXPECT_EQ(0u, mint_len(bad13, fx.scratch.size()));
+    EXPECT_EQ(0U, mint_len(bad13, fx.scratch.size()));
 
     // SNI beyond the wire bound.
     TlsTicketRequest bad_name = fx.request13();
     const std::string long_name(TlsTicketService::kMaxNameLen + 1, 'a');
     bad_name.name = long_name;
-    EXPECT_EQ(0u, mint_len(bad_name, fx.scratch.size()));
+    EXPECT_EQ(0U, mint_len(bad_name, fx.scratch.size()));
 
     // ALPN beyond the length-prefix bound.
     TlsTicketRequest bad_alpn = fx.request13();
     const std::string long_alpn(256, 'x');
     bad_alpn.alpn = long_alpn;
-    EXPECT_EQ(0u, mint_len(bad_alpn, fx.scratch.size()));
+    EXPECT_EQ(0U, mint_len(bad_alpn, fx.scratch.size()));
 
     // An unhandled version.
     TlsTicketRequest bad_version = fx.request13();
     bad_version.version = TlsProtocolVersion::Tls11;
-    EXPECT_EQ(0u, mint_len(bad_version, fx.scratch.size()));
+    EXPECT_EQ(0U, mint_len(bad_version, fx.scratch.size()));
 
     // An out buffer too small for the container.
-    EXPECT_EQ(0u, mint_len(fx.request13(), 16));
+    EXPECT_EQ(0U, mint_len(fx.request13(), 16));
 }
 
 // ---- lookup thunk (the engine-facing resumption half) ----
@@ -379,8 +379,8 @@ TEST(TlsTicketService, LookupThunkResumes13Ticket) {
     EXPECT_EQ(psk->len(), resumed.psk.size());
     EXPECT_EQ(TlsCipherSuiteId::TlsAes128GcmSha256, resumed.suite);
     EXPECT_EQ("h2", resumed.alpn);
-    EXPECT_EQ(0xdeadbeefu, resumed.ticket_age_add);
-    EXPECT_EQ(0u, resumed.max_early_data);
+    EXPECT_EQ(0xdeadbeefU, resumed.ticket_age_add);
+    EXPECT_EQ(0U, resumed.max_early_data);
     EXPECT_EQ(kNow, resumed.ticket_issued_ms);
 }
 
@@ -453,7 +453,7 @@ TEST(TlsTicketService, LookupGateKeepsEarlyDataOnContextMatch) {
     TlsResumedSession resumed;
     EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, context, resumed));
     EXPECT_TRUE(resumed.quic); // the engine's face gate input
-    EXPECT_EQ(0xffffffffu, resumed.max_early_data);
+    EXPECT_EQ(0xffffffffU, resumed.max_early_data);
 }
 
 TEST(TlsTicketService, LookupGateVetoesEarlyDataOnContextMismatch) {
@@ -473,13 +473,13 @@ TEST(TlsTicketService, LookupGateVetoesEarlyDataOnContextMismatch) {
     // Same length, different bytes.
     EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, altered, resumed));
     EXPECT_TRUE(resumed.quic);
-    EXPECT_EQ(0u, resumed.max_early_data); // 0-RTT vetoed, the session resumes
+    EXPECT_EQ(0U, resumed.max_early_data); // 0-RTT vetoed, the session resumes
     // Different length.
     EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, shorter, resumed));
-    EXPECT_EQ(0u, resumed.max_early_data);
+    EXPECT_EQ(0U, resumed.max_early_data);
     // The current context gone empty (early data since disabled).
     EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, {}, resumed));
-    EXPECT_EQ(0u, resumed.max_early_data);
+    EXPECT_EQ(0U, resumed.max_early_data);
 }
 
 // A TCP-minted ticket has no gate to run: the context span is ignored and
@@ -497,5 +497,5 @@ TEST(TlsTicketService, LookupGateSkipsTcpMintedTickets) {
     const std::array<std::uint8_t, 5> context{{0x11, 0x22, 0x33, 0x44, 0x55}};
     EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, context, resumed));
     EXPECT_FALSE(resumed.quic);
-    EXPECT_EQ(14336u, resumed.max_early_data);
+    EXPECT_EQ(14336U, resumed.max_early_data);
 }

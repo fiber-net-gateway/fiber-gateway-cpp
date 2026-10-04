@@ -4,11 +4,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <future>
-#include <signal.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -129,8 +129,8 @@ fiber::common::IoErr capture_client_hello(void *ctx, fiber::net::TlsServerHandsh
     return config.add_borrowed_credential(*state->credential);
 }
 
-fiber::common::IoErr reject_server_configuration(void *, fiber::net::TlsServerHandshakeConfig &,
-                                                 const fiber::tls::TlsClientHelloView &) noexcept {
+fiber::common::IoErr reject_server_configuration(void * /*unused*/, fiber::net::TlsServerHandshakeConfig & /*unused*/,
+                                                 const fiber::tls::TlsClientHelloView & /*unused*/) noexcept {
     return fiber::common::IoErr::Permission;
 }
 
@@ -231,7 +231,8 @@ HandshakeResult run_handshake_pair(const fiber::net::TlsServerParam &server_opti
     return result;
 }
 
-fiber::common::IoResult<IdentityTls> make_server_material(const IdentityFiles &files, std::string trust_path = {}) {
+fiber::common::IoResult<IdentityTls> make_server_material(const IdentityFiles &files,
+                                                          const std::string &trust_path = {}) {
     fiber::net::TlsCredentialOptions credential_options{};
     credential_options.certificate_chain = fiber::net::TlsPemSource::from_file(files.server_chain.path);
     credential_options.private_key = fiber::net::TlsPemSource::from_file(files.server_key.path);
@@ -240,7 +241,7 @@ fiber::common::IoResult<IdentityTls> make_server_material(const IdentityFiles &f
         return std::unexpected(credential.error());
     }
     auto trust_store = fiber::net::TrustStore::create(
-            fiber::net::TrustStoreOptions::from_file(trust_path.empty() ? files.root.path : std::move(trust_path)));
+            fiber::net::TrustStoreOptions::from_file(trust_path.empty() ? files.root.path : trust_path));
     if (!trust_store) {
         return std::unexpected(trust_store.error());
     }

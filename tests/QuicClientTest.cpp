@@ -31,11 +31,11 @@ using namespace std::chrono_literals;
 
 constexpr std::string_view kQuicTestAlpn[] = {"fiber-quic-test"};
 
-void destroy_connection(void *, fiber::quic::QuicConnection &connection) noexcept { delete &connection; }
+void destroy_connection(void * /*unused*/, fiber::quic::QuicConnection &connection) noexcept { delete &connection; }
 
-void destroy_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+void destroy_stream(void * /*unused*/, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
-fiber::quic::QuicStream::Lease create_stream(void *, std::uint64_t) noexcept {
+fiber::quic::QuicStream::Lease create_stream(void * /*unused*/, std::uint64_t /*unused*/) noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow) fiber::quic::QuicStream(nullptr, destroy_stream));
 }
 
@@ -49,7 +49,7 @@ create_server_connection(void *owner, fiber::quic::QuicUdpEndpoint &endpoint,
     return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(endpoint, owned));
 }
 
-fiber::quic::QuicConnection::Lease create_connection(void *, fiber::quic::QuicUdpEndpoint &endpoint,
+fiber::quic::QuicConnection::Lease create_connection(void * /*unused*/, fiber::quic::QuicUdpEndpoint &endpoint,
                                                      const fiber::quic::QuicConnection::Options &options) noexcept {
     fiber::quic::QuicConnection::Options owned = options;
     owned.on_destroy = destroy_connection;
@@ -315,7 +315,7 @@ struct QuicMtlsCase {
 class QuicClientMtlsTest : public ::testing::TestWithParam<QuicMtlsCase> {};
 
 struct TestClientCache {
-    static bool load(void *owner, const fiber::quic::QuicClientCacheKey &,
+    static bool load(void *owner, const fiber::quic::QuicClientCacheKey & /*unused*/,
                      fiber::quic::QuicClientCachedState &out) noexcept {
         auto &cache = *static_cast<TestClientCache *>(owner);
         ++cache.load_count;
@@ -330,7 +330,7 @@ struct TestClientCache {
         return true;
     }
 
-    static bool store_session(void *owner, const fiber::quic::QuicClientCacheKey &,
+    static bool store_session(void *owner, const fiber::quic::QuicClientCacheKey & /*unused*/,
                               fiber::tls::TlsSessionState &&session,
                               const fiber::quic::QuicTransportSettings &remembered) noexcept {
         auto &cache = *static_cast<TestClientCache *>(owner);
@@ -340,7 +340,7 @@ struct TestClientCache {
         return true;
     }
 
-    static void store_token(void *owner, const fiber::quic::QuicClientCacheKey &, const std::uint8_t *token,
+    static void store_token(void *owner, const fiber::quic::QuicClientCacheKey & /*unused*/, const std::uint8_t *token,
                             std::size_t token_len) noexcept {
         auto &cache = *static_cast<TestClientCache *>(owner);
         cache.token.assign(token, token + token_len);
@@ -360,7 +360,7 @@ bool cache_store_session(void *owner, fiber::quic::QuicConnection &connection,
     return TestClientCache::store_session(owner, {}, std::move(session), connection.peer_transport().params);
 }
 
-void cache_store_token(void *owner, fiber::quic::QuicConnection &, const std::uint8_t *token,
+void cache_store_token(void *owner, fiber::quic::QuicConnection & /*unused*/, const std::uint8_t *token,
                        std::size_t token_len) noexcept {
     TestClientCache::store_token(owner, {}, token, token_len);
 }
@@ -653,7 +653,7 @@ struct QuicRotatingSelector {
 };
 
 fiber::common::IoErr quic_select_and_retire(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
-                                            const fiber::tls::TlsClientHelloView &) noexcept {
+                                            const fiber::tls::TlsClientHelloView & /*unused*/) noexcept {
     auto *selector = static_cast<QuicRotatingSelector *>(ctx);
     selector->selected = true;
     if (selector->published.empty()) {
@@ -1117,10 +1117,13 @@ fiber::async::DetachedTask connect_twice_across_servers(fiber::quic::QuicUdpEndp
     auto b_started = server_b->start();
     auto client_started = client_endpoint->start();
     if (!a_started || !b_started || !client_started) {
-        summary.error = !a_started        ? a_started.error()
-                        : !b_started      ? b_started.error()
-                        : !client_started ? client_started.error()
-                                          : fiber::common::IoErr::None;
+        if (!a_started) {
+            summary.error = a_started.error();
+        } else if (!b_started) {
+            summary.error = b_started.error();
+        } else {
+            summary.error = client_started.error();
+        }
         promise->set_value(summary);
         co_return;
     }
@@ -1229,9 +1232,9 @@ namespace {
     material.id = 1;
     material.created_ms = now_ms;
     for (std::size_t i = 0; i < material.bytes.size(); ++i) {
-        material.bytes[i] = static_cast<std::uint8_t>(i * 7 + 1);
+        material.bytes[i] = static_cast<std::uint8_t>((i * 7) + 1);
     }
-    constexpr std::uint32_t kTenYears = 10u * 365u * 86400u;
+    constexpr std::uint32_t kTenYears = 10U * 365U * 86400U;
     const fiber::tls::TlsTicketKeyPolicy policy{.key_lifetime_s = kTenYears, .key_retention_s = kTenYears};
     const std::array<fiber::tls::TlsTicketKeyMaterial, 1> keys{{material}};
     auto service = std::make_unique<fiber::tls::TlsTicketService>(keys, policy);
@@ -1278,14 +1281,14 @@ TEST(QuicClientTest, EarlyDataRejectedOnTransportParamsChange) {
     // The advertised window is the endpoint's real receive buffer (the
     // connection overwrites initial_max_data from recv_flow), so this is the
     // knob that reaches the sealed early-data context.
-    options_a.recv_flow.conn_recv_limit = 1u << 20;
+    options_a.recv_flow.conn_recv_limit = 1U << 20;
     ASSERT_TRUE(server_a.init(options_a));
 
     // The changed 0-RTT-relevant params: a different receive budget alters
     // the sealed context, and the gate must veto the early data.
     fiber::quic::QuicUdpEndpoint::Options options_b = options_a;
     options_b.tls = &tls_b;
-    options_b.recv_flow.conn_recv_limit = 2u << 20;
+    options_b.recv_flow.conn_recv_limit = 2U << 20;
     ASSERT_TRUE(server_b.init(options_b));
 
     fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
@@ -1424,9 +1427,9 @@ TEST(QuicClientTest, RetainedDynamicCredentialReleasesAtHandshakeDone) {
     const RetainedCredentialSummary summary = future.get();
     EXPECT_EQ(summary.error, fiber::common::IoErr::None);
     EXPECT_TRUE(selector.selected);
-    EXPECT_EQ(summary.server_connections_when_checked, 1u) << "the server connection is still alive";
+    EXPECT_EQ(summary.server_connections_when_checked, 1U) << "the server connection is still alive";
     EXPECT_TRUE(summary.released_while_connected) << "released at the done-transition, not at teardown";
-    EXPECT_EQ(probe.use_count(), 1u);
+    EXPECT_EQ(probe.use_count(), 1U);
 
     group.stop();
     group.join();
