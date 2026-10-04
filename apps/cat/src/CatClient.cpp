@@ -1,6 +1,7 @@
 #include <fiber/cat/CatClient.h>
 
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <new>
 #include <utility>
@@ -29,7 +30,8 @@ bool valid_options(const CatClientOptions &options) noexcept {
            options.max_system_queued_messages <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) &&
            options.max_system_queued_bytes > 0 &&
            options.max_system_queued_bytes <= std::numeric_limits<std::uint32_t>::max() &&
-           options.max_heartbeat_data_bytes > 0 && options.max_heartbeat_data_bytes <= 64 * 1024 &&
+           options.max_heartbeat_data_bytes > 0 &&
+           options.max_heartbeat_data_bytes <= static_cast<std::size_t>(64 * 1024) &&
            options.max_heartbeat_fields > 0 && options.max_heartbeat_fields <= 128 &&
            options.router_request_timeout > std::chrono::milliseconds::zero() &&
            options.router_refresh_interval > std::chrono::milliseconds::zero() &&
@@ -65,8 +67,7 @@ CatClient::create(event::EventLoop &sender_loop, CatClientConfig config, CatClie
         return std::unexpected(CatClientCreateError::InvalidResolver);
     }
 
-    auto *raw_core =
-            new (std::nothrow) detail::CatClientCore(sender_loop, std::move(config), std::move(options), resolver);
+    auto *raw_core = new (std::nothrow) detail::CatClientCore(sender_loop, std::move(config), options, resolver);
     if (!raw_core) {
         return std::unexpected(CatClientCreateError::NoMemory);
     }
