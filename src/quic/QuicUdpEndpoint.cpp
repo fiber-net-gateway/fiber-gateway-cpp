@@ -407,7 +407,7 @@ namespace {
     if (!space.send_ack || space.pending_ack == kUnsetPacketNumber) {
         return {};
     }
-    if (space.ack_frame.queued) {
+    if (space.ack_frame.hook.linked()) {
         return {};
     }
 

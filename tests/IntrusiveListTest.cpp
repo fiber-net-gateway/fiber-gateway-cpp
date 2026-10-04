@@ -279,4 +279,74 @@ TEST(IntrusiveListDeathTest, ListDestructorAssertsWhenNotEmpty) {
             "FIBER_ASSERT failed: empty");
 }
 
+TEST(IntrusiveListTest, PopEndsDetachNodesAndAllowReinsertion) {
+    TestList list;
+    TestNode a{1}, b{2}, c{3};
+    EXPECT_EQ(list.pop_front(), nullptr);
+    EXPECT_EQ(list.pop_back(), nullptr);
+    list.push_back(a);
+    list.push_back(b);
+    list.push_back(c);
+
+    EXPECT_EQ(list.pop_front(), &a);
+    EXPECT_FALSE(a.hook.linked());
+    EXPECT_EQ(list.front(), &b);
+    EXPECT_EQ(list.prev_of(b), nullptr);
+    EXPECT_EQ(list.pop_back(), &c);
+    EXPECT_FALSE(c.hook.linked());
+    EXPECT_EQ(list.next_of(b), nullptr);
+    EXPECT_EQ(list.pop_back(), &b);
+    EXPECT_TRUE(list.empty());
+    list.push_front(a);
+    EXPECT_EQ(list.pop_front(), &a);
+    EXPECT_TRUE(list.empty());
+    list.push_back(c);
+    EXPECT_EQ(collected(list), (std::vector<int>{3}));
+}
+
+TEST(IntrusiveListTest, SpliceFrontPreservesOrderAndTransfersMembership) {
+    TestList dst, src;
+    TestNode a{1}, b{2}, c{3}, d{4};
+    dst.push_back(c);
+    dst.push_back(d);
+    src.push_back(a);
+    src.push_back(b);
+
+    dst.splice_front(src);
+    EXPECT_TRUE(src.empty());
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2, 3, 4}));
+    EXPECT_EQ(dst.front(), &a);
+    EXPECT_EQ(dst.back(), &d);
+    EXPECT_EQ(dst.prev_of(a), nullptr);
+    EXPECT_EQ(dst.prev_of(c), &b);
+    EXPECT_EQ(dst.prev_of(b), &a);
+    EXPECT_EQ(dst.next_of(d), nullptr);
+    dst.erase(b);
+    src.push_back(b);
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 3, 4}));
+    EXPECT_EQ(collected(src), (std::vector<int>{2}));
+}
+
+TEST(IntrusiveListTest, SpliceFrontHandlesEmptyListsAndSelfSplice) {
+    TestList dst, src;
+    TestNode a{1}, b{2};
+    dst.splice_front(src);
+    EXPECT_TRUE(dst.empty());
+    src.push_back(a);
+    src.push_back(b);
+    dst.splice_front(src);
+    EXPECT_TRUE(src.empty());
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2}));
+    EXPECT_EQ(dst.back(), &b);
+    EXPECT_EQ(dst.prev_of(a), nullptr);
+    EXPECT_EQ(dst.next_of(b), nullptr);
+
+    dst.splice_front(src);
+    dst.splice_front(dst);
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2}));
+    EXPECT_EQ(dst.pop_back(), &b);
+    EXPECT_EQ(dst.pop_front(), &a);
+    EXPECT_TRUE(dst.empty());
+}
+
 } // namespace

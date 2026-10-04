@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <expected>
+#include <memory>
 
 #include <openssl/rand.h>
 
@@ -106,7 +107,9 @@ QuicPath *QuicPathManager::create(const net::SocketAddress &remote, const net::S
         return nullptr;
     }
 
-    *slot = QuicPath{};
+    FIBER_ASSERT(slot->pending_frames.empty());
+    std::destroy_at(slot);
+    std::construct_at(slot);
     slot->allocated = true;
     slot->remote = remote;
     slot->local = local;
@@ -171,7 +174,8 @@ void QuicPathManager::free(QuicPath &path) noexcept {
             bound->used = false;
         }
     }
-    path = QuicPath{};
+    std::destroy_at(&path);
+    std::construct_at(&path);
 }
 
 QuicPath *QuicPathManager::find_path_by_remote_cid_sequence(std::uint64_t sequence) noexcept {
@@ -266,16 +270,13 @@ void QuicPathManager::clear_frames(QuicPath &path) noexcept {
 
 void QuicPathManager::clear_frames(QuicPath &path, QuicFrameType type) noexcept {
     auto &space = connection_.packet_number_space(QuicEncryptionLevel::Application);
-    QuicOutputFrame *prev = nullptr;
     QuicOutputFrame *frame = path.pending_frames.front();
     while (frame != nullptr) {
         QuicOutputFrame *next = path.pending_frames.next_of(*frame);
         if (frame->type == type) {
-            path.pending_frames.erase_after(prev, *frame);
+            path.pending_frames.erase(*frame);
             frame->path = nullptr;
             space.release_frame(*frame);
-        } else {
-            prev = frame;
         }
         frame = next;
     }

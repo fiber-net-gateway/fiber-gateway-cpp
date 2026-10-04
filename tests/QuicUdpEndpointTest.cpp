@@ -1304,7 +1304,7 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
             received->ecn,
             space.pending_frames.empty(),
             space.sending_frames.empty(),
-            !space.ack_frame.queued,
+            !space.ack_frame.hook.linked(),
             first_sent != nullptr && fiber::quic::quic_output_frame_ack_eliciting(first_sent->type) &&
                     first_sent->packet_len != 0,
     });
@@ -2011,15 +2011,12 @@ std::size_t collect_pending_new_connection_ids(
 
 void clear_pending_new_connection_ids(fiber::quic::QuicConnection &connection) {
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
-    fiber::quic::QuicOutputFrame *prev = nullptr;
     fiber::quic::QuicOutputFrame *frame = space.pending_frames.front();
     while (frame != nullptr) {
         fiber::quic::QuicOutputFrame *next = space.pending_frames.next_of(*frame);
         if (frame->type == fiber::quic::QuicFrameType::NewConnectionId) {
-            space.pending_frames.erase_after(prev, *frame);
+            space.pending_frames.erase(*frame);
             space.release_frame(*frame);
-        } else {
-            prev = frame;
         }
         frame = next;
     }

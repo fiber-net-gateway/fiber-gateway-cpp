@@ -135,7 +135,7 @@ struct FrameParseClose {
     return path;
 }
 
-void discard_frame_queue(QuicConnection &conn, QuicPacketNumberSpace &space, QuicOutputFrameQueue &queue) noexcept {
+void discard_frame_queue(QuicConnection &conn, QuicPacketNumberSpace &space, QuicOutputFrameList &queue) noexcept {
     (void) conn;
     while (QuicOutputFrame *frame = queue.pop_front()) {
         space.release_frame(*frame);
@@ -148,7 +148,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     discard_frame_queue(conn, space, space.pending_frames);
     discard_frame_queue(conn, space, space.sending_frames);
     discard_frame_queue(conn, space, space.sent_frames);
-    if (space.ack_frame.queued) {
+    if (space.ack_frame.hook.linked()) {
         space.pending_frames.erase(space.ack_frame);
     }
     space.send_ack = false;

@@ -27,7 +27,7 @@ void fill_ecn_fields(QuicOutputFrame &frame, const QuicEcnCounters &ecn_counters
 QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept { reset(QuicEncryptionLevel::Initial); }
 
 QuicPacketNumberSpace::~QuicPacketNumberSpace() {
-    auto release_queue = [this](QuicOutputFrameQueue &queue) noexcept {
+    auto release_queue = [this](QuicOutputFrameList &queue) noexcept {
         while (QuicOutputFrame *frame = queue.pop_front()) {
             release_frame(*frame);
         }
@@ -47,7 +47,7 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     next_packet_number = 0;
     largest_acked_packet_number = kUnsetPacketNumber;
     largest_received_packet_number = kUnsetPacketNumber;
-    ack_frame = QuicOutputFrame{};
+    ack_frame.reset();
     pending_ack = kUnsetPacketNumber;
     largest_range = kUnsetPacketNumber;
     first_range = 0;
@@ -70,7 +70,7 @@ void QuicPacketNumberSpace::release_frame(QuicOutputFrame &frame) noexcept {
     if (&frame == &ack_frame) {
         return;
     }
-    if (frame.queued) {
+    if (frame.hook.linked()) {
         return;
     }
 
@@ -132,7 +132,7 @@ common::IoResult<void> quic_prepare_ack_frame(QuicOutputFrame &frame, std::uint6
         range_buf_len = rcur.offset();
     }
 
-    frame = QuicOutputFrame{};
+    frame.reset();
     frame.type = QuicFrameType::Ack;
     frame.u.ack.largest = largest;
     frame.u.ack.delay = delay;
@@ -170,7 +170,7 @@ void QuicPacketNumberSpace::generate_forced_ack(std::uint64_t largest, std::uint
     }
 
     // Use the static ack_frame if available; otherwise fall back to pool.
-    QuicOutputFrame *frame = ack_frame.queued ? alloc_frame() : &ack_frame;
+    QuicOutputFrame *frame = ack_frame.hook.linked() ? alloc_frame() : &ack_frame;
     if (frame == nullptr) {
         return;
     }

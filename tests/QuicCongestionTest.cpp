@@ -137,24 +137,24 @@ TEST(QuicCongestionTest, RttSampleSubtractsAckDelayAtMinRttBoundary) {
     EXPECT_EQ(rtt.rttvar, fiber::quic::QuicTime{15});
 }
 
-TEST(QuicOutputFrameQueueTest, MaintainsReverseLinksAcrossMutations) {
+TEST(QuicOutputFrameListTest, MaintainsReverseLinksAcrossMutations) {
+    fiber::quic::QuicOutputFrameList queue{};
+    fiber::quic::QuicOutputFrameList prefix{};
     fiber::quic::QuicOutputFrame first{};
     fiber::quic::QuicOutputFrame second{};
     fiber::quic::QuicOutputFrame third{};
     fiber::quic::QuicOutputFrame fourth{};
     fiber::quic::QuicOutputFrame fifth{};
-    fiber::quic::QuicOutputFrameQueue queue{};
 
     queue.push_back(first);
     queue.push_back(second);
     queue.push_front(third);
     queue.insert_after(first, fourth);
-    queue.erase_after(&first, fourth);
+    queue.erase(fourth);
 
-    fiber::quic::QuicOutputFrameQueue prefix{};
     prefix.push_back(fourth);
     prefix.push_back(fifth);
-    queue.prepend_all(prefix);
+    queue.splice_front(prefix);
 
     const std::array expected{&fourth, &fifth, &third, &first, &second};
     fiber::quic::QuicOutputFrame *previous = nullptr;
@@ -182,17 +182,17 @@ TEST(QuicOutputFrameQueueTest, MaintainsReverseLinksAcrossMutations) {
     ASSERT_EQ(removed_tail, &second);
     EXPECT_EQ(queue.back(), &first);
     EXPECT_EQ(queue.next_of(first), nullptr);
-    EXPECT_EQ(removed_tail->next, nullptr);
-    EXPECT_EQ(removed_tail->prev, nullptr);
-    EXPECT_FALSE(removed_tail->queued);
+    EXPECT_EQ(removed_tail->hook.next, &removed_tail->hook);
+    EXPECT_EQ(removed_tail->hook.prev, &removed_tail->hook);
+    EXPECT_FALSE(removed_tail->hook.linked());
     queue.push_back(*removed_tail);
 
     for (std::size_t i = 0; i < expected.size(); ++i) {
         fiber::quic::QuicOutputFrame *removed = queue.pop_front();
         ASSERT_EQ(removed, expected[i]);
-        EXPECT_EQ(removed->next, nullptr);
-        EXPECT_EQ(removed->prev, nullptr);
-        EXPECT_FALSE(removed->queued);
+        EXPECT_EQ(removed->hook.next, &removed->hook);
+        EXPECT_EQ(removed->hook.prev, &removed->hook);
+        EXPECT_FALSE(removed->hook.linked());
     }
     EXPECT_TRUE(queue.empty());
 }
