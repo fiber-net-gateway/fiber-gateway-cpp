@@ -285,8 +285,6 @@ private:
     [[nodiscard]] static std::uint64_t
     hash_stateless_reset_token(const std::uint8_t token[kStatelessResetTokenLength]) noexcept;
     [[nodiscard]] static std::uint64_t hash_stateless_peer(const net::SocketAddress &peer) noexcept;
-    [[nodiscard]] static int compare_connection_id(const QuicConnectionId &left,
-                                                   const QuicConnectionId &right) noexcept;
     [[nodiscard]] static int compare_dcid_key(const QuicConnectionId &left, const QuicConnectionId &right) noexcept;
     [[nodiscard]] static QuicConnectionIdIndex *index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept;
     [[nodiscard]] static const QuicConnectionIdIndex *
