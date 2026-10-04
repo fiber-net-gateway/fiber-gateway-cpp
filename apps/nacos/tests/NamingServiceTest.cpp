@@ -4,6 +4,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <future>
 #include <memory>
@@ -55,6 +56,7 @@ struct CallbackWatch {
     static void notify(void *context, const Result &result) noexcept {
         auto *self = static_cast<CallbackWatch *>(context);
         FIBER_ASSERT(self != nullptr);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
         self->publisher->publish(result);
     }
 
@@ -64,7 +66,7 @@ struct CallbackWatch {
 };
 
 template<typename T>
-void ignore_subscription(void *, const fiber::nacos::SubscriptionResult<T> &) noexcept {}
+void ignore_subscription(void * /*unused*/, const fiber::nacos::SubscriptionResult<T> & /*unused*/) noexcept {}
 
 fiber::common::IoResult<std::uint16_t> local_port(int fd) {
     sockaddr_storage storage{};
@@ -110,7 +112,7 @@ read_payload(fiber::http::HttpExchange &exchange, fiber::nacos::detail::grpc::Gr
             }
             co_return payload;
         }
-        auto chunk = co_await exchange.read_body(64 * 1024, 2s);
+        auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 2s);
         if (!chunk) {
             co_return std::unexpected(chunk.error());
         }
@@ -218,6 +220,7 @@ public:
 
     void close() noexcept {
         closing_ = true;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
         push_publisher_->publish(++push_sequence_);
         listener_.close();
         if (active_connection_) {
@@ -308,6 +311,7 @@ private:
                 make_service_info(request.service_name.value(), request.group_name.value(), ++last_ref_time_));
         co_await send_unary(exchange, response);
         if (request.subscribe) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start()
             push_publisher_->publish(++push_sequence_);
             maybe_schedule_reset();
         }
@@ -337,12 +341,12 @@ private:
     }
 
     fiber::async::Task<void> handle_unary(fiber::http::HttpExchange &exchange) {
-        fiber::nacos::detail::grpc::GrpcFrameReader reader(1024 * 1024);
+        fiber::nacos::detail::grpc::GrpcFrameReader reader(static_cast<std::size_t>(1024 * 1024));
         auto request = co_await read_payload(exchange, reader);
         if (!request) {
             co_return;
         }
-        auto view = nacos_detail::validate_payload(*request, 1024 * 1024);
+        auto view = nacos_detail::validate_payload(*request, static_cast<std::size_t>(1024 * 1024));
         if (!view) {
             co_return;
         }
@@ -364,12 +368,12 @@ private:
 
     fiber::async::Task<void> handle_bidi(fiber::http::HttpExchange &exchange) {
         ++setup_count_;
-        fiber::nacos::detail::grpc::GrpcFrameReader reader(1024 * 1024);
+        fiber::nacos::detail::grpc::GrpcFrameReader reader(static_cast<std::size_t>(1024 * 1024));
         auto setup_payload = co_await read_payload(exchange, reader);
         if (!setup_payload || !(co_await send_response_header(exchange))) {
             co_return;
         }
-        auto setup_view = nacos_detail::validate_payload(*setup_payload, 1024 * 1024);
+        auto setup_view = nacos_detail::validate_payload(*setup_payload, static_cast<std::size_t>(1024 * 1024));
         if (setup_view) {
             fiber::mem::BufPool pool;
             dto::req::ConnectionSetupRequest setup;
@@ -378,7 +382,8 @@ private:
                 naming_label_seen_ = module && module->value == "naming";
             }
         }
-        auto ack = nacos_detail::encode_payload(dto::req::SetupAckRequest{}, server_metadata(), 1024 * 1024);
+        auto ack = nacos_detail::encode_payload(dto::req::SetupAckRequest{}, server_metadata(),
+                                                static_cast<std::size_t>(1024 * 1024));
         if (!ack || !(co_await send_payload(exchange, *ack))) {
             co_return;
         }
@@ -401,7 +406,8 @@ private:
                 notify.service_name.set_present("service");
                 notify.group_name.set_present("group");
                 notify.service_info.set_present(make_service_info("service", "group", ++last_ref_time_));
-                auto payload = nacos_detail::encode_payload(notify, server_metadata(), 1024 * 1024);
+                auto payload =
+                        nacos_detail::encode_payload(notify, server_metadata(), static_cast<std::size_t>(1024 * 1024));
                 if (!payload || !(co_await send_payload(exchange, *payload))) {
                     break;
                 }
@@ -411,7 +417,8 @@ private:
                 }
                 fiber::mem::BufPool pool;
                 dto::resp::NotifySubscriberResponse response;
-                if (nacos_detail::decode_payload(*response_payload, 1024 * 1024, pool, response)) {
+                if (nacos_detail::decode_payload(*response_payload, static_cast<std::size_t>(1024 * 1024), pool,
+                                                 response)) {
                     ++notify_ack_count_;
                 }
                 continue;
@@ -702,7 +709,7 @@ NamingCaseResult execute_case(bool reconnect) {
                         [server_ptr = server.get(), server_finished]() { return server_ptr->serve(server_finished); });
 
     fiber::nacos::NacosClientConfigParams params;
-    params.server_hosts.push_back("NAMING.TEST.");
+    params.server_hosts.emplace_back("NAMING.TEST.");
     params.username = "nacos";
     params.password = "nacos";
     params.grpc_port = server->port();
@@ -718,7 +725,7 @@ NamingCaseResult execute_case(bool reconnect) {
     options.rpc.heartbeat_interval = 1s;
     options.rpc.reconnect_initial_delay = 10ms;
     options.rpc.reconnect_max_delay = 50ms;
-    options.rpc.max_inbound_message_bytes = 1024 * 1024;
+    options.rpc.max_inbound_message_bytes = static_cast<std::size_t>(1024 * 1024);
 
     auto finished = std::make_shared<std::promise<NamingCaseResult>>();
     auto future = finished->get_future();
@@ -760,7 +767,7 @@ DetachedTask run_lifecycle_interrupt_case(fiber::event::EventLoop *loop, std::sh
                                           std::shared_ptr<std::promise<LifecycleInterruptResult>> finished) {
     auto make_config = []() {
         fiber::nacos::NacosClientConfigParams params;
-        params.server_hosts.push_back("127.0.0.1");
+        params.server_hosts.emplace_back("127.0.0.1");
         params.grpc_port = 1;
         return fiber::nacos::NacosClientConfig::create(std::move(params));
     };
@@ -859,7 +866,7 @@ TEST(NacosNamingServiceTest, QuerySubscriptionRegistrationAndShutdown) {
     EXPECT_TRUE(result.unsubscribed_after_last);
     EXPECT_TRUE(result.stopped);
     EXPECT_TRUE(result.authority_seen);
-    EXPECT_GT(result.notify_acks, 0u);
+    EXPECT_GT(result.notify_acks, 0U);
 }
 
 TEST(NacosNamingServiceTest, InstanceDefaultsToDefaultCluster) {
@@ -1057,11 +1064,11 @@ TEST(NacosNamingServiceTest, RnacosInteropWhenEnabled) {
     const auto parsed = std::from_chars(port_view.data(), port_view.data() + port_view.size(), port);
     ASSERT_EQ(parsed.ec, std::errc());
     ASSERT_EQ(parsed.ptr, port_view.data() + port_view.size());
-    ASSERT_GT(port, 0u);
-    ASSERT_LE(port, 65535u);
+    ASSERT_GT(port, 0U);
+    ASSERT_LE(port, 65535U);
 
     fiber::nacos::NacosClientConfigParams params;
-    params.server_hosts.push_back("127.0.0.1");
+    params.server_hosts.emplace_back("127.0.0.1");
     params.username = "nacos";
     params.password = "nacos";
     params.grpc_port = static_cast<std::uint16_t>(port);

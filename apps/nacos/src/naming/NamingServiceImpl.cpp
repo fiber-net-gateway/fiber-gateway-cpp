@@ -191,7 +191,7 @@ private:
     [[nodiscard]] async::DetachedTask run_subscription(EntryPtr entry, bool subscribe) noexcept;
 
     [[nodiscard]] static async::Task<common::IoResult<dto::resp::NotifySubscriberResponse>>
-    handle_notify(void *context, NacosServerRequestContext &,
+    handle_notify(void *context, NacosServerRequestContext & /*unused*/,
                   const dto::req::NotifySubscriberRequest &request) noexcept;
 
     [[nodiscard]] static std::expected<void, NamingServiceError>
@@ -297,7 +297,7 @@ private:
     NacosRpc *ready_rpc_ = nullptr;
     NacosServerAddressResolver server_resolver_;
     std::size_t preferred_server_index_ = 0;
-    std::uint64_t random_state_ = 0x243f6a8885a308d3ull;
+    std::uint64_t random_state_ = 0x243f6a8885a308d3ULL;
     bool connection_attempt_started_ = false;
 };
 
@@ -339,6 +339,7 @@ common::IoResult<void> NamingServiceImpl::start() noexcept {
     if (state() != NacosServiceState::Created) {
         return std::unexpected(common::IoErr::Already);
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     lifecycle_publisher_->publish(NacosServiceState::Running);
     set_connection_status(NacosServicePhase::Connecting, authentication_failure(), false);
     async::spawn([this]() { return run(); });
@@ -454,6 +455,7 @@ void NamingServiceImpl::publish_status(NamingServiceStatus next) {
         return;
     }
     status_ = next;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     status_publisher_->publish(status_);
 }
 
@@ -828,6 +830,7 @@ NamingServiceImpl::own_service_info(const dto::NamingServiceInfo &value) const {
         }
     }
     FIBER_ASSERT(metadata_index == metadata_count);
+    // NOLINTNEXTLINE(modernize-use-integer-sign-comparison) difference is cast to std::size_t; both sides unsigned
     FIBER_ASSERT(static_cast<std::size_t>(text_cursor - reinterpret_cast<char *>(storage + strings_offset)) ==
                  string_bytes);
     return freeze_pool_snapshot(owner);
@@ -1004,7 +1007,7 @@ void NamingServiceImpl::publish_value(NamingEntry &entry, std::shared_ptr<const 
 }
 
 async::Task<common::IoResult<dto::resp::NotifySubscriberResponse>>
-NamingServiceImpl::handle_notify(void *context, NacosServerRequestContext &,
+NamingServiceImpl::handle_notify(void *context, NacosServerRequestContext & /*unused*/,
                                  const dto::req::NotifySubscriberRequest &request) noexcept {
     auto *self = static_cast<NamingServiceImpl *>(context);
     FIBER_ASSERT(self != nullptr);
@@ -1216,6 +1219,7 @@ void NamingServiceImpl::publish_registration(RegistrationEntry &entry, Registrat
     if (error) {
         status.error = std::make_shared<const NamingServiceError>(std::move(*error));
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) status_publisher is created together with the entry
     entry.status_publisher->publish(std::move(status));
     update_registration_counts(entry);
     if (refresh_service_status) {
@@ -1243,6 +1247,7 @@ async::DetachedTask NamingServiceImpl::run() noexcept {
     registrations_.clear();
     refresh_status();
     FIBER_ASSERT(state() == NacosServiceState::Stopping);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     lifecycle_publisher_->publish(NacosServiceState::Stopped);
     set_connection_status(NacosServicePhase::Stopped, NacosServiceFailureCategory::Shutdown, false);
 }
@@ -1277,6 +1282,7 @@ void NamingServiceImpl::request_shutdown() noexcept {
         return;
     }
     FIBER_ASSERT(state() == NacosServiceState::Created || state() == NacosServiceState::Running);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     lifecycle_publisher_->publish(NacosServiceState::Stopping);
     set_connection_status(NacosServicePhase::Stopping, NacosServiceFailureCategory::Shutdown, false);
     pool_.disable();
@@ -1452,7 +1458,7 @@ std::chrono::milliseconds NamingServiceImpl::jittered(std::chrono::milliseconds 
     if (spread <= std::chrono::milliseconds::zero()) {
         return delay;
     }
-    const std::uint64_t width = static_cast<std::uint64_t>(spread.count()) * 2 + 1;
+    const std::uint64_t width = (static_cast<std::uint64_t>(spread.count()) * 2) + 1;
     const auto offset = static_cast<std::int64_t>(random_state_ % width) - spread.count();
     return delay + std::chrono::milliseconds(offset);
 }

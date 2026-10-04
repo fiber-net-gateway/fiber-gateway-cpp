@@ -21,7 +21,7 @@ using fiber::mem::IoBufNodePool;
 using fiber::nacos::detail::grpc::frame;
 using fiber::nacos::detail::grpc::GrpcFrameReader;
 
-IoBufChain make_payload(IoBufNodePool &pool, std::string_view data) {
+IoBufChain make_payload(std::string_view data) {
     IoBufChain chain;
     if (!data.empty()) {
         IoBuf buf = IoBuf::allocate(data.size());
@@ -32,7 +32,7 @@ IoBufChain make_payload(IoBufNodePool &pool, std::string_view data) {
     return chain;
 }
 
-IoBufChain make_multi_payload(IoBufNodePool &pool, std::string_view a, std::string_view b) {
+IoBufChain make_multi_payload(std::string_view a, std::string_view b) {
     IoBufChain chain;
     IoBuf first = IoBuf::allocate(a.size());
     std::memcpy(first.writable_data(), a.data(), a.size());
@@ -68,11 +68,11 @@ std::string flatten(const IoBufChain &chain) {
 }
 
 TEST(GrpcFramingTest, FrameHeaderIsCorrectBigEndian) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const std::string payload(300, 'x'); // length needs 2 bytes
-        auto framed = frame(make_payload(pool, payload));
+        auto framed = frame(make_payload(payload));
         ASSERT_TRUE(framed.has_value());
-        ASSERT_EQ(framed->readable_bytes(), 5u + payload.size());
+        ASSERT_EQ(framed->readable_bytes(), 5U + payload.size());
 
         const IoBuf *head = framed->front();
         ASSERT_NE(head, nullptr);
@@ -86,14 +86,14 @@ TEST(GrpcFramingTest, FrameHeaderIsCorrectBigEndian) {
 }
 
 TEST(GrpcFramingTest, FrameAndDeframeRoundTrip) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const std::string payload(100, 'y');
-        auto framed = frame(make_payload(pool, payload));
+        auto framed = frame(make_payload(payload));
         ASSERT_TRUE(framed.has_value());
 
         GrpcFrameReader reader;
         ASSERT_TRUE(reader.append(std::move(*framed)).has_value());
-        EXPECT_EQ(reader.buffered_bytes(), 5u + payload.size());
+        EXPECT_EQ(reader.buffered_bytes(), 5U + payload.size());
 
         IoBufChain out;
         auto r = reader.next_payload(out);
@@ -105,15 +105,15 @@ TEST(GrpcFramingTest, FrameAndDeframeRoundTrip) {
         auto r2 = reader.next_payload(out2);
         ASSERT_TRUE(r2.has_value());
         EXPECT_FALSE(*r2);
-        EXPECT_EQ(reader.buffered_bytes(), 0u);
+        EXPECT_EQ(reader.buffered_bytes(), 0U);
     });
 }
 
 TEST(GrpcFramingTest, EmptyMessageFrame) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
-        auto framed = frame(make_payload(pool, ""));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
+        auto framed = frame(make_payload(""));
         ASSERT_TRUE(framed.has_value());
-        ASSERT_EQ(framed->readable_bytes(), 5u);
+        ASSERT_EQ(framed->readable_bytes(), 5U);
 
         GrpcFrameReader reader;
         ASSERT_TRUE(reader.append(std::move(*framed)).has_value());
@@ -126,7 +126,7 @@ TEST(GrpcFramingTest, EmptyMessageFrame) {
 }
 
 TEST(GrpcFramingTest, MultiSegmentAppendDeframes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const std::string payload("the quick brown fox");
         // Build the full framed wire bytes (5-byte header + payload), then split
         // them across two nodes so the multi-segment append path is exercised.
@@ -151,7 +151,7 @@ TEST(GrpcFramingTest, MultiSegmentAppendDeframes) {
         b.commit(total - half);
         split.append(std::move(a));
         split.append(std::move(b));
-        ASSERT_EQ(split.size(), 2u);
+        ASSERT_EQ(split.size(), 2U);
         ASSERT_NE(split.first_readable()->readable(), split.readable_bytes());
 
         GrpcFrameReader reader;
@@ -164,13 +164,13 @@ TEST(GrpcFramingTest, MultiSegmentAppendDeframes) {
 }
 
 TEST(GrpcFramingTest, MultipleFramesInOneBuffer) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const std::string p1("first");
         const std::string p2("second-longer");
 
         GrpcFrameReader reader;
-        ASSERT_TRUE(reader.append(*frame(make_payload(pool, p1))).has_value());
-        ASSERT_TRUE(reader.append(*frame(make_payload(pool, p2))).has_value());
+        ASSERT_TRUE(reader.append(*frame(make_payload(p1))).has_value());
+        ASSERT_TRUE(reader.append(*frame(make_payload(p2))).has_value());
 
         IoBufChain o1;
         auto r1 = reader.next_payload(o1);
@@ -188,17 +188,17 @@ TEST(GrpcFramingTest, MultipleFramesInOneBuffer) {
 }
 
 TEST(GrpcFramingTest, PartialFrameNeedsMore) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         GrpcFrameReader reader;
         // 3 bytes of header only.
-        ASSERT_TRUE(reader.append(make_payload(pool, std::string_view("\x00\x00\x00", 3))).has_value());
+        ASSERT_TRUE(reader.append(make_payload(std::string_view("\x00\x00\x00", 3))).has_value());
         IoBufChain out;
         auto r = reader.next_payload(out);
         ASSERT_TRUE(r.has_value());
         EXPECT_FALSE(*r);
 
         // Remaining header byte + length=2 + payload "hi".
-        ASSERT_TRUE(reader.append(make_payload(pool, std::string_view("\x00\x02hi", 4))).has_value());
+        ASSERT_TRUE(reader.append(make_payload(std::string_view("\x00\x02hi", 4))).has_value());
         IoBufChain out2;
         auto r2 = reader.next_payload(out2);
         ASSERT_TRUE(r2.has_value());
@@ -208,12 +208,12 @@ TEST(GrpcFramingTest, PartialFrameNeedsMore) {
 }
 
 TEST(GrpcFramingTest, RejectsCompressedFlag) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         GrpcFrameReader reader;
         std::string bad;
         bad.push_back('\x01'); // compressed
         bad.append("\x00\x00\x00\x00", 4);
-        ASSERT_TRUE(reader.append(make_payload(pool, bad)).has_value());
+        ASSERT_TRUE(reader.append(make_payload(bad)).has_value());
         IoBufChain out;
         auto r = reader.next_payload(out);
         ASSERT_FALSE(r.has_value());
@@ -222,10 +222,10 @@ TEST(GrpcFramingTest, RejectsCompressedFlag) {
 }
 
 TEST(GrpcFramingTest, OversizedLengthWaitsForBytes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         GrpcFrameReader reader;
         // flag=0, length=0x10 but no payload bytes yet.
-        ASSERT_TRUE(reader.append(make_payload(pool, std::string_view("\x00\x00\x00\x00\x10", 5))).has_value());
+        ASSERT_TRUE(reader.append(make_payload(std::string_view("\x00\x00\x00\x00\x10", 5))).has_value());
         IoBufChain out;
         auto r = reader.next_payload(out);
         ASSERT_TRUE(r.has_value());
@@ -234,9 +234,9 @@ TEST(GrpcFramingTest, OversizedLengthWaitsForBytes) {
 }
 
 TEST(GrpcFramingTest, RejectsDeclaredMessageAboveConfiguredLimitBeforeBufferingBody) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         GrpcFrameReader reader(15);
-        ASSERT_TRUE(reader.append(make_payload(pool, std::string_view("\x00\x00\x00\x00\x10", 5))).has_value());
+        ASSERT_TRUE(reader.append(make_payload(std::string_view("\x00\x00\x00\x00\x10", 5))).has_value());
         IoBufChain out;
         auto result = reader.next_payload(out);
         ASSERT_FALSE(result.has_value());
@@ -246,13 +246,13 @@ TEST(GrpcFramingTest, RejectsDeclaredMessageAboveConfiguredLimitBeforeBufferingB
 
 
 TEST(GrpcFramingTest, FramePreservesMultiNodePayload) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const std::string a("aaaa");
         const std::string b("bbbb");
-        auto framed = frame(make_multi_payload(pool, a, b));
+        auto framed = frame(make_multi_payload(a, b));
         ASSERT_TRUE(framed.has_value());
-        EXPECT_EQ(framed->readable_bytes(), 5u + a.size() + b.size());
-        EXPECT_EQ(framed->size(), 3u); // header + two payload nodes
+        EXPECT_EQ(framed->readable_bytes(), 5U + a.size() + b.size());
+        EXPECT_EQ(framed->size(), 3U); // header + two payload nodes
 
         GrpcFrameReader reader;
         ASSERT_TRUE(reader.append(std::move(*framed)).has_value());

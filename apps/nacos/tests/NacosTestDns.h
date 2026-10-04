@@ -38,7 +38,7 @@ public:
                 net::IpAddress::v4({127, 0, 0, 2}),
                 net::IpAddress::loopback_v4(),
         };
-        const dns::DnsCacheKey key{normalized_host, dns::dns_cache_hash(normalized_host)};
+        const dns::DnsCacheKey key{.normalized_name = normalized_host, .hash = dns::dns_cache_hash(normalized_host)};
         const auto now = loop.now();
         const auto expire_at = now + std::chrono::seconds(60);
         const common::IoErr v4 =

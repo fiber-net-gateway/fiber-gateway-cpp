@@ -97,7 +97,9 @@ void add_during_notify(void *context, const TestResult &result) noexcept {
 
 TEST(SubscriptionPoolTest, CallbackCanRemoveCurrentAndNextNode) {
     std::size_t remove_count = 0;
+    // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
     TestPool pool([](TestEntryPtr) {},
+                  // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
                   [&](TestEntryPtr) {
                       ++remove_count;
                       return fiber::nacos::detail::RemoveDecision::RetireNow;
@@ -113,9 +115,11 @@ TEST(SubscriptionPoolTest, CallbackCanRemoveCurrentAndNextNode) {
     ASSERT_TRUE(first_result);
     ASSERT_TRUE(second_result);
     ASSERT_TRUE(third_result);
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     TestSubscription first = std::move(*first_result);
     TestSubscription second = std::move(*second_result);
     TestSubscription third = std::move(*third_result);
+    // NOLINTEND(bugprone-unchecked-optional-access)
     first_context.self = &first;
     first_context.next = &second;
 
@@ -135,6 +139,7 @@ TEST(SubscriptionPoolTest, CallbackCanRemoveCurrentAndNextNode) {
 }
 
 TEST(SubscriptionPoolTest, SubscriberAddedDuringNotifyReceivesVersionOnce) {
+    // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
     TestPool pool([](TestEntryPtr) {}, [](TestEntryPtr) { return fiber::nacos::detail::RemoveDecision::RetireNow; });
     std::vector<int> calls;
     std::optional<TestSubscription> added;
@@ -147,14 +152,18 @@ TEST(SubscriptionPoolTest, SubscriberAddedDuringNotifyReceivesVersionOnce) {
     pool.publish(*entry, std::make_shared<const int>(11));
 
     EXPECT_EQ(calls, std::vector<int>({11, 11}));
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     first->close();
     added->close();
+    // NOLINTEND(bugprone-unchecked-optional-access)
     EXPECT_TRUE(pool.empty());
 }
 
 TEST(SubscriptionPoolTest, LastSubscriberRemovalIgnoresInflightEntryReference) {
     std::size_t remove_count = 0;
+    // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
     TestPool pool([](TestEntryPtr) {},
+                  // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
                   [&](TestEntryPtr) {
                       ++remove_count;
                       return fiber::nacos::detail::RemoveDecision::RetireNow;
@@ -165,6 +174,7 @@ TEST(SubscriptionPoolTest, LastSubscriberRemovalIgnoresInflightEntryReference) {
     TestEntryPtr inflight = pool.find("data", "group");
     ASSERT_TRUE(inflight);
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     subscription->close();
 
     EXPECT_EQ(remove_count, 1U);
@@ -175,7 +185,9 @@ TEST(SubscriptionPoolTest, LastSubscriberRemovalIgnoresInflightEntryReference) {
 TEST(SubscriptionPoolTest, IdleEntryCanBeRevivedBeforeRetirement) {
     std::size_t add_count = 0;
     std::size_t remove_count = 0;
+    // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
     TestPool pool([&](TestEntryPtr) { ++add_count; },
+                  // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
                   [&](TestEntryPtr) {
                       ++remove_count;
                       return fiber::nacos::detail::RemoveDecision::KeepLinked;
@@ -185,6 +197,7 @@ TEST(SubscriptionPoolTest, IdleEntryCanBeRevivedBeforeRetirement) {
     ASSERT_TRUE(first);
     TestEntryPtr original = pool.find("data", "group");
     ASSERT_TRUE(original);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     first->close();
     EXPECT_FALSE(pool.empty());
 
@@ -195,6 +208,7 @@ TEST(SubscriptionPoolTest, IdleEntryCanBeRevivedBeforeRetirement) {
     EXPECT_EQ(add_count, 2U);
     EXPECT_EQ(remove_count, 1U);
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     revived->close();
     EXPECT_EQ(remove_count, 2U);
     pool.retire(*original);
@@ -202,6 +216,7 @@ TEST(SubscriptionPoolTest, IdleEntryCanBeRevivedBeforeRetirement) {
 }
 
 TEST(SubscriptionPoolTest, ShutdownClosesAndOrphansLiveHandle) {
+    // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
     TestPool pool([](TestEntryPtr) {}, [](TestEntryPtr) { return fiber::nacos::detail::RemoveDecision::RetireNow; });
     std::vector<int> calls;
     auto subscription = pool.subscribe("data", "group", &record_value, &calls);
@@ -209,16 +224,20 @@ TEST(SubscriptionPoolTest, ShutdownClosesAndOrphansLiveHandle) {
 
     pool.close_all();
 
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     EXPECT_TRUE(subscription->closed());
     EXPECT_TRUE(pool.empty());
     subscription->close();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(SubscriptionPoolTest, ClosedCallbackCanDestroyItsOwnNode) {
-    TestPool pool([](TestEntryPtr) {}, [](TestEntryPtr) { return fiber::nacos::detail::RemoveDecision::RetireNow; });
+    TestPool pool([](const TestEntryPtr &) {},
+                  [](const TestEntryPtr &) { return fiber::nacos::detail::RemoveDecision::RetireNow; });
     CloseContext context;
     auto subscribed = pool.subscribe("data", "group", &close_from_closed_callback, &context);
     ASSERT_TRUE(subscribed);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     TestSubscription subscription = std::move(*subscribed);
     context.subscription = &subscription;
 
@@ -230,6 +249,7 @@ TEST(SubscriptionPoolTest, ClosedCallbackCanDestroyItsOwnNode) {
 }
 
 TEST(SubscriptionPoolTest, RetainedSnapshotSurvivesReentrantShutdownAndEntryRetirement) {
+    // NOLINTNEXTLINE(performance-unnecessary-value-param) the callback takes its own EntryPtr reference
     TestPool pool([](TestEntryPtr) {}, [](TestEntryPtr) { return fiber::nacos::detail::RemoveDecision::RetireNow; });
     RetainAndCloseContext context{.pool = &pool};
     auto subscribed = pool.subscribe("data", "group", &retain_and_close, &context);
@@ -244,6 +264,7 @@ TEST(SubscriptionPoolTest, RetainedSnapshotSurvivesReentrantShutdownAndEntryReti
                                      {fiber::nacos::ResultKind::Success, fiber::nacos::ResultKind::Closed}));
     ASSERT_NE(context.retained, nullptr);
     EXPECT_EQ(*context.retained, 17);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     EXPECT_TRUE(subscribed->closed());
     EXPECT_TRUE(pool.empty());
 }

@@ -634,6 +634,7 @@ void NacosRpc::begin_stop(NacosRpcCloseKind kind, const NacosRpcError &error,
     if (stream_.valid()) {
         stream_.cancel(error.io_error == common::IoErr::None ? common::IoErr::Canceled : error.io_error);
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     stop_publisher_->publish(true);
 }
 

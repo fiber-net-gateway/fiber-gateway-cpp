@@ -75,6 +75,7 @@ public:
         if (result_ != common::IoErr::None) {
             return std::unexpected(result_);
         }
+        // NOLINTNEXTLINE(bugprone-branch-clone) kData selects payload vs empty; branches are not clones
         if constexpr (kData) {
             return AwaitResult{sent_bytes_};
         } else {

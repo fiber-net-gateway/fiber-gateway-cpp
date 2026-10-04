@@ -15,7 +15,7 @@ constexpr std::size_t kFrameHeaderSize = 5;
 
 common::IoResult<mem::IoBufChain> frame(mem::IoBufChain payload) noexcept {
     const std::size_t n = payload.readable_bytes();
-    if (n > 0xffffffffull) {
+    if (n > 0xffffffffULL) {
         return std::unexpected(common::IoErr::MessageTooLarge);
     }
 

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -22,7 +23,7 @@ using fiber::nacos::detail::grpc::decode;
 using fiber::nacos::detail::grpc::encode;
 
 TEST(GrpcProtoCodecTest, EncodeDecodeRoundTrip) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &node_pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*node_pool*/) {
         helloworld::HelloRequest req;
         req.set_name("fiber");
         req.set_num(42);
@@ -33,8 +34,8 @@ TEST(GrpcProtoCodecTest, EncodeDecodeRoundTrip) {
 
         auto enc = encode(req);
         ASSERT_TRUE(enc.has_value()) << "encode failed";
-        ASSERT_EQ(enc->size(), 1u); // single-node chain
-        EXPECT_GT(enc->readable_bytes(), 0u);
+        ASSERT_EQ(enc->size(), 1U); // single-node chain
+        EXPECT_GT(enc->readable_bytes(), 0U);
 
         helloworld::HelloRequest parsed;
         auto dec = decode(*enc, parsed);
@@ -49,12 +50,12 @@ TEST(GrpcProtoCodecTest, EncodeDecodeRoundTrip) {
 }
 
 TEST(GrpcProtoCodecTest, EncodeEmptyMessage) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &node_pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*node_pool*/) {
         helloworld::HelloRequest req; // default => ByteSizeLong() == 0
 
         auto enc = encode(req);
         ASSERT_TRUE(enc.has_value());
-        EXPECT_EQ(enc->readable_bytes(), 0u);
+        EXPECT_EQ(enc->readable_bytes(), 0U);
 
         helloworld::HelloRequest parsed;
         auto dec = decode(*enc, parsed);
@@ -85,19 +86,19 @@ TEST(GrpcProtoCodecTest, DecodeRejectsGarbage) {
 }
 
 TEST(GrpcProtoCodecTest, MultiSegmentChainDecode) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &node_pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*node_pool*/) {
         helloworld::HelloRequest req;
         req.set_name("multi-segment");
         req.set_num(7);
 
         auto enc = encode(req);
         ASSERT_TRUE(enc.has_value());
-        ASSERT_EQ(enc->size(), 1u);
+        ASSERT_EQ(enc->size(), 1U);
 
         const IoBuf *src = enc->front();
         ASSERT_NE(src, nullptr);
         const std::size_t total = src->readable();
-        ASSERT_GE(total, 2u);
+        ASSERT_GE(total, 2U);
         const std::uint8_t *base = src->readable_data();
         const std::size_t half = total / 2;
 
@@ -114,7 +115,7 @@ TEST(GrpcProtoCodecTest, MultiSegmentChainDecode) {
         b.commit(total - half);
         ASSERT_TRUE(multi.append(std::move(a)));
         ASSERT_TRUE(multi.append(std::move(b)));
-        ASSERT_EQ(multi.size(), 2u);
+        ASSERT_EQ(multi.size(), 2U);
         ASSERT_EQ(multi.readable_bytes(), total);
         ASSERT_NE(multi.first_readable()->readable(), total); // confirms >1 segment
 
@@ -127,11 +128,11 @@ TEST(GrpcProtoCodecTest, MultiSegmentChainDecode) {
 }
 
 TEST(GrpcProtoCodecTest, LargeMessageRoundTrip) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &node_pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*node_pool*/) {
         helloworld::HelloRequest req;
-        req.set_name(std::string(128 * 1024, 'x')); // 128 KiB name
+        req.set_name(std::string(static_cast<std::size_t>(128 * 1024), 'x')); // 128 KiB name
         for (int i = 0; i < 4; ++i) {
-            req.add_items(std::string(32 * 1024, 'y'));
+            req.add_items(std::string(static_cast<std::size_t>(32 * 1024), 'y'));
         }
 
 
@@ -142,9 +143,9 @@ TEST(GrpcProtoCodecTest, LargeMessageRoundTrip) {
         helloworld::HelloRequest parsed;
         auto dec = decode(*enc, parsed);
         ASSERT_TRUE(dec.has_value());
-        EXPECT_EQ(parsed.name(), std::string(128 * 1024, 'x'));
+        EXPECT_EQ(parsed.name(), std::string(static_cast<std::size_t>(128 * 1024), 'x'));
         ASSERT_EQ(parsed.items_size(), 4);
-        EXPECT_EQ(parsed.items(0), std::string(32 * 1024, 'y'));
+        EXPECT_EQ(parsed.items(0), std::string(static_cast<std::size_t>(32 * 1024), 'y'));
     });
 }
 
@@ -152,7 +153,7 @@ TEST(GrpcProtoCodecTest, LargeMessageRoundTrip) {
 // the encoded bytes are split across 32 nodes, so the adapter must collect all
 // readable segments into a heap array and protobuf parses them in place.
 TEST(GrpcProtoCodecTest, DecodeAcrossManySegments) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &node_pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*node_pool*/) {
         helloworld::HelloRequest req;
         req.set_name("many-segments");
         req.set_num(99);
@@ -162,11 +163,11 @@ TEST(GrpcProtoCodecTest, DecodeAcrossManySegments) {
 
         auto enc = encode(req);
         ASSERT_TRUE(enc.has_value());
-        ASSERT_EQ(enc->size(), 1u);
+        ASSERT_EQ(enc->size(), 1U);
         const IoBuf *src = enc->front();
         ASSERT_NE(src, nullptr);
         const std::size_t total = src->readable();
-        ASSERT_GT(total, 0u);
+        ASSERT_GT(total, 0U);
         const std::uint8_t *base = src->readable_data();
 
         // Split into 32 nodes of (roughly) equal size, all sharing node_pool.
@@ -185,7 +186,7 @@ TEST(GrpcProtoCodecTest, DecodeAcrossManySegments) {
             b.commit(len);
             ASSERT_TRUE(multi.append(std::move(b)));
         }
-        ASSERT_GT(multi.size(), 16u); // forces the heap-array path in the adapter
+        ASSERT_GT(multi.size(), 16U); // forces the heap-array path in the adapter
 
         helloworld::HelloRequest parsed;
         auto dec = decode(multi, parsed);

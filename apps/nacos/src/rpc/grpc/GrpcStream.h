@@ -2,6 +2,7 @@
 #define FIBER_NACOS_RPC_GRPC_GRPC_STREAM_H
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -66,8 +67,8 @@ public:
 
     GrpcStream(const GrpcStream &) = delete;
     GrpcStream &operator=(const GrpcStream &) = delete;
-    GrpcStream(GrpcStream &&) noexcept;
-    GrpcStream &operator=(GrpcStream &&) noexcept;
+    GrpcStream(GrpcStream && /*other*/) noexcept;
+    GrpcStream &operator=(GrpcStream && /*other*/) noexcept;
     ~GrpcStream();
 
     // Open the HTTP/2 stream and send request HEADERS (end_stream=false). Must be
@@ -116,7 +117,7 @@ private:
     // Mark the call failed and RST the stream. Idempotent.
     void fail(common::IoErr reason) noexcept;
 
-    static constexpr std::size_t kReadChunk = 64 * 1024;
+    static constexpr std::size_t kReadChunk = std::size_t{64} * 1024;
 
     http::Http2ClientConnection *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;
