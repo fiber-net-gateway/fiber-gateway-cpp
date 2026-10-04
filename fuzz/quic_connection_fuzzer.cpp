@@ -53,15 +53,15 @@ using Access = QuicUdpEndpointTestAccess;
 
 constexpr std::size_t kCidLen = 8;
 
-void destroy_stream(void *, QuicStream &stream) noexcept { delete &stream; }
+void destroy_stream(void * /*unused*/, QuicStream &stream) noexcept { delete &stream; }
 
-QuicStream::Lease create_stream(void *, std::uint64_t) noexcept {
+QuicStream::Lease create_stream(void * /*unused*/, std::uint64_t /*unused*/) noexcept {
     return QuicStream::Lease::adopt(new (std::nothrow) QuicStream(nullptr, destroy_stream));
 }
 
 void fixed_secret(std::uint8_t seed, std::array<std::uint8_t, 48> &out) {
     for (std::size_t i = 0; i < out.size(); ++i) {
-        out[i] = static_cast<std::uint8_t>(seed + i * 13);
+        out[i] = static_cast<std::uint8_t>(seed + (i * 13));
     }
 }
 
@@ -91,7 +91,7 @@ struct Harness {
             opts.recv_flow.conn_recv_low_water = 1024;
             opts.recv_flow.stream_buffer_limit = 2048;
             opts.recv_flow.stream_low_water = 512;
-            opts.recv_flow.retained_storage_limit = 16 * 1024;
+            opts.recv_flow.retained_storage_limit = std::size_t{16} * 1024;
             opts.transport.initial_max_data = 4096;
             opts.transport.initial_max_stream_data_bidi_local = 2048;
             opts.transport.initial_max_stream_data_bidi_remote = 2048;
@@ -346,11 +346,11 @@ void run_actions(Harness &h, std::span<const std::uint8_t> script) {
                 }
                 break;
             case 8:
-                h.now += std::chrono::milliseconds(static_cast<int>(arg) * 40 + 1);
+                h.now += std::chrono::milliseconds((static_cast<int>(arg) * 40) + 1);
                 (void) quic_detect_lost(h.conn, quic_time_ms(h.now), nullptr);
                 break;
             case 9:
-                h.now += std::chrono::milliseconds(static_cast<int>(arg) * 100 + 1);
+                h.now += std::chrono::milliseconds((static_cast<int>(arg) * 100) + 1);
                 // Each PTO doubles the wait; past ~10 the connection's idle
                 // timeout has long fired, so higher counts are unreachable.
                 h.pto_count = std::min<std::uint32_t>(h.pto_count + 1, 10);

@@ -162,16 +162,16 @@ Bytes id_frame(QuicFrameType type, std::uint64_t a, std::uint64_t b = 0, std::ui
     f.type = type;
     switch (type) {
         case QuicFrameType::ResetStream:
-            f.u.reset_stream = {a, b, c};
+            f.u.reset_stream = {.id = a, .error_code = b, .final_size = c};
             break;
         case QuicFrameType::StopSending:
-            f.u.stop_sending = {a, b};
+            f.u.stop_sending = {.id = a, .error_code = b};
             break;
         case QuicFrameType::MaxData:
             f.u.max_data.max_data = a;
             break;
         case QuicFrameType::MaxStreamData:
-            f.u.max_stream_data = {a, b};
+            f.u.max_stream_data = {.id = a, .limit = b};
             break;
         case QuicFrameType::MaxStreamsBidi:
         case QuicFrameType::MaxStreamsUni:
@@ -181,7 +181,7 @@ Bytes id_frame(QuicFrameType type, std::uint64_t a, std::uint64_t b = 0, std::ui
             f.u.data_blocked.limit = a;
             break;
         case QuicFrameType::StreamDataBlocked:
-            f.u.stream_data_blocked = {a, b};
+            f.u.stream_data_blocked = {.id = a, .limit = b};
             break;
         case QuicFrameType::StreamsBlockedBidi:
         case QuicFrameType::StreamsBlockedUni:
@@ -297,7 +297,7 @@ void codec_seeds() {
         put_u8(b, static_cast<std::uint8_t>(1 | (owner << 3)));
         put(b, buf.data(), *n);
         // A reserved (greased) parameter the parser must skip.
-        put_varint(b, 27 + 31 * 5);
+        put_varint(b, 27 + (31 * 5));
         put_varint(b, 2);
         put_u8(b, 0xab);
         put_u8(b, 0xcd);
@@ -313,10 +313,10 @@ void codec_seeds() {
         QuicPacketType type;
         std::uint8_t bits;
         const char *name;
-    } longs[] = {{QuicPacketType::Initial, kLongPacketTypeInitial, "hdr_initial"},
-                 {QuicPacketType::ZeroRtt, kLongPacketTypeZeroRtt, "hdr_0rtt"},
-                 {QuicPacketType::Handshake, kLongPacketTypeHandshake, "hdr_handshake"},
-                 {QuicPacketType::Short, 0, "hdr_short"}};
+    } longs[] = {{.type = QuicPacketType::Initial, .bits = kLongPacketTypeInitial, .name = "hdr_initial"},
+                 {.type = QuicPacketType::ZeroRtt, .bits = kLongPacketTypeZeroRtt, .name = "hdr_0rtt"},
+                 {.type = QuicPacketType::Handshake, .bits = kLongPacketTypeHandshake, .name = "hdr_handshake"},
+                 {.type = QuicPacketType::Short, .bits = 0, .name = "hdr_short"}};
     for (const auto &l: longs) {
         QuicPacketHeader h{};
         h.long_header = l.type != QuicPacketType::Short;
@@ -326,7 +326,7 @@ void codec_seeds() {
         h.dcid = dcid;
         h.scid = scid;
         if (l.type == QuicPacketType::Initial) {
-            h.token = {token, sizeof(token)};
+            h.token = {.data = token, .len = sizeof(token)};
         }
         h.pn_len = 4;
         h.length = 4 + 24;
@@ -383,7 +383,7 @@ void codec_seeds() {
         spec.original_dcid = fiber::fuzz::make_cid(cids[0], cids[1]);
         spec.dcid = fiber::fuzz::make_cid(cids[2], cids[3]);
         spec.scid = fiber::fuzz::make_cid(cids[4], cids[5]);
-        spec.token = {token, sizeof(token)};
+        spec.token = {.data = token, .len = sizeof(token)};
         std::array<std::uint8_t, 512> buf{};
         QuicWriteCursor w(buf.data(), buf.size());
         auto n = quic_create_retry_packet(spec, w);
@@ -449,7 +449,7 @@ void reassembly_seeds() {
     for (std::uint8_t config: {0x10, 0x30, 0x01}) {
         Bytes b{config};
         for (std::uint16_t i = 0; i < 24; ++i) {
-            data_op(b, 0x00, static_cast<std::uint16_t>(1000 - i * 40), 20);
+            data_op(b, 0x00, static_cast<std::uint16_t>(1000 - (i * 40)), 20);
         }
         data_op(b, 0x00, 0, 1000);
         take(b, 0);
@@ -622,12 +622,13 @@ struct ServerFlight {
 
 QuicConnection::Lease g_server_connection{};
 
-void destroy_server_connection(void *, QuicConnection &connection) noexcept { delete &connection; }
+void destroy_server_connection(void * /*unused*/, QuicConnection &connection) noexcept { delete &connection; }
 
-QuicConnection::Lease create_server_connection(void *, QuicUdpEndpoint &endpoint,
+QuicConnection::Lease create_server_connection(void * /*unused*/, QuicUdpEndpoint &endpoint,
                                                const QuicConnection::Options &options) noexcept {
     QuicConnection::Options opts = options;
     opts.on_destroy = destroy_server_connection;
+    // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) OOM is fatal by policy
     auto *connection = new QuicConnection(endpoint, opts);
     g_server_connection = connection->lease();
     return QuicConnection::Lease::adopt(connection);

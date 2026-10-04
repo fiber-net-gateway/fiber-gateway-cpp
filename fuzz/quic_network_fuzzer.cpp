@@ -67,13 +67,13 @@ constexpr std::size_t kMaxServerConnections = 16;
 constexpr std::size_t kMaxClients = 3;
 constexpr std::size_t kMaxWire = 48;
 
-void destroy_stream(void *, QuicStream &stream) noexcept { delete &stream; }
+void destroy_stream(void * /*unused*/, QuicStream &stream) noexcept { delete &stream; }
 
-QuicStream::Lease create_stream(void *, std::uint64_t) noexcept {
+QuicStream::Lease create_stream(void * /*unused*/, std::uint64_t /*unused*/) noexcept {
     return QuicStream::Lease::adopt(new (std::nothrow) QuicStream(nullptr, destroy_stream));
 }
 
-void destroy_connection(void *, QuicConnection &connection) noexcept { delete &connection; }
+void destroy_connection(void * /*unused*/, QuicConnection &connection) noexcept { delete &connection; }
 
 struct ServerTracker {
     std::array<QuicConnection::Lease, kMaxServerConnections> leases{};
@@ -134,7 +134,10 @@ struct Server {
         admission.issue_new_token = true;
         admission.address_validation_key_set = true;
         admission.address_validation_key = fiber::fuzz::kTokenKey;
-        admission.stateless_response_limits = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+        admission.stateless_response_limits = {.stateless_reset = {.endpoint_per_second = 0, .peer_per_second = 0},
+                                               .version_negotiation = {.endpoint_per_second = 0, .peer_per_second = 0},
+                                               .retry = {.endpoint_per_second = 0, .peer_per_second = 0},
+                                               .invalid_token_close = {.endpoint_per_second = 0, .peer_per_second = 0}};
         admission.connection_owner = &tracker;
         admission.create_connection = create_server_connection;
         auto ok = endpoint.init(endpoint_options, admission);
@@ -176,7 +179,7 @@ bool store_session(void *owner, QuicConnection &connection, fiber::tls::TlsSessi
     return true;
 }
 
-void store_token(void *owner, QuicConnection &, const std::uint8_t *token, std::size_t len) noexcept {
+void store_token(void *owner, QuicConnection & /*unused*/, const std::uint8_t *token, std::size_t len) noexcept {
     auto *cache = static_cast<ClientCache *>(owner);
     cache->token.assign(token, token + len);
 }
@@ -417,7 +420,7 @@ struct Net {
     }
 
     void timers(std::uint8_t arg) {
-        now += std::chrono::milliseconds(static_cast<int>(arg) * 50 + 1);
+        now += std::chrono::milliseconds((static_cast<int>(arg) * 50) + 1);
         pto_count = std::min<std::uint32_t>(pto_count + 1, 10);
         const QuicTime t = quic_time_ms(now);
         auto run = [&](QuicConnection &conn) {

@@ -182,6 +182,7 @@ bool same_frame(const QuicInputFrame &a, const QuicInputFrame &b) {
             return a.u.streams_blocked.limit == b.u.streams_blocked.limit &&
                    a.u.streams_blocked.bidirectional == b.u.streams_blocked.bidirectional;
         case QuicFrameType::NewConnectionId:
+            // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison) decode oracle; frames are value-initialized
             return std::memcmp(&a.u.new_connection_id, &b.u.new_connection_id, sizeof(a.u.new_connection_id)) == 0;
         case QuicFrameType::RetireConnectionId:
             return a.u.retire_connection_id.sequence_number == b.u.retire_connection_id.sequence_number;
@@ -375,7 +376,7 @@ void address_token(const std::uint8_t *data, std::size_t size) {
     const std::uint64_t now = kTokenNow + (in.u8() & 0x7f);
     const std::span<const std::uint8_t> token = in.bytes(in.remaining());
 
-    auto checked = quic_validate_address_token(kTokenKey, peer, now, {token.data(), token.size()});
+    auto checked = quic_validate_address_token(kTokenKey, peer, now, {.data = token.data(), .len = token.size()});
     if (checked && checked->status == QuicAddressTokenValidationStatus::Valid) {
         touch(checked->original_destination_connection_id.data(), checked->original_destination_connection_id.size());
     }
@@ -416,7 +417,7 @@ void retry(const std::uint8_t *data, std::size_t size) {
     spec.original_dcid = odcid;
     spec.dcid = dcid;
     spec.scid = scid;
-    spec.token = {rest.data(), std::min<std::size_t>(rest.size(), 512)};
+    spec.token = {.data = rest.data(), .len = std::min<std::size_t>(rest.size(), 512)};
     std::array<std::uint8_t, 1024> out{};
     QuicWriteCursor writer(out.data(), out.size());
     auto built = quic_create_retry_packet(spec, writer);
