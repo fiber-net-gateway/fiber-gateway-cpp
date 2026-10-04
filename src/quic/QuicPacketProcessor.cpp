@@ -195,15 +195,10 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
         return std::unexpected(taken.error());
     }
 
-    while (mem::IoBufNode *node = contiguous.pop_front_node()) {
-        auto provided = conn.tls().provide_crypto_data(level, node->buf.readable_data(), node->buf.readable());
-        conn.recv_extent_pool().release(node);
-        if (!provided) {
-            return std::unexpected(provided.error());
-        }
+    if (contiguous.readable_bytes() == 0) {
+        return {};
     }
-
-    return {};
+    return conn.tls().provide_crypto_data(level, contiguous);
 }
 
 [[nodiscard]] common::IoResult<bool> handle_crypto_frame(QuicConnection &conn, QuicEncryptionLevel level,

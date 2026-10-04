@@ -73,6 +73,22 @@ using fiber::tls::TlsTicketRequest;
 using fiber::tls::TlsTicketService;
 using Event = TlsServerHandshakeEngine::Event;
 
+// Wire fixtures use vectors; production hands over existing receive nodes.
+template<typename Engine>
+auto feed_quic(Engine &engine, TlsQuicLevel level, std::span<const std::uint8_t> bytes) {
+    fiber::mem::IoBufChain chain;
+    if (!bytes.empty()) {
+        auto buf = fiber::mem::IoBuf::allocate(bytes.size());
+        FIBER_ASSERT(buf.valid());
+        std::memcpy(buf.writable_data(), bytes.data(), bytes.size());
+        buf.commit(bytes.size());
+        FIBER_ASSERT(chain.append(std::move(buf)));
+    }
+    auto result = engine.feed_quic(level, chain);
+    EXPECT_TRUE(chain.empty());
+    return result;
+}
+
 // TlsQuicLevel mirrors ssl_encryption_level_t value-for-value (the QUIC
 // layer casts across the boundary in both directions).
 static_assert(static_cast<int>(TlsQuicLevel::Initial) == ssl_encryption_initial);
@@ -572,7 +588,7 @@ bool pump_client_engine(EngineQuicSink &sink, TlsClientHandshakeEngine &engine, 
             if (engine.done()) {
                 continue; // post-handshake tail — not the engine's to consume (slice 2)
             }
-            const auto event = engine.feed_quic(static_cast<TlsQuicLevel>(rec.first), rec.second);
+            const auto event = feed_quic(engine, static_cast<TlsQuicLevel>(rec.first), rec.second);
             if (!event.has_value()) {
                 return false;
             }
@@ -602,7 +618,7 @@ bool pump_server_engine(EngineQuicSink &sink, TlsServerHandshakeEngine &engine, 
             if (engine.done()) {
                 continue; // post-handshake tail (client KeyUpdate etc.) — slice 2
             }
-            const auto event = engine.feed_quic(static_cast<TlsQuicLevel>(rec.first), rec.second);
+            const auto event = feed_quic(engine, static_cast<TlsQuicLevel>(rec.first), rec.second);
             if (!event.has_value()) {
                 return false;
             }
@@ -639,13 +655,13 @@ bool pump_self(EngineQuicSink &client_sink, TlsClientHandshakeEngine &client, En
         bool progressed = false;
         for (const auto &rec: client_sink.drain_out()) {
             progressed = true;
-            if (!server.done() && !server.feed_quic(rec.level, rec.bytes).has_value()) {
+            if (!server.done() && !feed_quic(server, rec.level, rec.bytes).has_value()) {
                 return false;
             }
         }
         for (const auto &rec: server_sink.drain_out()) {
             progressed = true;
-            if (!client.done() && !client.feed_quic(rec.level, rec.bytes).has_value()) {
+            if (!client.done() && !feed_quic(client, rec.level, rec.bytes).has_value()) {
                 return false;
             }
         }
@@ -1035,7 +1051,7 @@ TEST(TlsQuicHandshake, ServerRejectsCompatSessionId) {
 
         EngineQuicSink server_sink;
         TlsServerHandshakeEngine server(material.server_cfg(server_sink), nullptr, nullptr);
-        const auto event = server.feed_quic(TlsQuicLevel::Initial, ch);
+        const auto event = feed_quic(server, TlsQuicLevel::Initial, ch);
         ASSERT_TRUE(event.has_value());
         EXPECT_EQ(Event::Failed, *event);
         EXPECT_TRUE(server.failed());
@@ -1057,7 +1073,7 @@ TEST(TlsQuicHandshake, ServerRequiresAlpn) {
 
         EngineQuicSink server_sink;
         TlsServerHandshakeEngine server(material.server_cfg(server_sink), nullptr, nullptr);
-        const auto event = server.feed_quic(TlsQuicLevel::Initial, ch);
+        const auto event = feed_quic(server, TlsQuicLevel::Initial, ch);
         ASSERT_TRUE(event.has_value());
         EXPECT_EQ(Event::Failed, *event);
         ASSERT_EQ(1u, server_sink.alerts.size());
@@ -1091,7 +1107,7 @@ TEST(TlsQuicHandshake, GarbageFirstMessageAlerts) {
         EngineQuicSink sink;
         TlsServerHandshakeEngine engine(material.server_cfg(sink), nullptr, nullptr);
         const std::array<std::uint8_t, 16> garbage{0x99, 0x00, 0x00, 0x0C, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-        const auto event = engine.feed_quic(TlsQuicLevel::Initial, garbage);
+        const auto event = feed_quic(engine, TlsQuicLevel::Initial, garbage);
         ASSERT_TRUE(event.has_value());
         EXPECT_EQ(Event::Failed, *event);
         ASSERT_EQ(1u, sink.alerts.size());
@@ -1115,7 +1131,7 @@ TEST(TlsQuicHandshake, ClientRejectsServerHelloWithoutSupportedVersions) {
         std::vector<std::uint8_t> sh{0x02, 0x00, 0x00, 0x26, 0x03, 0x03};
         sh.resize(sh.size() + 32, 0x5a);
         sh.insert(sh.end(), {0x00, 0x13, 0x01, 0x00, 0x00, 0x00});
-        const auto event = engine.feed_quic(TlsQuicLevel::Initial, sh);
+        const auto event = feed_quic(engine, TlsQuicLevel::Initial, sh);
         ASSERT_TRUE(event.has_value());
         EXPECT_EQ(TlsClientHandshakeEngine::Event::Failed, *event);
         EXPECT_EQ(TlsAlertDesc::ProtocolVersion, engine.failure_alert());
@@ -1130,7 +1146,7 @@ TEST(TlsQuicHandshake, MessageCapPartialAndPing) {
             TlsServerHandshakeEngine engine(material.server_cfg(sink), nullptr, nullptr);
             // Declared body_len 0x400001 (> the ClientHello reassembly cap): fatal.
             const std::array<std::uint8_t, 5> oversize{0x01, 0x40, 0x00, 0x01, 0xFF};
-            const auto event = engine.feed_quic(TlsQuicLevel::Initial, oversize);
+            const auto event = feed_quic(engine, TlsQuicLevel::Initial, oversize);
             ASSERT_TRUE(event.has_value());
             EXPECT_EQ(Event::Failed, *event);
             ASSERT_EQ(1u, sink.alerts.size());
@@ -1141,7 +1157,7 @@ TEST(TlsQuicHandshake, MessageCapPartialAndPing) {
             EngineQuicSink sink;
             TlsServerHandshakeEngine engine(material.server_cfg(sink), nullptr, nullptr);
             const std::array<std::uint8_t, 3> partial{0x01, 0x00, 0x02};
-            const auto event = engine.feed_quic(TlsQuicLevel::Initial, partial);
+            const auto event = feed_quic(engine, TlsQuicLevel::Initial, partial);
             ASSERT_TRUE(event.has_value());
             EXPECT_EQ(Event::None, *event);
             EXPECT_FALSE(engine.done());
@@ -1151,7 +1167,7 @@ TEST(TlsQuicHandshake, MessageCapPartialAndPing) {
             // Empty span at the current level is a legal level ping.
             EngineQuicSink sink;
             TlsServerHandshakeEngine engine(material.server_cfg(sink), nullptr, nullptr);
-            const auto event = engine.feed_quic(TlsQuicLevel::Initial, {});
+            const auto event = feed_quic(engine, TlsQuicLevel::Initial, {});
             ASSERT_TRUE(event.has_value());
             EXPECT_EQ(Event::None, *event);
             EXPECT_FALSE(engine.done());
@@ -1193,14 +1209,14 @@ TEST(TlsQuicHandshake, InboundLeftoverAfterDone) {
                     std::vector<std::uint8_t> bytes = rec.bytes;
                     bytes.insert(bytes.end(), tail.begin(), tail.end());
                     fed_tail = true;
-                    ASSERT_TRUE(server.feed_quic(rec.level, bytes).has_value());
+                    ASSERT_TRUE(feed_quic(server, rec.level, bytes).has_value());
                 } else {
-                    ASSERT_TRUE(server.feed_quic(rec.level, rec.bytes).has_value());
+                    ASSERT_TRUE(feed_quic(server, rec.level, rec.bytes).has_value());
                 }
             }
             for (const auto &rec: server_sink.drain_out()) {
                 if (!client.done()) {
-                    ASSERT_TRUE(client.feed_quic(rec.level, rec.bytes).has_value());
+                    ASSERT_TRUE(feed_quic(client, rec.level, rec.bytes).has_value());
                 }
             }
             ASSERT_FALSE(server.failed());
@@ -1546,6 +1562,73 @@ TEST(TlsQuicHandshake, CrossFaceTicketFallsBackToFullHandshake) {
             ASSERT_NE(nullptr, client_write);
             ASSERT_NE(nullptr, server_read);
             EXPECT_TRUE(secrets_equal(client_write->bytes, server_read->bytes));
+        }
+    });
+}
+
+TEST(TlsQuicHandshake, ChainInputPreservesContiguousStorageAndReleasesNodes) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        EngineQuicSink sink;
+        fiber::tls::TlsHandshakeContext ctx;
+        ctx.enable_quic(sink.cb);
+        const std::array<std::uint8_t, 12> wire{1, 0, 0, 2, 0x41, 0x42, 2, 0, 0, 2, 0x43, 0x44};
+        auto storage = fiber::mem::IoBuf::allocate(wire.size());
+        ASSERT_TRUE(storage);
+        std::memcpy(storage.writable_data(), wire.data(), wire.size());
+        storage.commit(wire.size());
+        const auto *original = storage.readable_data();
+        fiber::mem::IoBufChain input;
+        ASSERT_TRUE(input.append(storage.retain_slice(0, wire.size())));
+        ASSERT_TRUE(ctx.provide_quic(TlsQuicLevel::Initial, input));
+        EXPECT_TRUE(input.empty());
+        const auto first = ctx.step();
+        ASSERT_EQ(first.kind, fiber::tls::TlsInboundStep::Kind::Message);
+        EXPECT_EQ(first.body.data(), original + 4);
+        EXPECT_EQ(first.body.size(), 2u);
+        const auto second = ctx.step();
+        ASSERT_EQ(second.kind, fiber::tls::TlsInboundStep::Kind::Message);
+        EXPECT_EQ(second.body.data(), original + 10);
+        EXPECT_EQ(second.body[1], 0x44);
+        EXPECT_EQ(ctx.pending_bytes(), 0u);
+        auto leftover = ctx.take_inbound_leftover();
+        EXPECT_TRUE(leftover.empty()); // consumed nodes must not pin receive storage
+        EXPECT_EQ(storage.use_count(), 2u); // owner + last returned message
+    });
+}
+
+TEST(TlsQuicHandshake, ChainInputReassemblesSplitHeaderBodyAndPartialTail) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        EngineQuicSink sink;
+        fiber::tls::TlsHandshakeContext ctx;
+        ctx.enable_quic(sink.cb);
+        const std::array<std::uint8_t, 11> wire{1, 0, 0, 3, 0x41, 0x42, 0x43, 2, 0, 0, 0};
+        auto append = [&](fiber::mem::IoBufChain &chain, std::span<const std::uint8_t> bytes) {
+            auto buf = fiber::mem::IoBuf::allocate(bytes.size());
+            ASSERT_TRUE(buf);
+            std::memcpy(buf.writable_data(), bytes.data(), bytes.size());
+            buf.commit(bytes.size());
+            ASSERT_TRUE(chain.append(std::move(buf)));
+        };
+        for (std::size_t split = 1; split < 7; ++split) {
+            fiber::mem::IoBufChain input;
+            append(input, std::span(wire).first(split));
+            ASSERT_TRUE(ctx.provide_quic(TlsQuicLevel::Initial, input));
+            ASSERT_EQ(ctx.step().kind, fiber::tls::TlsInboundStep::Kind::NeedMore);
+            // Complete message 1 plus a partial message 2 header in another node.
+            append(input, std::span(wire).subspan(split, 9 - split));
+            ASSERT_TRUE(ctx.provide_quic(TlsQuicLevel::Initial, input));
+            const auto first = ctx.step();
+            ASSERT_EQ(first.kind, fiber::tls::TlsInboundStep::Kind::Message);
+            ASSERT_EQ(first.body.size(), 3u);
+            EXPECT_EQ(std::memcmp(first.body.data(), wire.data() + 4, 3), 0);
+            ASSERT_EQ(ctx.step().kind, fiber::tls::TlsInboundStep::Kind::NeedMore);
+            EXPECT_EQ(ctx.pending_bytes(), 2u);
+            append(input, std::span(wire).last(2));
+            ASSERT_TRUE(ctx.provide_quic(TlsQuicLevel::Initial, input));
+            const auto second = ctx.step();
+            ASSERT_EQ(second.kind, fiber::tls::TlsInboundStep::Kind::Message);
+            EXPECT_TRUE(second.body.empty());
+            EXPECT_TRUE(ctx.take_inbound_leftover().empty());
         }
     });
 }

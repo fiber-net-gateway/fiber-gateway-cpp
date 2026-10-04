@@ -101,9 +101,10 @@ public:
     // messages, NO record framing — at `level`. Ordering is the QUIC layer's
     // gate contract (it feeds Initial then Handshake then Application, fully
     // consuming each level's stream in between); the context only tracks
-    // monotonicity as a contract check. False only on allocation failure.
+    // monotonicity as a contract check. Takes all nodes, leaving bytes empty.
+    // Input must not carry the stream-complete flag.
     // Mutually exclusive with feed().
-    [[nodiscard]] bool provide_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept;
+    [[nodiscard]] bool provide_quic(TlsQuicLevel level, mem::IoBufChain &bytes) noexcept;
 
     void set_inbound_mode(TlsInboundMode mode) noexcept { mode_ = mode; }
 
