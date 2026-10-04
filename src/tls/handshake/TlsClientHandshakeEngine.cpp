@@ -200,8 +200,8 @@ common::IoResult<TlsClientHandshakeEngine::Event> TlsClientHandshakeEngine::feed
     return pump();
 }
 
-common::IoResult<TlsClientHandshakeEngine::Event>
-TlsClientHandshakeEngine::feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept {
+common::IoResult<TlsClientHandshakeEngine::Event> TlsClientHandshakeEngine::feed_quic(TlsQuicLevel level,
+                                                                                      mem::IoBufChain &bytes) noexcept {
     FIBER_ASSERT(!out_.done);
     if (!ctx_.provide_quic(level, bytes)) {
         return std::unexpected(common::IoErr::NoMem);

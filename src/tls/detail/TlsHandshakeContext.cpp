@@ -69,14 +69,12 @@ void TlsHandshakeContext::set_quic_level(TlsQuicLevel level) noexcept {
     quic_level_ = level;
 }
 
-bool TlsHandshakeContext::provide_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept {
+bool TlsHandshakeContext::provide_quic(TlsQuicLevel level, mem::IoBufChain &bytes) noexcept {
     FIBER_ASSERT(quic_ != nullptr && static_cast<std::uint8_t>(level) >=
                                              static_cast<std::uint8_t>(quic_provided_level_)); // RFC 9001 §4.1.3 gate
     quic_provided_level_ = level;
-    if (bytes.empty()) {
-        return true; // a level boundary ping needs no bytes
-    }
-    return append_fragment(bytes);
+    FIBER_ASSERT(!bytes.complete());
+    return reassembly_.append_chain(std::move(bytes));
 }
 
 mem::IoBufChain TlsHandshakeContext::take_output() noexcept { return std::move(out_); }
@@ -477,9 +475,10 @@ TlsInboundStep TlsHandshakeContext::extract_message() noexcept {
 // same 4-byte-header reassembly contract as the record path, minus records,
 // alerts, CCS, and the 1.3 plaintext-record DOs bound (a CH may arrive in
 // any fragmentation; the per-type message bound below is the surviving
-// limit). Each message materializes into message_buf_ (one exact-size copy —
-// the borrowed body span stays valid until the next step()).
+// limit). Contiguous messages retain their storage in message_buf_; only
+// straddling messages are copied. The body span stays valid until the next step().
 TlsInboundStep TlsHandshakeContext::quic_step() noexcept {
+    message_buf_ = mem::IoBuf{}; // the previous borrowed body expires at this step
     const std::size_t total = reassembly_.readable_bytes();
     if (total < kTlsHandshakeHeaderSize) {
         return step_need_more();
@@ -497,22 +496,27 @@ TlsInboundStep TlsHandshakeContext::quic_step() noexcept {
     if (total < message_len) {
         return step_need_more();
     }
-    message_buf_ = mem::IoBuf::allocate(message_len);
-    if (!message_buf_.valid()) {
-        return step_fatal(TlsAlertDesc::InternalError);
-    }
-    std::size_t done = 0;
-    while (done < message_len) {
-        mem::IoBuf *front = reassembly_.first_readable();
-        if (front == nullptr) {
+    mem::IoBuf *front = reassembly_.first_readable();
+    FIBER_ASSERT(front != nullptr);
+    if (front->readable() >= message_len) {
+        message_buf_ = front->retain_slice(0, message_len);
+        reassembly_.consume_and_compact(message_len);
+    } else {
+        message_buf_ = mem::IoBuf::allocate(message_len);
+        if (!message_buf_.valid()) {
             return step_fatal(TlsAlertDesc::InternalError);
         }
-        const std::size_t take = std::min(front->readable(), message_len - done);
-        std::memcpy(message_buf_.writable_data() + done, front->readable_data(), take);
-        done += take;
-        reassembly_.consume(take);
+        std::size_t done = 0;
+        while (done < message_len) {
+            front = reassembly_.first_readable();
+            FIBER_ASSERT(front != nullptr);
+            const std::size_t take = std::min(front->readable(), message_len - done);
+            std::memcpy(message_buf_.writable_data() + done, front->readable_data(), take);
+            done += take;
+            reassembly_.consume_and_compact(take);
+        }
+        message_buf_.commit(message_len);
     }
-    message_buf_.commit(message_len);
     TlsInboundStep step;
     step.kind = TlsInboundStep::Kind::Message;
     step.type = static_cast<TlsHandshakeType>(header[0]);

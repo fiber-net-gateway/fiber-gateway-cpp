@@ -67,7 +67,9 @@ public:
     // messages, no record framing. The QUIC layer gates level ordering
     // (fully consuming each level's stream before advancing). Requires a
     // config with quic callbacks; mutually exclusive with feed().
-    [[nodiscard]] common::IoResult<Event> feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept;
+    // Takes all nodes from bytes before pumping; bytes is empty even if pumping fails.
+    // Input must not carry the stream-complete flag.
+    [[nodiscard]] common::IoResult<Event> feed_quic(TlsQuicLevel level, mem::IoBufChain &bytes) noexcept;
 
     // 0-RTT write path. Available only while early data is offered
     // (session->max_early_data > 0) and not yet accepted or rejected; the

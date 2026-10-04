@@ -8,8 +8,8 @@
 #include <optional>
 #include <span>
 #include <string_view>
-#include <vector>
 
+#include <fiber/common/mem/IoBufChain.h>
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -54,8 +54,9 @@ public:
     [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientParam &param, QuicConnection &connection,
                                                      bool allow_insecure,
                                                      const tls::TlsSessionState *session = nullptr) noexcept;
-    [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicEncryptionLevel level, const std::uint8_t *data,
-                                                             std::size_t len) noexcept;
+    // Takes all nodes after validation, leaving data empty even if TLS then fails.
+    // Runs on the connection loop; data must not carry the stream-complete flag.
+    [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicEncryptionLevel level, mem::IoBufChain &data) noexcept;
     [[nodiscard]] common::IoResult<void> drive_handshake() noexcept;
     [[nodiscard]] common::IoResult<void> process_post_handshake() noexcept;
 
@@ -93,7 +94,8 @@ private:
     [[nodiscard]] common::IoResult<void> finish_handshake() noexcept; // done-transition handoff + gates
     [[nodiscard]] common::IoResult<void> fail_terminal() noexcept; // Failed event → error mapping (+ close)
     [[nodiscard]] common::IoResult<void> apply_peer_transport_params() noexcept;
-    void take_engine_leftover() noexcept;
+    [[nodiscard]] common::IoResult<void> take_engine_leftover() noexcept;
+    [[nodiscard]] common::IoResult<void> append_post_handshake(mem::IoBufChain &data) noexcept;
     [[nodiscard]] common::IoResult<void> pump_post_handshake() noexcept;
     void handle_new_session_ticket(std::span<const std::uint8_t> body) noexcept;
 
@@ -147,7 +149,7 @@ private:
 
     // Post-handshake consumer (10 §7): app-level CRYPTO bytes after the
     // engine is done, as a raw handshake-message stream.
-    std::vector<std::uint8_t> post_buf_{};
+    mem::IoBufChain post_buf_{};
 
     // Alert stashed by record_alert() (set from inside the engine) and
     // drained by drive_handshake() once the engine call returns, so

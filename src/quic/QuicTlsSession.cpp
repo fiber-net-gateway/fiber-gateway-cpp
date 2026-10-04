@@ -1,5 +1,6 @@
 #include <fiber/quic/QuicTlsSession.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -522,30 +523,27 @@ void QuicTlsSession::on_quic_alert(tls::TlsAlertDesc alert) noexcept { record_al
 // handshake drive
 // =====================================================================
 
-common::IoResult<void> QuicTlsSession::provide_crypto_data(QuicEncryptionLevel level, const std::uint8_t *data,
-                                                           std::size_t len) noexcept {
-    if (!initialized() || (data == nullptr && len != 0)) {
+common::IoResult<void> QuicTlsSession::provide_crypto_data(QuicEncryptionLevel level, mem::IoBufChain &data) noexcept {
+    FIBER_ASSERT(!data.complete());
+    if (!initialized()) {
         return std::unexpected(common::IoErr::Invalid);
     }
     const tls::TlsQuicLevel tls_level = tls_level_from_encryption(level);
     // The done-transition releases the engine, so result_taken_ answers first.
     const bool done = result_taken_ || (client_mode_ ? client().done() : server().done());
     if (done) {
-        // Post-handshake tail: the engine is terminal, app-level CRYPTO
-        // belongs to the consumer (10 §7). The gate always runs
-        // drive_handshake between provides, so the done-transition (which
-        // appends the engine's own leftover first) has already run.
-        if (len != 0) {
-            if (post_buf_.size() + len > kMaxPostHandshakeBytes) {
-                record_alert(static_cast<std::uint8_t>(tls::TlsAlertDesc::DecodeError));
-                if (auto alert = take_pending_alert()) {
-                    connection_->close_crypto_error(*alert);
-                }
-                return std::unexpected(common::IoErr::MessageTooLarge);
+        // Transfer the engine tail before accepting later CRYPTO bytes, including
+        // callers that provide again before drive_handshake performs the handoff.
+        if (!result_taken_) {
+            if (client_mode_ ? client().failed() : server().failed()) {
+                return fail_terminal();
             }
-            post_buf_.insert(post_buf_.end(), data, data + len);
+            auto finished = finish_handshake();
+            if (!finished) {
+                return finished;
+            }
         }
-        return {};
+        return append_post_handshake(data);
     }
     // RFC 9001 §4.1.3: the engine consumes CRYPTO data level by level and
     // never returns to a lower one. A conforming peer cannot produce new
@@ -553,7 +551,7 @@ common::IoResult<void> QuicTlsSession::provide_crypto_data(QuicEncryptionLevel l
     // from the data before it -- so they come from a misbehaving peer (e.g.
     // a 1-RTT CRYPTO frame ahead of the client Finished): unexpected_message.
     if (static_cast<std::uint8_t>(tls_level) < static_cast<std::uint8_t>(provided_level_)) {
-        if (len == 0) {
+        if (data.readable_bytes() == 0) {
             return {};
         }
         record_alert(static_cast<std::uint8_t>(tls::TlsAlertDesc::UnexpectedMessage));
@@ -564,12 +562,12 @@ common::IoResult<void> QuicTlsSession::provide_crypto_data(QuicEncryptionLevel l
     }
     provided_level_ = tls_level;
     if (client_mode_) {
-        auto fed = client().feed_quic(tls_level, {data, len});
+        auto fed = client().feed_quic(tls_level, data);
         if (!fed) {
             return std::unexpected(fed.error());
         }
     } else {
-        auto fed = server().feed_quic(tls_level, {data, len});
+        auto fed = server().feed_quic(tls_level, data);
         if (!fed) {
             return std::unexpected(fed.error());
         }
@@ -614,7 +612,7 @@ common::IoResult<void> QuicTlsSession::finish_handshake() noexcept {
     alpn_len_ = result.alpn_len;
     session_resumed_ = result.session_resumed;
     early_data_accepted_ = result.early_data_accepted;
-    take_engine_leftover();
+    auto leftover = take_engine_leftover();
     // The engine is spent: the server's NST went out with the final flight
     // and post-handshake CRYPTO belongs to the consumer. Release it — and a
     // credential retained for it — rather than pinning ~64-72 KiB for the
@@ -625,6 +623,9 @@ common::IoResult<void> QuicTlsSession::finish_handshake() noexcept {
     client_ = nullptr;
     server_ = nullptr;
     credential_owner_.reset();
+    if (!leftover) {
+        return leftover;
+    }
 
     auto applied = apply_peer_transport_params();
     if (!applied && applied.error() != common::IoErr::WouldBlock) {
@@ -724,15 +725,23 @@ common::IoResult<void> QuicTlsSession::apply_peer_transport_params() noexcept {
     return {};
 }
 
-void QuicTlsSession::take_engine_leftover() noexcept {
-    mem::IoBufChain leftover = client_mode_ ? client().take_inbound_leftover() : server().take_inbound_leftover();
-    while (mem::IoBuf *node = leftover.first_readable()) {
-        const std::span<const std::uint8_t> bytes{node->readable_data(), node->readable()};
-        if (post_buf_.size() + bytes.size() <= kMaxPostHandshakeBytes) {
-            post_buf_.insert(post_buf_.end(), bytes.begin(), bytes.end());
+common::IoResult<void> QuicTlsSession::append_post_handshake(mem::IoBufChain &data) noexcept {
+    FIBER_ASSERT(!data.complete());
+    if (data.readable_bytes() > kMaxPostHandshakeBytes - post_buf_.readable_bytes()) {
+        record_alert(static_cast<std::uint8_t>(tls::TlsAlertDesc::DecodeError));
+        if (auto alert = take_pending_alert()) {
+            connection_->close_crypto_error(*alert);
         }
-        leftover.consume(bytes.size());
+        return std::unexpected(common::IoErr::MessageTooLarge);
     }
+    const bool appended = post_buf_.append_chain(std::move(data));
+    FIBER_ASSERT(appended);
+    return {};
+}
+
+common::IoResult<void> QuicTlsSession::take_engine_leftover() noexcept {
+    mem::IoBufChain leftover = client_mode_ ? client().take_inbound_leftover() : server().take_inbound_leftover();
+    return append_post_handshake(leftover);
 }
 
 // =====================================================================
@@ -754,19 +763,53 @@ common::IoResult<void> QuicTlsSession::pump_post_handshake() noexcept {
         }
         return std::unexpected(common::IoErr::Invalid);
     };
-    std::size_t off = 0;
-    while (post_buf_.size() - off >= kTlsHandshakeHeaderSize) {
-        const std::uint8_t type = post_buf_[off];
-        const std::size_t body_len = (static_cast<std::size_t>(post_buf_[off + 1]) << 16) |
-                                     (static_cast<std::size_t>(post_buf_[off + 2]) << 8) |
-                                     static_cast<std::size_t>(post_buf_[off + 3]);
-        if (body_len > kMaxPostHandshakeBytes) {
+    while (post_buf_.readable_bytes() >= kTlsHandshakeHeaderSize) {
+        std::array<std::uint8_t, kTlsHandshakeHeaderSize> header{};
+        std::size_t copied = 0;
+        for (const mem::IoBufNode *node = post_buf_.front_node(); copied < header.size(); node = node->next) {
+            const std::size_t take = std::min(node->buf.readable(), header.size() - copied);
+            if (take != 0) {
+                std::memcpy(header.data() + copied, node->buf.readable_data(), take);
+                copied += take;
+            }
+        }
+        const std::uint8_t type = header[0];
+        const std::size_t body_len = (static_cast<std::size_t>(header[1]) << 16) |
+                                     (static_cast<std::size_t>(header[2]) << 8) | static_cast<std::size_t>(header[3]);
+        if (body_len > kMaxPostHandshakeBytes - kTlsHandshakeHeaderSize) {
             return fatal(static_cast<std::uint8_t>(tls::TlsAlertDesc::DecodeError));
         }
-        if (post_buf_.size() - off - kTlsHandshakeHeaderSize < body_len) {
-            break; // partial message — wait for the rest
+        const std::size_t message_len = kTlsHandshakeHeaderSize + body_len;
+        if (post_buf_.readable_bytes() < message_len) {
+            break; // partial message — wait for the rest, without materializing it
         }
-        const std::span<const std::uint8_t> body{post_buf_.data() + off + kTlsHandshakeHeaderSize, body_len};
+        // Once complete, discard the header and materialize only a straddling
+        // body. The chain owns a contiguous body's storage until dispatch returns.
+        post_buf_.consume_and_compact(kTlsHandshakeHeaderSize);
+        mem::IoBuf scratch;
+        std::span<const std::uint8_t> body;
+        if (body_len != 0) {
+            const mem::IoBuf *front = post_buf_.first_readable();
+            FIBER_ASSERT(front != nullptr);
+            if (front->readable() >= body_len) {
+                body = {front->readable_data(), body_len};
+            } else {
+                scratch = mem::IoBuf::allocate(body_len);
+                if (!scratch) {
+                    return std::unexpected(common::IoErr::NoMem);
+                }
+                copied = 0;
+                for (const mem::IoBufNode *node = post_buf_.front_node(); copied < body_len; node = node->next) {
+                    const std::size_t take = std::min(node->buf.readable(), body_len - copied);
+                    if (take != 0) {
+                        std::memcpy(scratch.writable_data() + copied, node->buf.readable_data(), take);
+                        copied += take;
+                    }
+                }
+                scratch.commit(body_len);
+                body = {scratch.readable_data(), body_len};
+            }
+        }
         switch (static_cast<tls::TlsHandshakeType>(type)) {
             case tls::TlsHandshakeType::NewSessionTicket:
                 if (!client_mode_) {
@@ -782,10 +825,7 @@ common::IoResult<void> QuicTlsSession::pump_post_handshake() noexcept {
             default:
                 return fatal(static_cast<std::uint8_t>(tls::TlsAlertDesc::UnexpectedMessage));
         }
-        off += kTlsHandshakeHeaderSize + body_len;
-    }
-    if (off != 0) {
-        post_buf_.erase(post_buf_.begin(), post_buf_.begin() + static_cast<std::ptrdiff_t>(off));
+        post_buf_.consume_and_compact(body_len);
     }
     return {};
 }
