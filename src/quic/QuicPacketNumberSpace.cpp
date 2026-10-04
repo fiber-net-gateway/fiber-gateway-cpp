@@ -36,13 +36,11 @@ QuicPacketNumberSpace::~QuicPacketNumberSpace() {
     release_queue(pending_frames);
     release_queue(sending_frames);
     release_queue(sent_frames);
-    quic_output_frame_release_data(ack_frame);
 }
 
 void QuicPacketNumberSpace::set_frame_pool(QuicOutputFramePool &pool) noexcept { frame_pool = &pool; }
 
 void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
-    quic_output_frame_release_data(ack_frame);
     level = space_level;
     crypto_sent = 0;
     crypto_recv.clear();
@@ -81,7 +79,6 @@ void QuicPacketNumberSpace::release_frame(QuicOutputFrame &frame) noexcept {
         return;
     }
 
-    quic_output_frame_release_data(frame);
     delete &frame;
 }
 
@@ -135,7 +132,6 @@ common::IoResult<void> quic_prepare_ack_frame(QuicOutputFrame &frame, std::uint6
         range_buf_len = rcur.offset();
     }
 
-    quic_output_frame_release_data(frame);
     frame = QuicOutputFrame{};
     frame.type = QuicFrameType::Ack;
     frame.u.ack.largest = largest;

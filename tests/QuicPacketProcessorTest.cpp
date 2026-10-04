@@ -205,7 +205,6 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
         fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());
         auto payload_len = fiber::quic::quic_create_output_frame(&payload_out, frame);
         ASSERT_TRUE(payload_len.has_value());
-        fiber::quic::quic_output_frame_release_data(frame);
 
         std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
         fiber::quic::QuicPacketHeader packet{};

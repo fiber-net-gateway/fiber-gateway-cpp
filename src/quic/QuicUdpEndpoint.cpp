@@ -59,8 +59,11 @@ encode_invalid_token_close_packet(QuicUdpEndpoint &endpoint, const QuicPacketHea
     frame.type = QuicFrameType::ConnectionClose;
     frame.u.close.error_code = static_cast<std::uint64_t>(QuicErrorCode::InvalidToken);
     frame.u.close.frame_type = 0;
-    frame.u.close.reason = reinterpret_cast<const std::uint8_t *>(reason);
-    frame.u.close.reason_length = static_cast<std::uint32_t>(std::strlen(reason));
+    auto copied = quic_output_frame_set_owned_data(frame, reinterpret_cast<const std::uint8_t *>(reason),
+                                                   std::strlen(reason));
+    if (!copied) {
+        return std::unexpected(copied.error());
+    }
 
     std::array<std::uint8_t, 256> payload{};
     QuicWriteCursor payload_writer(payload.data(), payload.size());
@@ -247,10 +250,10 @@ split_crypto_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::si
         return QuicSplitFrameResult::Ok;
     }
 
-    if (frame.u.crypto.data == nullptr || !*frame.u.crypto.data) {
+    if (!frame.data) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    const std::size_t payload_len = frame.u.crypto.data->readable();
+    const std::size_t payload_len = frame.data.readable();
     const std::size_t first_payload_len = max_crypto_payload_for_space(frame.u.crypto.offset, payload_len, available);
 
     if (first_payload_len == 0) {
@@ -264,19 +267,12 @@ split_crypto_frame(QuicPacketNumberSpace &space, QuicOutputFrame &frame, std::si
     if (remainder == nullptr) {
         return std::unexpected(common::IoErr::NoMem);
     }
-    auto *remainder_data = new (std::nothrow) mem::IoBuf{};
-    if (remainder_data == nullptr) {
-        space.release_frame(*remainder);
-        return std::unexpected(common::IoErr::NoMem);
-    }
-
-    mem::IoBuf source = std::move(*frame.u.crypto.data);
-    *frame.u.crypto.data = source.retain_slice(0, first_payload_len);
-    *remainder_data = source.retain_slice(first_payload_len, payload_len - first_payload_len);
+    mem::IoBuf source = std::move(frame.data);
+    frame.data = source.retain_slice(0, first_payload_len);
+    remainder->data = source.retain_slice(first_payload_len, payload_len - first_payload_len);
 
     remainder->type = QuicFrameType::Crypto;
     remainder->u.crypto.offset = frame.u.crypto.offset + first_payload_len;
-    remainder->u.crypto.data = remainder_data;
     remainder->encoded_len = 0;
 
     frame.encoded_len = 0;

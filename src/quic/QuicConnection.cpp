@@ -797,9 +797,6 @@ bool QuicConnection::queue_close_frame_for_level(QuicEncryptionLevel level) noex
         frame->u.close.error_code = close_info_.error_code;
     }
     frame->u.close.frame_type = close_info_.frame_kind == QuicCloseFrameKind::Transport ? close_info_.frame_type : 0;
-    frame->u.close.reason = nullptr;
-    frame->u.close.reason_length = 0;
-    frame->u.close.owned_reason = nullptr;
     frame->ignore_congestion = true;
     frame->ignore_loss = true;
 
@@ -863,7 +860,6 @@ void QuicConnection::clear_packet_space_frames_for_detach(QuicPacketNumberSpace 
     release_queue(space.sending_frames, false);
     release_queue(space.sent_frames, false);
 
-    quic_output_frame_release_data(space.ack_frame);
     space.ack_frame = QuicOutputFrame{};
     space.send_ack = false;
     space.send_ack_count = 0;
@@ -2363,7 +2359,6 @@ void QuicConnection::reset_after_retry() noexcept {
     space.ecn_sent_counters = {};
     space.peer_ecn_counters = {};
     if (!space.ack_frame.queued) {
-        quic_output_frame_release_data(space.ack_frame);
         space.ack_frame = QuicOutputFrame{};
     }
 
