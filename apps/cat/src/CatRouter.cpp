@@ -25,6 +25,8 @@ bool parse_text_double(std::string_view text, double &out) noexcept {
         return false;
     }
     const char *end = text.data() + text.size();
+    // from_chars consumes [first, last); no null termination is involved.
+    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
     auto result = std::from_chars(text.data(), end, out);
     return result.ec == std::errc{} && result.ptr == end && std::isfinite(out);
 }
@@ -98,6 +100,7 @@ json::ObjectFieldStatus parse_root_field(std::string_view field, json::JsonParse
 bool parse_port(std::string_view text, std::uint16_t &port) noexcept {
     unsigned value = 0;
     const char *end = text.data() + text.size();
+    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage) — range API, see above
     auto result = std::from_chars(text.data(), end, value);
     if (result.ec != std::errc{} || result.ptr != end || value == 0 || value > 65535) {
         return false;

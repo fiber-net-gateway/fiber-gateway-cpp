@@ -36,14 +36,14 @@ struct RecordLimits {
     std::size_t max_type_bytes = 256;
     std::size_t max_name_bytes = 4096;
     std::size_t max_status_bytes = 256;
-    std::size_t max_data_bytes_per_message = 64 * 1024;
+    std::size_t max_data_bytes_per_message = static_cast<std::size_t>(64 * 1024);
     std::size_t max_context_entries = 32;
     std::size_t max_context_key_bytes = 128;
     std::size_t max_context_value_bytes = 4096;
-    std::size_t max_context_bytes = 16 * 1024;
+    std::size_t max_context_bytes = static_cast<std::size_t>(16 * 1024);
     std::size_t max_message_id_bytes = 1024;
     std::size_t max_session_token_bytes = 4096;
-    std::size_t max_tree_bytes = 1024 * 1024;
+    std::size_t max_tree_bytes = static_cast<std::size_t>(1024 * 1024);
 };
 
 } // namespace fiber::cat

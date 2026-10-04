@@ -28,7 +28,7 @@ bool checked_add(std::size_t lhs, std::size_t rhs, std::size_t &result) noexcept
 
 class CountingWriter {
 public:
-    bool write_byte(std::uint8_t) noexcept { return add(1); }
+    bool write_byte(std::uint8_t /*unused*/) noexcept { return add(1); }
 
     bool write_bytes(const char *data, std::size_t size) noexcept {
         if (size != 0 && data == nullptr) {
@@ -225,9 +225,12 @@ bool write_message(Writer &writer, const MessageData &message, EncodeState &stat
 
     if (message.kind == MessageKind::Event || message.kind == MessageKind::Metric ||
         message.kind == MessageKind::Heartbeat) {
-        const std::uint8_t kind = message.kind == MessageKind::Event    ? 'E'
-                                  : message.kind == MessageKind::Metric ? 'M'
-                                                                        : 'H';
+        std::uint8_t kind = 'H';
+        if (message.kind == MessageKind::Event) {
+            kind = 'E';
+        } else if (message.kind == MessageKind::Metric) {
+            kind = 'M';
+        }
         return writer.write_byte(kind) && write_unsigned(writer, timestamp) && write_string(writer, message.type) &&
                write_string(writer, message.name) && write_string(writer, message.status) &&
                write_data(writer, message, state.trace);
@@ -276,7 +279,7 @@ bool write_payload(Writer &writer, const MessageTraceData &trace, const ClientEn
         return false;
     }
 
-    EncodeState state{trace};
+    EncodeState state{.trace = trace};
     return write_message(writer, *trace.root, state) && state.visited == trace.message_count;
 }
 
@@ -367,10 +370,14 @@ bool write_pt1_message(Writer &writer, const MessageData &message, EncodeState &
         return false;
     }
     if (message.kind != MessageKind::Transaction) {
-        const std::uint8_t code = message.kind == MessageKind::Event       ? 'E'
-                                  : message.kind == MessageKind::Metric    ? 'M'
-                                  : message.kind == MessageKind::Heartbeat ? 'H'
-                                                                           : 0;
+        std::uint8_t code = 0;
+        if (message.kind == MessageKind::Event) {
+            code = 'E';
+        } else if (message.kind == MessageKind::Metric) {
+            code = 'M';
+        } else if (message.kind == MessageKind::Heartbeat) {
+            code = 'H';
+        }
         return code != 0 && write_pt1_line(writer, state.trace, message, code, Pt1Policy::Default);
     }
 
@@ -409,7 +416,7 @@ bool write_pt1_payload(Writer &writer, const MessageTraceData &trace, const Clie
         !write_pt1_field(writer, trace.propagation_context.session_token) || !writer.write_byte('\n')) {
         return false;
     }
-    EncodeState state{trace};
+    EncodeState state{.trace = trace};
     return write_pt1_message(writer, *trace.root, state) && state.visited == trace.message_count;
 }
 

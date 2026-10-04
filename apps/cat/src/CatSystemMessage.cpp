@@ -5,6 +5,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 
 #include "CatInternal.h"
@@ -13,7 +14,7 @@ namespace fiber::cat::detail {
 
 namespace {
 
-inline constexpr std::size_t kHeartbeatStorageCapacity = 64 * 1024;
+inline constexpr std::size_t kHeartbeatStorageCapacity = static_cast<std::size_t>(64 * 1024);
 
 class XmlWriter {
 public:
@@ -271,7 +272,7 @@ std::expected<mem::IoBuf, EncodeError> encode_heartbeat_nt1(const ClientEncodeCo
     limits.max_messages = 2;
     limits.max_children_per_transaction = 1;
     limits.max_data_bytes_per_message = max_data_bytes;
-    limits.max_tree_bytes = max_data_bytes + 16 * 1024;
+    limits.max_tree_bytes = max_data_bytes + static_cast<std::size_t>(16 * 1024);
     mem::BufPool tree_pool;
     auto root_created = create_transaction_root(tree_pool, "System", "Status", limits,
                                                 {.propagation_context = {.message_id = message_id}});

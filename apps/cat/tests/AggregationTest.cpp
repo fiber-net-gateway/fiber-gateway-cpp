@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <future>
 #include <memory>
 #include <utility>
@@ -63,8 +64,8 @@ void freeze_message(fiber::cat::detail::MessageData &message) {
 
 TEST(CatAggregationTest, AggregatesTransactionEventErrorsAndDurationsByKey) {
     run_on_loop([] {
-        auto *shard =
-                fiber::cat::detail::AggregationShard::create(fiber::event::EventLoop::current(), 8, 128, 64 * 1024, 16);
+        auto *shard = fiber::cat::detail::AggregationShard::create(fiber::event::EventLoop::current(), 8, 128,
+                                                                   static_cast<std::size_t>(64 * 1024), 16);
         ASSERT_NE(shard, nullptr);
 
         fiber::mem::BufPool pool;
