@@ -32,9 +32,9 @@ public:
 
     [[nodiscard]] fiber::event::EventLoop &owner_loop() const noexcept;
 
-    [[nodiscard]] fiber::common::IoResult<CounterRef> counter(SeriesId series) noexcept;
-    [[nodiscard]] fiber::common::IoResult<GaugeRef> gauge(SeriesId series) noexcept;
-    [[nodiscard]] fiber::common::IoResult<HistogramRef> histogram(SeriesId series) noexcept;
+    [[nodiscard]] fiber::common::IoResult<CounterRef> counter(SeriesId id) noexcept;
+    [[nodiscard]] fiber::common::IoResult<GaugeRef> gauge(SeriesId id) noexcept;
+    [[nodiscard]] fiber::common::IoResult<HistogramRef> histogram(SeriesId id) noexcept;
 
 private:
     friend class MetricsRegistry;
