@@ -1119,7 +1119,10 @@ std::uint64_t QuicUdpEndpoint::hash_stateless_peer(const net::SocketAddress &pee
     return hash;
 }
 
-int QuicUdpEndpoint::compare_connection_id(const QuicConnectionId &left, const QuicConnectionId &right) noexcept {
+int QuicUdpEndpoint::compare_dcid_key(const QuicConnectionId &left, const QuicConnectionId &right) noexcept {
+    if (left.hash() != right.hash()) {
+        return left.hash() < right.hash() ? -1 : 1;
+    }
     const std::size_t common_len = std::min(left.size(), right.size());
     if (common_len != 0) {
         const int cmp = std::memcmp(left.data(), right.data(), common_len);
@@ -1131,13 +1134,6 @@ int QuicUdpEndpoint::compare_connection_id(const QuicConnectionId &left, const Q
         return 0;
     }
     return left.size() < right.size() ? -1 : 1;
-}
-
-int QuicUdpEndpoint::compare_dcid_key(const QuicConnectionId &left, const QuicConnectionId &right) noexcept {
-    if (left.hash() != right.hash()) {
-        return left.hash() < right.hash() ? -1 : 1;
-    }
-    return compare_connection_id(left, right);
 }
 
 QuicConnectionIdIndex *QuicUdpEndpoint::index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept {
@@ -1531,7 +1527,7 @@ QuicUdpEndpoint::retire_local_connection_id_and_resend(QuicConnection &connectio
     if (slot == nullptr) {
         return false;
     }
-    if (compare_connection_id(slot->endpoint_index.cid_key, packet_dcid) == 0) {
+    if (compare_dcid_key(slot->endpoint_index.cid_key, packet_dcid) == 0) {
         connection.close(QuicErrorCode::ProtocolViolation,
                          static_cast<std::uint64_t>(QuicFrameType::RetireConnectionId));
         return true;
@@ -1668,7 +1664,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
             ++rejected_connection_count_;
             return std::unexpected(generated.error());
         }
-        if (compare_connection_id(*generated, packet.dcid) != 0 && find_connection(*generated) == nullptr) {
+        if (compare_dcid_key(*generated, packet.dcid) != 0 && find_connection(*generated) == nullptr) {
             local_connection_id = *generated;
             generated_unique_cid = true;
             break;
@@ -1846,8 +1842,8 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
                     ++dropped_datagram_count_;
                     return std::unexpected(generated.error());
                 }
-                if (compare_connection_id(*generated, packet->dcid) != 0 &&
-                    compare_connection_id(*generated, packet->scid) != 0 && find_connection(*generated) == nullptr) {
+                if (compare_dcid_key(*generated, packet->dcid) != 0 &&
+                    compare_dcid_key(*generated, packet->scid) != 0 && find_connection(*generated) == nullptr) {
                     retry_scid = *generated;
                     generated_unique_cid = true;
                     break;
