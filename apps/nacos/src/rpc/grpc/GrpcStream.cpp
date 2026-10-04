@@ -1,5 +1,6 @@
 #include "GrpcStream.h"
 
+#include <cstddef>
 #include <utility>
 
 #include <fiber/http/HttpHeaderHash.h>
@@ -31,7 +32,7 @@ std::string encode_grpc_timeout(std::chrono::milliseconds d) {
 // arbitrary length, so cap it before copying into the std::string member to
 // keep the allocation bounded under this noexcept path. The grpc-status code is
 // authoritative - the message is advisory - so truncation is safe.
-constexpr std::size_t kMaxGrpcMessage = 8 * 1024;
+constexpr std::size_t kMaxGrpcMessage = static_cast<std::size_t>(8 * 1024);
 void assign_grpc_message(std::string &dst, std::string_view src) {
     if (src.size() > kMaxGrpcMessage) {
         src = src.substr(0, kMaxGrpcMessage);
@@ -333,7 +334,7 @@ fiber::async::Task<common::IoResult<GrpcStatus>> GrpcStream::finish() noexcept {
         co_return std::unexpected(abort_reason_);
     }
     if (finished_) {
-        co_return GrpcStatus{grpc_code_, grpc_message_};
+        co_return GrpcStatus{.code = grpc_code_, .message = grpc_message_};
     }
 
     if (!response_head_read_) {
@@ -376,7 +377,7 @@ fiber::async::Task<common::IoResult<GrpcStatus>> GrpcStream::finish() noexcept {
     }
 
     finished_ = true;
-    co_return GrpcStatus{grpc_code_, grpc_message_};
+    co_return GrpcStatus{.code = grpc_code_, .message = grpc_message_};
 }
 
 } // namespace fiber::nacos::detail::grpc

@@ -80,6 +80,7 @@ public:
         handle_ = handle;
         loop_ = &event::EventLoop::current();
         using SuspendReturn = decltype(awaiter_.await_suspend(handle));
+        // NOLINTNEXTLINE(bugprone-branch-clone) if constexpr dispatch on the awaiter's suspend return type
         if constexpr (std::is_void_v<SuspendReturn>) {
             awaiter_.await_suspend(handle);
         } else if constexpr (std::is_same_v<SuspendReturn, bool>) {

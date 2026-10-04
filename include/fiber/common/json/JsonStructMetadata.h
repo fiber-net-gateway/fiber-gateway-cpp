@@ -190,7 +190,7 @@ template<typename Struct, typename Item>
 }
 
 template<typename Tuple, std::size_t... I>
-[[nodiscard]] consteval bool unique_field_names_impl(const Tuple &fields, std::index_sequence<I...>) {
+[[nodiscard]] consteval bool unique_field_names_impl(const Tuple &fields, std::index_sequence<I...> /*unused*/) {
     std::array<std::string_view, sizeof...(I)> names{std::get<I>(fields).name...};
     for (std::size_t left = 0; left < names.size(); ++left) {
         for (std::size_t right = left + 1; right < names.size(); ++right) {
@@ -229,7 +229,7 @@ template<JsonStruct T>
 }
 
 template<JsonStruct T, typename Function, std::size_t... I>
-constexpr void for_each_field_impl(Function &&function, std::index_sequence<I...>) noexcept {
+constexpr void for_each_field_impl(Function &&function, std::index_sequence<I...> /*unused*/) noexcept {
     const auto &fields = StructMetadata<std::remove_cvref_t<T>>::fields;
     (function(std::integral_constant<std::size_t, I>{}, std::get<I>(fields)), ...);
 }
@@ -241,10 +241,11 @@ constexpr void for_each_field(Function &&function) noexcept {
 
 template<JsonStruct T, typename Function, std::size_t... I>
 [[nodiscard]] bool visit_field_by_name_impl(std::string_view name, Function &&function,
-                                            std::index_sequence<I...>) noexcept {
+                                            std::index_sequence<I...> /*unused*/) noexcept {
     const auto &fields = StructMetadata<std::remove_cvref_t<T>>::fields;
     bool found = false;
     auto visit_one = [&]<std::size_t Index>() noexcept {
+        // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage) constexpr static tuple; FP via fold expression
         const auto &field_descriptor = std::get<Index>(fields);
         if (!found && field_descriptor.name == name) {
             found = true;

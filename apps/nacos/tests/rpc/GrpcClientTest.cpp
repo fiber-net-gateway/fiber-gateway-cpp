@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -100,7 +101,7 @@ std::string chain_to_string(fiber::mem::IoBufChain chain) {
 fiber::async::Task<fiber::common::IoResult<std::string>> read_body_to_string(fiber::http::HttpExchange &exchange) {
     std::string out;
     for (;;) {
-        auto chunk_result = co_await exchange.read_body(64 * 1024);
+        auto chunk_result = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!chunk_result) {
             co_return std::unexpected(chunk_result.error());
         }
@@ -183,7 +184,7 @@ fiber::async::Task<void> say_hello_handler(fiber::http::HttpExchange &exchange) 
 fiber::async::Task<void> fail_handler(fiber::http::HttpExchange &exchange) {
     // Drain the request body.
     for (;;) {
-        auto chunk = co_await exchange.read_body(64 * 1024);
+        auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!chunk || chunk->complete()) {
             break;
         }
@@ -340,7 +341,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
     fiber::async::spawn(*loop, [&client]() { return wait_for_client_connection(&client); });
 
     fiber::mem::BufPool pool;
-    helloworld::HelloRequest req = request;
+    const helloworld::HelloRequest &req = request;
     helloworld::HelloReply reply;
     auto call_result = co_await call_unary(client, service, method, req, reply, pool);
     if (!call_result) {
@@ -382,7 +383,7 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
     fiber::async::spawn(*loop, [&client]() { return wait_for_client_connection(&client); });
 
     fiber::mem::BufPool pool;
-    helloworld::HelloRequest req = request;
+    const helloworld::HelloRequest &req = request;
     for (int call = 0; call < 2; ++call) {
         helloworld::HelloReply reply;
         auto call_result = co_await call_unary(client, "helloworld.Greeter", "SayHello", req, reply, pool);
@@ -428,7 +429,7 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
     auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
-        promise->set_value(std::move(result));
+        promise->set_value(result);
         co_return;
     }
 
@@ -438,6 +439,7 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
         fiber::mem::BufPool pool;
         fiber::nacos::detail::grpc::GrpcStream original = client.open_stream("helloworld.Greeter", "SayHello", pool);
         fiber::nacos::detail::grpc::GrpcStream moved = std::move(original);
+        // NOLINTNEXTLINE(bugprone-use-after-move) the moved-from state is exactly what is being asserted
         result.moved_from_invalid = !original.valid() && moved.valid();
     }
 
@@ -453,7 +455,7 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
     // only after the close completed; yield past one poll so it has observed
     // the completed gate before its flag is read.
     co_await fiber::async::yield();
-    promise->set_value(std::move(result));
+    promise->set_value(result);
 }
 
 TEST(GrpcClientTest, StreamUnaryRoundTrip) {
