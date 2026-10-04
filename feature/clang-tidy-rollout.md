@@ -99,18 +99,46 @@ unnecessary-value-param 5(逐条人工,禁按提示改引用)。**
 compression/log 两模块原计划模块序遗漏,批次 1"收官终扫"暴露 154 条后才补做;
 教训:计划里的模块清单要对照 `git ls-files src/ | cut -d/ -f2 | sort -u` 复核。
 
-### 3.2 批次 2/3(待做)
+### 3.2 批次 2/3(已完成)
 
-- 批次 2:apps/(nacos/cat/prometheus/lite_nginx)
-- 批次 3:tests/(GoogleTest 宏噪声,开工首步先做局部基线;宁可行级
-  NOLINT 不禁检查)
-- fuzz/:须用 build-fuzz 的 db(FIBER_BUILD_FUZZERS 树才有 fuzz TU)
+- 批次 2:apps/ —— prometheus e58b14a4、cat 920952b1、lite_nginx 71923ed2、
+  nacos 85746e19,收口 d805c7b6(删 apps/.clang-tidy,并入 tier-1 守门)。
+- fuzz/:d556288b(9 个 harness + seedgen;须用 build-fuzz 的 db,
+  FIBER_BUILD_FUZZERS 树才有 fuzz TU),收口 95635552(删 fuzz/.clang-tidy)。
+  build-fuzz 本机配方(系统 libstdc++ 为 GCC 10 无 `<expected>`,须 libc++
+  + libstdc++ 垫片链)已写入 fuzz/README.md。
+- 批次 3:tests/ —— 单批提交(150 个测试 TU + 6 个经测试 TU 报出的头文件
+  守卫),基线 2477 条 → 0;收口提交删 tests/.clang-tidy。
+  - 真修亮点:`"\x07ctx"` 十六进制转义吞噬 'c'(双侧一致改
+    `"\x07" "ctx"` + 显式字节数组)、round_trip 形参 `const char*` 收
+    string_view::data() 的悬空 NUL 隐患、set_view 传裸字面量、
+    uint8_t 循环变量对 size_type 上界、lambda 内 `__func__` 语义
+    (捕获 enclosing 名)、`new T{.arr[0]=..}` C99 指示器改默认构造。
+  - 集群守卫策略:bugprone-unchecked-optional-access 以 TEST 体为单位
+    NOLINTBEGIN/END(128 条 → 43 集群 + 28 处 helper 内 NEXTLINE);
+    GoogleTest ASSERT 的早退守卫对检查器不可见是系统性 FP,不禁检查。
+  - 零拷贝规则外的人肉损伤:5 个 tier-1 头文件的 const/非 const 重载对
+    被 make-member-function-const 定 const 后与孪生冲突 → 回退 + NOLINT
+    (QuicFrame front/back、Http2Connection loop/transport、Http2Stream
+    owner、QuicStream owner);TcpListener take_peer 无孪生,真 const 化保留。
 
-## 4. NOLINT 清单(批次 1 后共 85 行守卫,按检查名)
+## 4. NOLINT 清单(批次 1 后 85 行守卫;批次 3 后另加 tests 批 ~153 行,按检查名)
 
 每处带理由注释(NOLINTNEXTLINE 上方;区域用 NOLINTBEGIN/END;计数按守卫行,
 BEGIN/END 各计一行;行守卫 ≤120 列。核对命令:
 `grep -rn 'NOLINT' src include example | wc -l`)。
+
+tests 批新增大类(与前表同类不再重复):bugprone-unchecked-optional-access
+71 守卫行(43 个 TEST 体集群 + 28 处 helper NEXTLINE,ASSERT 守卫不可见)、
+bugprone-use-after-move 16(含 3 处双检查连 clang-analyzer-cplusplus.Move,
+moved-from 状态检查即测试主旨)、readability-make-member-function-const 6
+(非 const 孪生返回可变指针/引用的重载对)、BlockInCriticalSection 5
+(测试侧裸 socket 助手故意阻塞)、EnumCastOutOfRange 2(非法枚举值即被测
+输入)、string-constructor 2(嵌入 NUL 即帧载荷)、其余各 1
+(return-braced-init-list 的 string 收窄陷阱、IntrusiveList 环钩
+designated-aggregate-new 分析器 FP、CallAndMessage 槽位由 harness 预填、
+memcpy 原始二进制区域)。tests/ 的 misc-unused-parameters 15 处一律
+`/*pool*/` 注释形参而非 NOLINT。
 
 | 检查 | 行数 | 典型理由 |
 |---|---|---|
@@ -153,10 +181,12 @@ BEGIN/END 各计一行;行守卫 ≤120 列。核对命令:
 ## 6. WarningsAsErrors 与嵌套覆盖
 
 - 根 `.clang-tidy` 已加 `WarningsAsErrors: '*'`(批次 1 清零后的守门)。
-- `apps/`、`tests/`、`fuzz/` 各置嵌套 `.clang-tidy`(`InheritParentConfig: true`
-  + `WarningsAsErrors: '-*'`)使批次 2/3 区域暂不致命;**注意 InheritParentConfig
-  对标量是追加不是覆盖**:子配置 `WarningsAsErrors: ''` 合成 `'*,'` 仍然全致命,
-  必须用 `'-*'`(合成 `'*,-*'`,glob 后者胜)。批次落地清零后删除对应嵌套文件。
+- 批次 2/3 期间 `apps/`、`tests/`、`fuzz/` 各置嵌套 `.clang-tidy`
+  (`InheritParentConfig: true` + `WarningsAsErrors: '-*'`)暂不致命;
+  **注意 InheritParentConfig 对标量是追加不是覆盖**:子配置
+  `WarningsAsErrors: ''` 合成 `'*,'` 仍然全致命,必须用 `'-*'`
+  (合成 `'*,-*'`,glob 后者胜)。三个嵌套文件均已随对应批次清零删除
+  (apps d805c7b6、fuzz 95635552、tests 见 §3.2),全仓 tier-1 生效。
 - fuzz 的 TU 只存在于 build-fuzz db,检查须 `-p build-fuzz`。
 
 ## 7. v20 自动修复损伤模式(-f 后必扫)
@@ -180,6 +210,25 @@ BEGIN/END 各计一行;行守卫 ≤120 列。核对命令:
 4. **NOLINT 行被 clang-format 折行**断守卫 —— 守卫行保持 ≤120 列。
 5. **modernize-return-braced-init-list 可能不给 fixit**(无法证明无重载/列表
    构造歧义时只告警不修)→ FormattedLogRecord.h 两处手改 `return {...}`。
+6. **make-member-function-const 定 const 撞重载对**(tests 批,166 前端错的主因):
+   同名 const/非 const 重载取地址/取成员指针时仅返回类型差异 = ill-formed。
+   处置:回退 const 化 + 非 const 侧 NOLINT("non-const twin returns a
+   mutable pointer/reference")。5 个 tier-1 头文件(QuicFrame/Http2Connection/
+   Http2Stream/QuicStream)全中;无孪生的(TcpListener take_peer)可真 const 化。
+7. **implicit-widening 修复器吞/吐括号的新形态**(tests 批):跨参数吞
+   `static_cast<std::size_t>(64 * 1024, false, 1)`、吞收尾 `)`、
+   `vector<size_t>` 初始化列表里嵌套 `static_cast<const unsigned long>` 叠 cast、
+   凭空 `static_cast<size_type>`(非法名)×10 处。统一改回
+   `std::size_t{64} * 1024` 首操作数花括号形。
+8. **integer-sign-comparison 会多吐右括号**:`std::cmp_less(off, got)))`;
+   return-braced-init-list 在窄化场景产 `{count, ch}`(string 的
+   initializer_list<char> 收窄陷阱)→ 两处回退手修。
+9. **return-braced-init-list 对 std::string(count, ch) 建议本身是错的**:
+   花括号形优先匹配 initializer_list<char> 而 count 收窄 = 硬错;
+   保留具名构造 + NOLINT。
+10. **bugprone-string-constructor 揪出十六进制转义吞噬**(真缺陷,
+    见 §8):`"\x07ctx"` 实为 {0x7C,'t','x'};两侧一致的"自洽 bug"也修
+    (拆 `"\x07" "ctx"`),配套生产侧字面量数组化。
 
 **陈旧二进制陷阱**:autofix 损伤致编译错时,ctest 仍对旧二进制全绿。每道门
 必须含 `cmake --build … | grep -E "error|warning"`(空才算过),且 tidy 日志
@@ -194,6 +243,12 @@ BEGIN/END 各计一行;行守卫 ≤120 列。核对命令:
 | strcpy→memcpy | QuicCrypto | 长度前缀区用 strcpy 语义错误 |
 | future::get() 二次调用 | example/tls_ab_bench | writer/server 失败路径打印错误时对已消费 future 再 get()(UB);提升为单次 get() |
 | 同长 logger 名解析次序非确定 | LoggerManager | matching_rules 按 name.size() 排序,同名长并列时以堆序(地址序)决出先后,last-wins 级别解析随之不定;改 std::stable_sort 保配置声明序 |
+| 十六进制转义吞噬后续字符 | TlsHandshakeCodecTest | `"\x07ctx"` 解析为 {0x7C,'t','x'}(hex 转义吃掉 'c');生产侧 R"(\|tx)" 与期望侧字面量双双错得一致,测试恒绿掩盖;拆 `"\x07" "ctx"` + 显式 4 字节数组 |
+| string_view::data() 传 strlen 侧 | TlsStreamFdTest::round_trip | 形参 `const char *` 收 `expect_request.data()`,非保证 NUL 终止;形参改 string_view 按长度比较 |
+| set_view 收 data() 裸指针 | HttpHeadersTest | lowcase_name.data() 作名字传参,改传字面量 "authorization" |
+| uint8_t 循环变量比 size_type 上界 | DnsResolverTest | 10 次迭代侥幸不回绕;改 std::size_t |
+| lambda 内 `__func__` 语义错位 | LogSystemTest | lambda 体内 __func__ = "operator()" 而非测试名;捕获 `[func = __func__]` |
+| C99 数组/嵌套指示器 | Http3EndpointTest | `FixedSource{.reads[0]=..}` 是 GNU 扩展(编译器告警);改默认构造 + 后续赋值,行为等价 |
 
 ## 9. stdlib 交叉验证(计划步骤 9:本机不可执行)
 
@@ -211,5 +266,5 @@ BEGIN/END 各计一行;行守卫 ≤120 列。核对命令:
 - cppcoreguidelines 精选(pro-bounds/pro-type-ownership 与性能优先设计冲突,只挑不冲突项)
 - CI 接线(评审缺口 #1,另案)
 - 编译器告警旗标(-Wall/-Wextra)为独立后续事项
-- tests/ 既有编译器级 nodiscard 告警(ClientHttp1ExchangeTest.cpp:1171/1966),
-  属 -Wall 事项,非 tidy 范畴
+  (tests 批顺手清零了 ClientHttp1ExchangeTest 两处既有 nodiscard 告警:
+  adopt_loop 返回值改 EXPECT_EQ 断言)
