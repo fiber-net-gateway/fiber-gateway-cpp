@@ -33,8 +33,8 @@ public:
     class ConnectionLease {
     public:
         ConnectionLease() noexcept = default;
-        ConnectionLease(ConnectionLease &&) noexcept;
-        ConnectionLease &operator=(ConnectionLease &&) noexcept;
+        ConnectionLease(ConnectionLease && /*other*/) noexcept;
+        ConnectionLease &operator=(ConnectionLease && /*other*/) noexcept;
         ~ConnectionLease();
 
         [[nodiscard]] bool valid() const noexcept;

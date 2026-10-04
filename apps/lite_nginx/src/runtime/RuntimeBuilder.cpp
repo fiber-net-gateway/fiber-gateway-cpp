@@ -179,7 +179,7 @@ fiber::http::HeaderMap<std::uint8_t>::Builder make_default_skip_headers_builder(
 // IP-literal peer dials the literal directly. https:// needs a host name: the TLS handshake sends
 // it as SNI, which cannot carry a literal, so `https://<ip>` is a configuration error.
 std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config::SourceLocation &location,
-                                                                   std::string host, std::uint16_t port,
+                                                                   const std::string &host, std::uint16_t port,
                                                                    std::uint32_t weight, bool tls) {
     const auto scheme = tls ? fiber::http::HttpConnectionGroupKey::Scheme::Https
                             : fiber::http::HttpConnectionGroupKey::Scheme::Http;
@@ -199,7 +199,7 @@ std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config:
     if (!key) {
         return std::unexpected(make_error(location, "invalid upstream host name: " + host));
     }
-    peer.connection_key = std::move(*key);
+    peer.connection_key = *key;
     return peer;
 }
 
@@ -213,13 +213,14 @@ struct LocationRouteDefiner {
     // current location's name set; the matcher adds names in pattern order (idx 0,1,2,...).
     std::vector<std::string> *path_var_names_out = nullptr;
 
-    void add_path_var_definer(LocationRoutePayload &, std::string_view name, std::uint32_t) {
+    void add_path_var_definer(LocationRoutePayload & /*unused*/, std::string_view name,
+                              std::uint32_t /*unused*/) const {
         if (path_var_names_out != nullptr) {
             path_var_names_out->emplace_back(name);
         }
     }
 
-    std::uint32_t on_route_mount(std::uint32_t, std::string_view, LocationRoutePayload &payload) {
+    std::uint32_t on_route_mount(std::uint32_t /*unused*/, std::string_view /*unused*/, LocationRoutePayload &payload) {
         return payload.location_index;
     }
 };
@@ -258,7 +259,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
     runtime.listeners.reserve(config.http.listens.size());
 
     std::unordered_map<std::string, std::uint32_t> upstream_indices;
-    upstream_indices.reserve(config.http.upstreams.size() * 2 + 4);
+    upstream_indices.reserve((config.http.upstreams.size() * 2) + 4);
 
     for (const auto &upstream: config.http.upstreams) {
         UpstreamRuntime runtime_upstream;
@@ -282,7 +283,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
     }
 
     std::unordered_map<std::string, std::uint32_t> direct_upstream_indices;
-    direct_upstream_indices.reserve(config.http.servers.size() * 2 + 4);
+    direct_upstream_indices.reserve((config.http.servers.size() * 2) + 4);
 
     std::unordered_map<std::string, config::SourceLocation> seen_server_names;
     seen_server_names.reserve(config.http.servers.size() * 2);

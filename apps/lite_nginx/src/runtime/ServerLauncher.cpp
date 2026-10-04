@@ -228,7 +228,7 @@ run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter 
 
 fiber::common::IoErr configure_identity_by_server_name(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
                                                        const fiber::tls::TlsClientHelloView &client_hello) noexcept {
-    auto *credentials = static_cast<const ListenerTlsCredentials *>(ctx);
+    const auto *credentials = static_cast<const ListenerTlsCredentials *>(ctx);
     if (!credentials || credentials->default_credential.empty()) {
         return fiber::common::IoErr::Invalid;
     }
@@ -323,7 +323,7 @@ std::uint32_t find_server_index(const ListenerRuntime &listener, std::string_vie
 struct LocationMatchContext {
     static constexpr std::uint32_t kInvalidIndex = std::numeric_limits<std::uint32_t>::max();
 
-    bool matched(std::uint32_t, const std::uint32_t &handler) {
+    bool matched(std::uint32_t /*unused*/, const std::uint32_t &handler) {
         location_index = handler;
         return true;
     }

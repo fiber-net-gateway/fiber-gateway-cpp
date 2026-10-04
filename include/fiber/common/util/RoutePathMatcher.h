@@ -121,7 +121,7 @@ private:
         for (; end < length; ++end) {
             const unsigned char ch = static_cast<unsigned char>(path[end]);
             if (ch != '/') {
-                hash = hash * 31u + ch;
+                hash = hash * 31U + ch;
             } else if (begin < end) {
                 break;
             } else {
@@ -275,6 +275,7 @@ public:
 
         copy_node(0, 0);
         std::uint32_t next_node_index = 1;
+        // NOLINTNEXTLINE(modernize-loop-convert) pending grows inside the loop (BFS queue); range-for would cache end()
         for (std::size_t cursor = 0; cursor < pending.size(); ++cursor) {
             const std::uint32_t old_index = pending[cursor];
             const BuildNode &src = nodes_[old_index];
@@ -352,7 +353,7 @@ private:
             return std::unexpected(RoutePatternError{"empty path pattern is not allowed"});
         }
         for (const unsigned char ch: pattern) {
-            if ((ch & 0x80u) != 0) {
+            if ((ch & 0x80U) != 0) {
                 return std::unexpected(RoutePatternError{"path pattern must use ASCII bytes only"});
             }
         }
@@ -418,8 +419,8 @@ private:
                                                         std::size_t segment_size, std::uint32_t hash) {
         if (nodes_[node_index].static_slots.empty()) {
             fill_invalid(nodes_[node_index].static_slots, 8);
-        } else if ((nodes_[node_index].static_child_count << 1u) > nodes_[node_index].static_slots.size()) {
-            rehash_static_slots(nodes_[node_index], nodes_[node_index].static_slots.size() << 1u);
+        } else if ((nodes_[node_index].static_child_count << 1U) > nodes_[node_index].static_slots.size()) {
+            rehash_static_slots(nodes_[node_index], nodes_[node_index].static_slots.size() << 1U);
         }
 
         const std::uint32_t slot_mask = static_cast<std::uint32_t>(nodes_[node_index].static_slots.size() - 1);
@@ -510,9 +511,9 @@ private:
             }
 
             if (segment_start != i || (ch != ':' && ch != '*')) {
-                hash = hash * 31u + ch;
+                hash = hash * 31U + ch;
             } else {
-                wild = ch == ':' ? 1u : 2u;
+                wild = ch == ':' ? 1U : 2U;
             }
         }
 

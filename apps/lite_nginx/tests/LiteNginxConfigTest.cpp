@@ -74,7 +74,7 @@ TEST(LiteNginxConfigTest, LexerHandlesCommentsAndQuotedStrings) {
     ASSERT_TRUE(tokens_result.has_value()) << tokens_result.error().message;
     const auto &tokens = *tokens_result;
 
-    ASSERT_GE(tokens.size(), 5u);
+    ASSERT_GE(tokens.size(), 5U);
     EXPECT_EQ(tokens[0].kind, TokenKind::Word);
     EXPECT_EQ(tokens[0].text, "proxy_set_header");
     EXPECT_EQ(tokens[1].text, "Host");
@@ -130,43 +130,43 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
     const auto &config = *config_result;
 
-    EXPECT_EQ(config.worker_processes, 4u);
-    ASSERT_EQ(config.http.listens.size(), 2u);
+    EXPECT_EQ(config.worker_processes, 4U);
+    ASSERT_EQ(config.http.listens.size(), 2U);
     EXPECT_EQ(config.http.listens[0].port, 8080);
     EXPECT_FALSE(config.http.listens[0].tls);
     EXPECT_FALSE(config.http.listens[0].http3);
     EXPECT_EQ(config.http.listens[1].port, 8443);
     EXPECT_TRUE(config.http.listens[1].tls);
     EXPECT_TRUE(config.http.listens[1].http3);
-    ASSERT_EQ(config.http.upstreams.size(), 1u);
+    ASSERT_EQ(config.http.upstreams.size(), 1U);
     EXPECT_EQ(config.http.upstreams[0].name, "backend");
-    ASSERT_EQ(config.http.upstreams[0].servers.size(), 3u);
+    ASSERT_EQ(config.http.upstreams[0].servers.size(), 3U);
     EXPECT_EQ(config.http.upstreams[0].servers[0].host, "127.0.0.1");
     EXPECT_EQ(config.http.upstreams[0].servers[0].port, 9001);
-    EXPECT_EQ(config.http.upstreams[0].servers[0].weight, 3u);
+    EXPECT_EQ(config.http.upstreams[0].servers[0].weight, 3U);
     EXPECT_FALSE(config.http.upstreams[0].servers[0].tls);
     EXPECT_EQ(config.http.upstreams[0].servers[1].host, "baidu.com");
-    EXPECT_EQ(config.http.upstreams[0].servers[1].port, 443u);
-    EXPECT_EQ(config.http.upstreams[0].servers[1].weight, 1u);
+    EXPECT_EQ(config.http.upstreams[0].servers[1].port, 443U);
+    EXPECT_EQ(config.http.upstreams[0].servers[1].weight, 1U);
     EXPECT_TRUE(config.http.upstreams[0].servers[1].tls);
     EXPECT_EQ(config.http.upstreams[0].servers[2].host, "127.0.0.1");
-    EXPECT_EQ(config.http.upstreams[0].servers[2].port, 9002u);
+    EXPECT_EQ(config.http.upstreams[0].servers[2].port, 9002U);
     EXPECT_FALSE(config.http.upstreams[0].servers[2].tls);
-    EXPECT_EQ(config.http.connection_pool.keepalive_size, 32u);
+    EXPECT_EQ(config.http.connection_pool.keepalive_size, 32U);
     EXPECT_EQ(config.http.connection_pool.keepalive_timeout, std::chrono::seconds(30));
     EXPECT_EQ(config.http.connection_pool.steal, PoolSteal::Auto);
-    EXPECT_EQ(config.http.connection_pool.max_idle_total, 2048u);
-    EXPECT_EQ(config.http.connection_pool.initial_group_capacity, 32u);
+    EXPECT_EQ(config.http.connection_pool.max_idle_total, 2048U);
+    EXPECT_EQ(config.http.connection_pool.initial_group_capacity, 32U);
     EXPECT_EQ(config.http.upstreams[0].connect_timeout, std::chrono::seconds(2));
 
-    ASSERT_EQ(config.http.servers.size(), 1u);
+    ASSERT_EQ(config.http.servers.size(), 1U);
     const auto &server = config.http.servers[0];
-    ASSERT_EQ(server.server_names.size(), 2u);
+    ASSERT_EQ(server.server_names.size(), 2U);
     EXPECT_EQ(server.server_names[0], "localhost");
     EXPECT_EQ(server.server_names[1], "api.local");
     EXPECT_EQ(server.certificate, "/tmp/localhost.crt");
     EXPECT_EQ(server.certificate_key, "/tmp/localhost.key");
-    ASSERT_EQ(server.locations.size(), 2u);
+    ASSERT_EQ(server.locations.size(), 2U);
 
     const auto &ready = server.locations[0];
     EXPECT_EQ(ready.pattern, "/ready");
@@ -174,12 +174,12 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     EXPECT_EQ(ready.proxy_pass.host, "127.0.0.1");
     EXPECT_EQ(ready.proxy_pass.port, 9009);
     EXPECT_FALSE(ready.proxy.buffering.enabled());
-    EXPECT_EQ(ready.proxy.buffering.low_water, 0u);
+    EXPECT_EQ(ready.proxy.buffering.low_water, 0U);
 
     const auto &api = server.locations[1];
     EXPECT_EQ(api.proxy_pass.kind, ProxyPassKind::NamedUpstream);
     EXPECT_EQ(api.proxy_pass.upstream_name, "backend");
-    ASSERT_EQ(api.proxy.set_headers.size(), 2u);
+    ASSERT_EQ(api.proxy.set_headers.size(), 2U);
     EXPECT_EQ(api.proxy.set_headers[0].name, "Host");
     EXPECT_EQ(api.proxy.set_headers[1].name, "X-Forwarded-Proto");
     EXPECT_FALSE(api.proxy.buffering.enabled());
@@ -215,18 +215,18 @@ TEST(LiteNginxConfigTest, ParsesAndInheritsProxyBufferingSettings) {
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
     const auto &locations = config_result->http.servers[0].locations;
-    ASSERT_EQ(locations.size(), 3u);
+    ASSERT_EQ(locations.size(), 3U);
 
     EXPECT_TRUE(locations[0].proxy.buffering.enabled());
-    EXPECT_EQ(locations[0].proxy.buffering.buffer_size, 128u * 1024u);
-    EXPECT_EQ(locations[0].proxy.buffering.low_water, 32u * 1024u);
+    EXPECT_EQ(locations[0].proxy.buffering.buffer_size, 128U * 1024U);
+    EXPECT_EQ(locations[0].proxy.buffering.low_water, 32U * 1024U);
 
     EXPECT_FALSE(locations[1].proxy.buffering.enabled());
-    EXPECT_EQ(locations[1].proxy.buffering.low_water, 0u);
+    EXPECT_EQ(locations[1].proxy.buffering.low_water, 0U);
 
     EXPECT_TRUE(locations[2].proxy.buffering.enabled());
-    EXPECT_EQ(locations[2].proxy.buffering.buffer_size, 64u * 1024u);
-    EXPECT_EQ(locations[2].proxy.buffering.low_water, 48u * 1024u);
+    EXPECT_EQ(locations[2].proxy.buffering.buffer_size, 64U * 1024U);
+    EXPECT_EQ(locations[2].proxy.buffering.low_water, 48U * 1024U);
 }
 
 TEST(LiteNginxConfigTest, RejectsInvalidProxyBufferingSettings) {
@@ -290,30 +290,30 @@ TEST(LiteNginxConfigTest, ParsesAndInheritsGzipSettingsIndependently) {
     const auto &http = config_result->http;
     EXPECT_TRUE(http.gzip.enabled);
     EXPECT_FALSE(http.gzip.any_type);
-    ASSERT_EQ(http.gzip.types.size(), 3u);
+    ASSERT_EQ(http.gzip.types.size(), 3U);
     EXPECT_EQ(http.gzip.types[0], "text/html");
     EXPECT_EQ(http.gzip.types[1], "application/json");
     EXPECT_EQ(http.gzip.types[2], "text/plain");
-    EXPECT_EQ(http.gzip.min_length, 1024u);
+    EXPECT_EQ(http.gzip.min_length, 1024U);
     EXPECT_EQ(http.gzip.compression_level, 3);
 
     const auto &server = http.servers[0];
     EXPECT_TRUE(server.gzip.enabled);
-    EXPECT_EQ(server.gzip.min_length, 1024u);
+    EXPECT_EQ(server.gzip.min_length, 1024U);
     EXPECT_EQ(server.gzip.compression_level, 5);
 
-    ASSERT_EQ(server.locations.size(), 2u);
+    ASSERT_EQ(server.locations.size(), 2U);
     const auto &inherited = server.locations[0].gzip;
     EXPECT_TRUE(inherited.enabled);
     EXPECT_FALSE(inherited.any_type);
     EXPECT_EQ(inherited.types, http.gzip.types);
-    EXPECT_EQ(inherited.min_length, 1024u);
+    EXPECT_EQ(inherited.min_length, 1024U);
     EXPECT_EQ(inherited.compression_level, 5);
 
     const auto &overridden = server.locations[1].gzip;
     EXPECT_FALSE(overridden.enabled);
     EXPECT_TRUE(overridden.any_type);
-    EXPECT_EQ(overridden.min_length, 0u);
+    EXPECT_EQ(overridden.min_length, 0U);
     EXPECT_EQ(overridden.compression_level, 5);
 }
 
@@ -388,19 +388,19 @@ TEST(LiteNginxConfigTest, ParsesAndInheritsClientMaxBodySizeIndependentOfDirecti
                                                         "client_max_body_size.conf");
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-    EXPECT_EQ(config_result->http.client_max_body_size, 1024u * 1024u);
-    ASSERT_EQ(config_result->http.servers.size(), 2u);
+    EXPECT_EQ(config_result->http.client_max_body_size, 1024U * 1024U);
+    ASSERT_EQ(config_result->http.servers.size(), 2U);
 
     const auto &overridden = config_result->http.servers[0];
-    EXPECT_EQ(overridden.client_max_body_size, 2u * 1024u * 1024u);
-    ASSERT_EQ(overridden.locations.size(), 2u);
-    EXPECT_EQ(overridden.locations[0].client_max_body_size, 2u * 1024u * 1024u);
-    EXPECT_EQ(overridden.locations[1].client_max_body_size, 0u);
+    EXPECT_EQ(overridden.client_max_body_size, 2U * 1024U * 1024U);
+    ASSERT_EQ(overridden.locations.size(), 2U);
+    EXPECT_EQ(overridden.locations[0].client_max_body_size, 2U * 1024U * 1024U);
+    EXPECT_EQ(overridden.locations[1].client_max_body_size, 0U);
 
     const auto &inherited = config_result->http.servers[1];
-    EXPECT_EQ(inherited.client_max_body_size, 1024u * 1024u);
-    ASSERT_EQ(inherited.locations.size(), 1u);
-    EXPECT_EQ(inherited.locations[0].client_max_body_size, 1024u * 1024u);
+    EXPECT_EQ(inherited.client_max_body_size, 1024U * 1024U);
+    ASSERT_EQ(inherited.locations.size(), 1U);
+    EXPECT_EQ(inherited.locations[0].client_max_body_size, 1024U * 1024U);
 }
 
 TEST(LiteNginxConfigTest, ClientMaxBodySizeDefaultsToUnlimited) {
@@ -416,9 +416,9 @@ TEST(LiteNginxConfigTest, ClientMaxBodySizeDefaultsToUnlimited) {
                                                         "default_client_max_body_size.conf");
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-    EXPECT_EQ(config_result->http.client_max_body_size, 0u);
-    EXPECT_EQ(config_result->http.servers[0].client_max_body_size, 0u);
-    EXPECT_EQ(config_result->http.servers[0].locations[0].client_max_body_size, 0u);
+    EXPECT_EQ(config_result->http.client_max_body_size, 0U);
+    EXPECT_EQ(config_result->http.servers[0].client_max_body_size, 0U);
+    EXPECT_EQ(config_result->http.servers[0].locations[0].client_max_body_size, 0U);
 }
 
 TEST(LiteNginxConfigTest, RejectsInvalidClientMaxBodySizeSettings) {
@@ -482,18 +482,19 @@ TEST(LiteNginxConfigTest, ParsesProxyTargetRewriteAndConnectionPolicies) {
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
     const auto &config = *config_result;
-    EXPECT_EQ(config.http.connection_pool.keepalive_size, 32u);
+    EXPECT_EQ(config.http.connection_pool.keepalive_size, 32U);
 
-    ASSERT_EQ(config.http.servers.size(), 1u);
+    ASSERT_EQ(config.http.servers.size(), 1U);
     const auto &server = config.http.servers[0];
-    ASSERT_EQ(server.locations.size(), 2u);
+    ASSERT_EQ(server.locations.size(), 2U);
 
     const auto &api = server.locations[0];
     EXPECT_EQ(api.proxy_pass.kind, ProxyPassKind::Direct);
     EXPECT_EQ(api.proxy_pass.host, "example.com");
-    EXPECT_EQ(api.proxy_pass.port, 443u);
+    EXPECT_EQ(api.proxy_pass.port, 443U);
     EXPECT_TRUE(api.proxy_pass.tls);
     ASSERT_TRUE(api.rewrite_path.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     EXPECT_EQ(api.rewrite_path->source, "/v2/${$path.tail}");
     EXPECT_TRUE(api.rewrite_path->is_template);
     EXPECT_FALSE(api.reuse_connection);
@@ -505,6 +506,7 @@ TEST(LiteNginxConfigTest, ParsesProxyTargetRewriteAndConnectionPolicies) {
     ASSERT_TRUE(named.rewrite_path.has_value());
     EXPECT_EQ(named.rewrite_path->source, "/health");
     EXPECT_FALSE(named.rewrite_path->is_template);
+    // NOLINTEND(bugprone-unchecked-optional-access)
     EXPECT_TRUE(named.reuse_connection);
     EXPECT_FALSE(named.proxy.close_on_client_abort);
 }
@@ -620,7 +622,7 @@ TEST(LiteNginxConfigTest, BareDollarValueIsLiteral) {
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
     const auto &loc = config_result->http.servers[0].locations[0];
-    ASSERT_EQ(loc.proxy.set_headers.size(), 1u);
+    ASSERT_EQ(loc.proxy.set_headers.size(), 1U);
     EXPECT_EQ(loc.proxy.set_headers[0].name, "Host");
     EXPECT_EQ(loc.proxy.set_headers[0].value, "$host");
     EXPECT_FALSE(loc.proxy.set_headers[0].is_template);
@@ -645,7 +647,7 @@ TEST(LiteNginxConfigTest, TemplateHeaderValue) {
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
     const auto &loc = config_result->http.servers[0].locations[0];
-    ASSERT_EQ(loc.proxy.set_headers.size(), 1u);
+    ASSERT_EQ(loc.proxy.set_headers.size(), 1U);
     EXPECT_EQ(loc.proxy.set_headers[0].name, "X-Original-Host");
     EXPECT_EQ(loc.proxy.set_headers[0].value, "${$header.host}");
     EXPECT_TRUE(loc.proxy.set_headers[0].is_template);
@@ -707,8 +709,8 @@ TEST(LiteNginxConfigTest, ParsesConnectionPoolSizingDirectives) {
         )",
                                                             "sizing.conf");
         ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-        EXPECT_EQ(config_result->http.connection_pool.max_idle_total, 512u);
-        EXPECT_EQ(config_result->http.connection_pool.initial_group_capacity, 64u);
+        EXPECT_EQ(config_result->http.connection_pool.max_idle_total, 512U);
+        EXPECT_EQ(config_result->http.connection_pool.initial_group_capacity, 64U);
     }
     {
         // Omitted => 0, the "derive / use built-in default" sentinel consumed by make_pool_options.
@@ -724,8 +726,8 @@ TEST(LiteNginxConfigTest, ParsesConnectionPoolSizingDirectives) {
         )",
                                                             "sizing_default.conf");
         ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-        EXPECT_EQ(config_result->http.connection_pool.max_idle_total, 0u);
-        EXPECT_EQ(config_result->http.connection_pool.initial_group_capacity, 0u);
+        EXPECT_EQ(config_result->http.connection_pool.max_idle_total, 0U);
+        EXPECT_EQ(config_result->http.connection_pool.initial_group_capacity, 0U);
     }
     {
         auto config_result = ConfigLoader::load_from_string(R"(
@@ -759,19 +761,19 @@ TEST(LiteNginxConfigTest, ParsesUpstreamServerSchemePrefix) {
                                                         "scheme.conf");
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-    ASSERT_EQ(config_result->http.upstreams.size(), 1u);
-    ASSERT_EQ(config_result->http.upstreams[0].servers.size(), 3u);
+    ASSERT_EQ(config_result->http.upstreams.size(), 1U);
+    ASSERT_EQ(config_result->http.upstreams[0].servers.size(), 3U);
 
     EXPECT_FALSE(config_result->http.upstreams[0].servers[0].tls);
     EXPECT_EQ(config_result->http.upstreams[0].servers[0].host, "127.0.0.1");
 
     EXPECT_TRUE(config_result->http.upstreams[0].servers[1].tls);
     EXPECT_EQ(config_result->http.upstreams[0].servers[1].host, "example.com");
-    EXPECT_EQ(config_result->http.upstreams[0].servers[1].port, 443u);
+    EXPECT_EQ(config_result->http.upstreams[0].servers[1].port, 443U);
 
     EXPECT_FALSE(config_result->http.upstreams[0].servers[2].tls);
     EXPECT_EQ(config_result->http.upstreams[0].servers[2].host, "127.0.0.1");
-    EXPECT_EQ(config_result->http.upstreams[0].servers[2].port, 9002u);
+    EXPECT_EQ(config_result->http.upstreams[0].servers[2].port, 9002U);
 }
 
 TEST(LiteNginxConfigTest, RejectsUnsupportedDirective) {
@@ -888,7 +890,7 @@ TEST(LiteNginxConfigTest, AcceptsQuicListenAlias) {
                                                         "inline.conf");
 
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-    ASSERT_EQ(config_result->http.listens.size(), 1u);
+    ASSERT_EQ(config_result->http.listens.size(), 1U);
     EXPECT_TRUE(config_result->http.listens[0].tls);
     EXPECT_TRUE(config_result->http.listens[0].http3);
 }
@@ -1017,7 +1019,7 @@ http {
 
     auto config_result = ConfigLoader::load_from_file((dir.path / "main.conf").string());
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-    ASSERT_EQ(config_result->http.upstreams.size(), 1u);
+    ASSERT_EQ(config_result->http.upstreams.size(), 1U);
     EXPECT_EQ(config_result->http.upstreams[0].name, "backend");
 }
 
@@ -1037,7 +1039,7 @@ http {
 
     auto config_result = ConfigLoader::load_from_file((dir.path / "main.conf").string());
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-    ASSERT_EQ(config_result->http.upstreams.size(), 1u);
+    ASSERT_EQ(config_result->http.upstreams.size(), 1U);
     EXPECT_EQ(config_result->http.upstreams[0].name, "inner");
 }
 
@@ -1058,7 +1060,7 @@ http {
 
     auto config_result = ConfigLoader::load_from_file((dir.path / "a.conf").string());
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-    ASSERT_EQ(config_result->http.upstreams.size(), 1u);
+    ASSERT_EQ(config_result->http.upstreams.size(), 1U);
     EXPECT_EQ(config_result->http.upstreams[0].name, "deep");
 }
 
@@ -1077,7 +1079,7 @@ http {
 
     auto config_result = ConfigLoader::load_from_file((dir.path / "main.conf").string());
     ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
-    ASSERT_EQ(config_result->http.servers[0].locations.size(), 1u);
+    ASSERT_EQ(config_result->http.servers[0].locations.size(), 1U);
     EXPECT_EQ(config_result->http.servers[0].locations[0].pattern, "/ready");
 }
 
@@ -1158,23 +1160,24 @@ http {
     auto config = ConfigLoader::load_from_file(config_path.string());
     ASSERT_TRUE(config.has_value()) << config.error().message;
     ASSERT_TRUE(config->logging.configured);
-    ASSERT_EQ(config->logging.appenders.size(), 2u);
+    ASSERT_EQ(config->logging.appenders.size(), 2U);
     const auto &access = config->logging.appenders[0];
     EXPECT_EQ(access.name, "access_file");
     EXPECT_EQ(access.kind, LogAppenderKind::File);
     EXPECT_EQ(access.path, (dir.path / "logs/access.log").lexically_normal().string());
-    EXPECT_EQ(access.file_mode, 0640u);
-    EXPECT_EQ(access.buffer_size, 64u * 1024u);
+    EXPECT_EQ(access.file_mode, 0640U);
+    EXPECT_EQ(access.buffer_size, 64U * 1024U);
     EXPECT_EQ(access.flush_interval, std::chrono::milliseconds(200));
     ASSERT_TRUE(access.rotation.has_value());
-    EXPECT_EQ(access.rotation->max_file_size, 128u * 1024u);
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
+    EXPECT_EQ(access.rotation->max_file_size, 128U * 1024U);
     EXPECT_EQ(access.rotation->archive_name, "{base}.{utc}.{seq}");
-    EXPECT_EQ(access.rotation->max_archives, 14u);
+    EXPECT_EQ(access.rotation->max_archives, 14U);
     EXPECT_EQ(access.min_level, LoggingLevel::Info);
     EXPECT_EQ(access.max_level, LoggingLevel::Info);
-    ASSERT_EQ(config->logging.loggers.size(), 1u);
+    ASSERT_EQ(config->logging.loggers.size(), 1U);
     EXPECT_FALSE(config->logging.loggers[0].additive);
-    EXPECT_EQ(config->logging.root.verbosity, 2u);
+    EXPECT_EQ(config->logging.root.verbosity, 2U);
     ASSERT_TRUE(config->http.access_log.has_value());
     EXPECT_EQ(config->http.access_log->kind, AccessLogKind::Template);
     EXPECT_EQ(config->http.access_log->logger_name, "lite_nginx.access");
@@ -1184,6 +1187,7 @@ http {
     ASSERT_TRUE(config->http.servers[0].locations[0].access_log.has_value());
     EXPECT_EQ(config->http.servers[0].locations[0].access_log->kind, AccessLogKind::Template);
     EXPECT_EQ(config->http.servers[0].locations[0].access_log->logger_name, "location.access");
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(LiteNginxConfigTest, RejectsInvalidAccessLogShapeAndLoggerName) {
