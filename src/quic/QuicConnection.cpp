@@ -846,7 +846,7 @@ void QuicConnection::close_all_streams(std::uint64_t error_code) noexcept {
 }
 
 void QuicConnection::clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept {
-    auto release_queue = [this, &space](QuicOutputFrameQueue &queue, bool drop_stream_tickets) noexcept {
+    auto release_queue = [this, &space](QuicOutputFrameList &queue, bool drop_stream_tickets) noexcept {
         while (QuicOutputFrame *frame = queue.pop_front()) {
             if (drop_stream_tickets && frame->type == QuicFrameType::Stream) {
                 drop_stream_send_ticket(frame->u.stream.stream_id);
@@ -860,7 +860,7 @@ void QuicConnection::clear_packet_space_frames_for_detach(QuicPacketNumberSpace 
     release_queue(space.sending_frames, false);
     release_queue(space.sent_frames, false);
 
-    space.ack_frame = QuicOutputFrame{};
+    space.ack_frame.reset();
     space.send_ack = false;
     space.send_ack_count = 0;
     space.pending_ack = kUnsetPacketNumber;
@@ -2330,8 +2330,8 @@ void QuicConnection::reset_after_retry() noexcept {
     loss_timer_mode_ = QuicLossTimerMode::None;
 
     QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Initial);
-    QuicOutputFrameQueue retransmit{};
-    auto recover = [&](QuicOutputFrameQueue &queue) noexcept {
+    QuicOutputFrameList retransmit{};
+    auto recover = [&](QuicOutputFrameList &queue) noexcept {
         while (QuicOutputFrame *frame = queue.pop_front()) {
             frame->packet_number = 0;
             frame->packet_len = 0;
@@ -2350,7 +2350,7 @@ void QuicConnection::reset_after_retry() noexcept {
     };
     recover(space.sent_frames);
     recover(space.sending_frames);
-    space.pending_frames.prepend_all(retransmit);
+    space.pending_frames.splice_front(retransmit);
 
     space.largest_acked_packet_number = kUnsetPacketNumber;
     space.send_ack = false;
@@ -2358,13 +2358,13 @@ void QuicConnection::reset_after_retry() noexcept {
     space.pending_ack = kUnsetPacketNumber;
     space.ecn_sent_counters = {};
     space.peer_ecn_counters = {};
-    if (!space.ack_frame.queued) {
-        space.ack_frame = QuicOutputFrame{};
+    if (!space.ack_frame.hook.linked()) {
+        space.ack_frame.reset();
     }
 
     QuicPacketNumberSpace &application = packet_number_space(QuicEncryptionLevel::Application);
-    QuicOutputFrameQueue early_retransmit{};
-    auto recover_early = [&](QuicOutputFrameQueue &queue) noexcept {
+    QuicOutputFrameList early_retransmit{};
+    auto recover_early = [&](QuicOutputFrameList &queue) noexcept {
         QuicOutputFrame *frame = queue.front();
         while (frame != nullptr) {
             QuicOutputFrame *next = queue.next_of(*frame);
@@ -2385,7 +2385,7 @@ void QuicConnection::reset_after_retry() noexcept {
     };
     recover_early(application.sent_frames);
     recover_early(application.sending_frames);
-    application.pending_frames.prepend_all(early_retransmit);
+    application.pending_frames.splice_front(early_retransmit);
 
     const QuicTime now = active_timer_loop() != nullptr ? quic_time_ms(loop_.now()) : QuicTime{0};
     quic_congestion_reset_for_path(congestion_, rtt_, now);
@@ -2695,7 +2695,7 @@ void QuicConnection::on_early_data_rejected() noexcept {
     }
 
     QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Application);
-    auto discard = [this, &space](QuicOutputFrameQueue &queue) noexcept {
+    auto discard = [this, &space](QuicOutputFrameList &queue) noexcept {
         QuicOutputFrame *frame = queue.front();
         while (frame != nullptr) {
             QuicOutputFrame *next = queue.next_of(*frame);
@@ -3097,7 +3097,7 @@ void QuicConnection::recount_in_flight_after_reset() noexcept {
     // whose numbers clear the Application-space threshold.
     for (const QuicEncryptionLevel level:
          {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake, QuicEncryptionLevel::Application}) {
-        const QuicOutputFrameQueue &sent = packet_number_space(level).sent_frames;
+        const QuicOutputFrameList &sent = packet_number_space(level).sent_frames;
         for (const QuicOutputFrame *frame = sent.front(); frame != nullptr; frame = sent.next_of(*frame)) {
             if (frame->packet_len != 0 && frame->packet_number >= reset_packet_number_) {
                 congestion_.in_flight += frame->packet_len;
@@ -3408,7 +3408,7 @@ bool QuicConnection::has_pacing_exempt_send_work() const noexcept {
         return has_pending_send_work();
     }
     for (const QuicPacketNumberSpace &space: packet_number_spaces_) {
-        if (space.ack_frame.queued || (space.send_ack && space.pending_ack != kUnsetPacketNumber)) {
+        if (space.ack_frame.hook.linked() || (space.send_ack && space.pending_ack != kUnsetPacketNumber)) {
             return true;
         }
     }

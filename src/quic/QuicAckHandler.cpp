@@ -218,7 +218,7 @@ void validate_ecn_feedback(QuicConnection &connection, QuicPacketNumberSpace &sp
             stat.newest = frame->send_time;
         }
 
-        space.sent_frames.erase_after(prev, *frame);
+        space.sent_frames.erase(*frame);
         frame->packet_len = 0;
         frame->packet_ack_eliciting = false;
 

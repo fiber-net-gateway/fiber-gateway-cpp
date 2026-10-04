@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <type_traits>
 #include <utility>
 
 #include <fiber/quic/QuicFrame.h>
@@ -9,6 +10,9 @@
 namespace {
 
 using namespace fiber::quic;
+
+static_assert(!std::is_copy_constructible_v<QuicOutputFrame>);
+static_assert(!std::is_move_constructible_v<QuicOutputFrame>);
 
 class QuicOutputFrameDataTest : public testing::TestWithParam<QuicFrameType> {};
 
@@ -25,11 +29,16 @@ TEST_P(QuicOutputFrameDataTest, EncodesSharedSliceAfterOriginalFrameIsDestroyed)
         ASSERT_TRUE(quic_output_frame_set_owned_data(original, bytes.data(), bytes.size()).has_value());
         bytes.fill(0);
         original.data = original.data.retain_slice(1, 2);
-        copy = original;
+        copy.type = original.type;
+        copy.u = original.u;
+        copy.data = original.data;
         EXPECT_TRUE(copy.data.same_storage(original.data));
     }
     EXPECT_TRUE(copy.data.unique());
-    QuicOutputFrame moved = std::move(copy);
+    QuicOutputFrame moved{};
+    moved.type = copy.type;
+    moved.u = copy.u;
+    moved.data = std::move(copy.data);
     EXPECT_FALSE(copy.data);
     ASSERT_EQ(moved.data.readable(), 2U);
 
@@ -114,6 +123,73 @@ TEST(QuicOutputFrameTest, SettingPayloadInvalidatesEncodedLength) {
     auto filled_len = quic_output_frame_encoded_len(frame);
     ASSERT_TRUE(filled_len.has_value());
     EXPECT_EQ(*filled_len, *empty_len + reason.size());
+}
+
+TEST(QuicOutputFrameTest, PoolAndSendingListsShareHookAcrossReuse) {
+    QuicOutputFramePool pool;
+    QuicOutputFrameList pending, sent;
+    QuicOutputFrame *frame = pool.alloc();
+    ASSERT_NE(frame, nullptr);
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_FALSE(frame->hook.linked());
+        EXPECT_EQ(frame->type, QuicFrameType::Padding);
+        EXPECT_EQ(frame->packet_number, 0U);
+        EXPECT_FALSE(frame->zero_rtt);
+        frame->type = QuicFrameType::Ping;
+        frame->packet_number = 123;
+        frame->zero_rtt = true;
+        pending.push_back(*frame);
+
+        // Releasing a frame still queued must not steal its membership.
+        pool.release(frame);
+        EXPECT_EQ(pool.cached_count(), 0U);
+        EXPECT_EQ(pending.front(), frame);
+        EXPECT_EQ(pending.pop_front(), frame);
+        sent.push_back(*frame);
+        EXPECT_EQ(sent.pop_back(), frame);
+        pool.release(frame);
+        EXPECT_EQ(pool.cached_count(), 1U);
+        // A second release must not insert the cached hook twice.
+        pool.release(frame);
+        EXPECT_EQ(pool.cached_count(), 1U);
+        QuicOutputFrame *reused = pool.alloc();
+        ASSERT_EQ(reused, frame);
+        EXPECT_EQ(pool.cached_count(), 0U);
+    }
+    pool.release(frame);
+    pool.clear();
+    EXPECT_EQ(pool.cached_count(), 0U);
+    frame = pool.alloc();
+    ASSERT_NE(frame, nullptr);
+    EXPECT_FALSE(frame->hook.linked());
+    pool.release(frame);
+}
+
+TEST(QuicOutputFrameTest, PoolCapacityAndClearReleasePayloads) {
+    QuicOutputFramePool pool;
+    std::array<QuicOutputFrame *, kQuicOutputFramePoolMaxCached + 1> frames{};
+    constexpr std::array<std::uint8_t, 2> bytes{1, 2};
+    fiber::mem::IoBuf payload = fiber::mem::IoBuf::allocate(bytes.size());
+    ASSERT_TRUE(payload);
+    for (QuicOutputFrame *&frame: frames) {
+        frame = pool.alloc();
+        ASSERT_NE(frame, nullptr);
+        frame->data = payload;
+    }
+    for (QuicOutputFrame *frame: frames) {
+        pool.release(frame);
+    }
+    EXPECT_EQ(pool.cached_count(), kQuicOutputFramePoolMaxCached);
+    EXPECT_TRUE(payload.unique());
+    pool.clear();
+    EXPECT_EQ(pool.cached_count(), 0U);
+}
+
+TEST(QuicOutputFrameDeathTest, ResetRequiresUnlinkedFrame) {
+    QuicOutputFrameList list;
+    QuicOutputFrame frame;
+    list.push_back(frame);
+    EXPECT_DEATH(frame.reset(), "FIBER_ASSERT failed");
 }
 
 } // namespace

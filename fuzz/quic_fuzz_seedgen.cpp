@@ -65,7 +65,7 @@ void put_varint(Bytes &b, std::uint64_t v) {
 
 // ---------------------------------------------------------------- frames
 
-Bytes encode(QuicOutputFrame frame) {
+Bytes encode(QuicOutputFrame &frame) {
     std::array<std::uint8_t, 4096> buf{};
     QuicWriteCursor w(buf.data(), buf.size());
     auto n = quic_create_output_frame(&w, frame);
@@ -119,8 +119,7 @@ Bytes ack_ecn_frame(std::uint64_t largest, std::uint64_t first_range) {
     f.u.ack.largest = largest;
     f.u.ack.first_range = first_range;
     f.u.ack.range_count = 1;
-    f.u.ack.ranges = ranges.data();
-    f.u.ack.ranges_length = static_cast<std::uint32_t>(ranges.size());
+    FIBER_ASSERT(quic_output_frame_set_owned_data(f, ranges.data(), ranges.size()).has_value());
     f.u.ack.ect0 = 3;
     f.u.ack.ce = 1;
     return encode(f);
@@ -137,8 +136,9 @@ Bytes close_frame(bool app, std::uint64_t code, std::string_view reason) {
     f.type = app ? QuicFrameType::ConnectionCloseApp : QuicFrameType::ConnectionClose;
     f.u.close.error_code = code;
     f.u.close.frame_type = app ? 0 : 0x08;
-    f.u.close.reason = reinterpret_cast<const std::uint8_t *>(reason.data());
-    f.u.close.reason_length = static_cast<std::uint32_t>(reason.size());
+    FIBER_ASSERT(
+            quic_output_frame_set_owned_data(f, reinterpret_cast<const std::uint8_t *>(reason.data()), reason.size())
+                    .has_value());
     return encode(f);
 }
 
@@ -206,8 +206,7 @@ Bytes new_token_frame() {
     static const std::uint8_t token[] = {'t', 'o', 'k', 'e', 'n', '-', 'b', 'y', 't', 'e', 's'};
     QuicOutputFrame f{};
     f.type = QuicFrameType::NewToken;
-    f.u.new_token.data = token;
-    f.u.new_token.length = sizeof(token);
+    FIBER_ASSERT(quic_output_frame_set_owned_data(f, token, sizeof(token)).has_value());
     return encode(f);
 }
 
@@ -606,8 +605,8 @@ fiber::async::Task<Bytes> capture_client_hello() {
     // CRYPTO frames queued at the Initial level, in offset order.
     auto &space = connection.packet_number_space(QuicEncryptionLevel::Initial);
     for (const QuicOutputFrame *f = space.pending_frames.front(); f != nullptr; f = space.pending_frames.next_of(*f)) {
-        if (f->type == QuicFrameType::Crypto && f->u.crypto.data != nullptr && f->u.crypto.offset == hello.size()) {
-            put(hello, f->u.crypto.data->readable_data(), f->u.crypto.data->readable());
+        if (f->type == QuicFrameType::Crypto && f->data && f->u.crypto.offset == hello.size()) {
+            put(hello, f->data.readable_data(), f->data.readable());
         }
     }
     connection.close_immediately();
@@ -638,8 +637,8 @@ Bytes crypto_bytes_at(QuicConnection &connection, QuicEncryptionLevel level) {
     Bytes out;
     auto &space = connection.packet_number_space(level);
     for (const QuicOutputFrame *f = space.pending_frames.front(); f != nullptr; f = space.pending_frames.next_of(*f)) {
-        if (f->type == QuicFrameType::Crypto && f->u.crypto.data != nullptr && f->u.crypto.offset == out.size()) {
-            put(out, f->u.crypto.data->readable_data(), f->u.crypto.data->readable());
+        if (f->type == QuicFrameType::Crypto && f->data && f->u.crypto.offset == out.size()) {
+            put(out, f->data.readable_data(), f->data.readable());
         }
     }
     return out;

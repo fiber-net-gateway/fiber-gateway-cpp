@@ -163,6 +163,37 @@ public:
         hook.unlink_self();
     }
 
+    [[nodiscard]] T *pop_front() noexcept {
+        T *owner = front();
+        if (owner != nullptr) {
+            erase(*owner);
+        }
+        return owner;
+    }
+
+    [[nodiscard]] T *pop_back() noexcept {
+        T *owner = back();
+        if (owner != nullptr) {
+            erase(*owner);
+        }
+        return owner;
+    }
+
+    // Moves every node of `other` to the front, preserving order. O(1).
+    void splice_front(IntrusiveList &other) noexcept {
+        if (&other == this || other.empty()) {
+            return;
+        }
+        IntrusiveListHook *first = other.anchor_.next;
+        IntrusiveListHook *last = other.anchor_.prev;
+        last->next = anchor_.next;
+        anchor_.next->prev = last;
+        first->prev = &anchor_;
+        anchor_.next = first;
+        other.anchor_.next = &other.anchor_;
+        other.anchor_.prev = &other.anchor_;
+    }
+
     // Moves every node of `other` to the back of this list, keeping their
     // order; `other` is left empty. O(1): only the four ring seams are rewritten.
     void splice_back(IntrusiveList &other) noexcept {

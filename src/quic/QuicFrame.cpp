@@ -2,153 +2,36 @@
 
 #include <cstring>
 #include <expected>
+#include <memory>
 #include <new>
 #include <utility>
 
 namespace fiber::quic {
 
-void QuicOutputFrameQueue::push_front(QuicOutputFrame &frame) noexcept {
-    if (frame.queued) {
-        return;
-    }
-    frame.next = head_;
-    frame.prev = nullptr;
-    frame.queued = true;
-    if (head_ != nullptr) {
-        head_->prev = &frame;
-    }
-    head_ = &frame;
-    if (tail_ == nullptr) {
-        tail_ = &frame;
-    }
-}
-
-void QuicOutputFrameQueue::push_back(QuicOutputFrame &frame) noexcept {
-    if (frame.queued) {
-        return;
-    }
-    frame.next = nullptr;
-    frame.prev = tail_;
-    frame.queued = true;
-    if (tail_ != nullptr) {
-        tail_->next = &frame;
-    } else {
-        head_ = &frame;
-    }
-    tail_ = &frame;
-}
-
-void QuicOutputFrameQueue::insert_after(QuicOutputFrame &position, QuicOutputFrame &frame) noexcept {
-    if (!position.queued || frame.queued) {
-        return;
-    }
-    frame.next = position.next;
-    frame.prev = &position;
-    frame.queued = true;
-    if (frame.next != nullptr) {
-        frame.next->prev = &frame;
-    }
-    position.next = &frame;
-    if (tail_ == &position) {
-        tail_ = &frame;
-    }
-}
-
-void QuicOutputFrameQueue::erase(QuicOutputFrame &frame) noexcept {
-    QuicOutputFrame *prev = nullptr;
-    QuicOutputFrame *current = head_;
-    while (current != nullptr) {
-        if (current == &frame) {
-            erase_after(prev, frame);
-            return;
-        }
-        prev = current;
-        current = current->next;
-    }
-}
-
-void QuicOutputFrameQueue::erase_after(QuicOutputFrame *prev, QuicOutputFrame &frame) noexcept {
-    if (!frame.queued || frame.prev != prev) {
-        return;
-    }
-    if (prev != nullptr) {
-        if (prev->next != &frame) {
-            return;
-        }
-        prev->next = frame.next;
-    } else {
-        if (head_ != &frame) {
-            return;
-        }
-        head_ = frame.next;
-    }
-    if (frame.next != nullptr) {
-        frame.next->prev = prev;
-    }
-    if (tail_ == &frame) {
-        tail_ = prev;
-    }
-    frame.next = nullptr;
-    frame.prev = nullptr;
-    frame.queued = false;
-}
-
-QuicOutputFrame *QuicOutputFrameQueue::pop_front() noexcept {
-    QuicOutputFrame *frame = head_;
-    if (frame == nullptr) {
-        return nullptr;
-    }
-    erase_after(nullptr, *frame);
-    return frame;
-}
-
-QuicOutputFrame *QuicOutputFrameQueue::pop_back() noexcept {
-    QuicOutputFrame *frame = tail_;
-    if (frame == nullptr) {
-        return nullptr;
-    }
-    erase_after(frame->prev, *frame);
-    return frame;
-}
-
-void QuicOutputFrameQueue::prepend_all(QuicOutputFrameQueue &source) noexcept {
-    if (source.head_ == nullptr) {
-        return;
-    }
-    source.tail_->next = head_;
-    if (head_ != nullptr) {
-        head_->prev = source.tail_;
-    }
-    head_ = source.head_;
-    if (tail_ == nullptr) {
-        tail_ = source.tail_;
-    }
-    source.head_ = nullptr;
-    source.tail_ = nullptr;
+void QuicOutputFrame::reset() noexcept {
+    FIBER_ASSERT(!hook.linked());
+    std::destroy_at(this);
+    std::construct_at(this);
 }
 
 QuicOutputFramePool::~QuicOutputFramePool() { clear(); }
 
 QuicOutputFrame *QuicOutputFramePool::alloc() noexcept {
-    if (free_head_ != nullptr) {
-        QuicOutputFrame *frame = free_head_;
-        free_head_ = frame->next;
+    if (QuicOutputFrame *frame = free_frames_.pop_front()) {
         --cached_count_;
-        *frame = QuicOutputFrame{};
         return frame;
     }
     return new (std::nothrow) QuicOutputFrame{};
 }
 
 void QuicOutputFramePool::release(QuicOutputFrame *frame) noexcept {
-    if (frame == nullptr || frame->queued) {
+    if (frame == nullptr || frame->hook.linked()) {
         return;
     }
 
-    *frame = QuicOutputFrame{};
     if (cached_count_ < kQuicOutputFramePoolMaxCached) {
-        frame->next = free_head_;
-        free_head_ = frame;
+        frame->reset();
+        free_frames_.push_front(*frame);
         ++cached_count_;
         return;
     }
@@ -157,13 +40,9 @@ void QuicOutputFramePool::release(QuicOutputFrame *frame) noexcept {
 }
 
 void QuicOutputFramePool::clear() noexcept {
-    QuicOutputFrame *frame = free_head_;
-    while (frame != nullptr) {
-        QuicOutputFrame *next = frame->next;
+    while (QuicOutputFrame *frame = free_frames_.pop_front()) {
         delete frame;
-        frame = next;
     }
-    free_head_ = nullptr;
     cached_count_ = 0;
 }
 

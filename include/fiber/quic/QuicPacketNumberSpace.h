@@ -74,9 +74,9 @@ struct QuicPacketNumberSpace {
     std::uint64_t largest_acked_packet_number = 0;
     std::uint64_t largest_received_packet_number = 0;
 
-    QuicOutputFrameQueue pending_frames{};
-    QuicOutputFrameQueue sending_frames{};
-    QuicOutputFrameQueue sent_frames{};
+    QuicOutputFrameList pending_frames{};
+    QuicOutputFrameList sending_frames{};
+    QuicOutputFrameList sent_frames{};
     QuicOutputFrame ack_frame{};
     QuicOutputFramePool *frame_pool = nullptr;
 

@@ -57,7 +57,7 @@ struct QuicPath {
     std::uint8_t challenge[2][8]{};
     std::uint64_t seqnum = 0;
     std::uint64_t mtu_packet_numbers[kQuicPathRetries]{};
-    QuicOutputFrameQueue pending_frames{};
+    QuicOutputFrameList pending_frames{};
     bool allocated = false;
     bool validated = false;
     bool mtu_unvalidated = false;
