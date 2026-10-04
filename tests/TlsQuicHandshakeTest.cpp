@@ -114,9 +114,9 @@ EVP_PKEY *load_key(const char *pem) {
 
 // ALPN selection: the FIRST protocol the client offered (order = preference,
 // so the client can assert its own preference was picked).
-int select_first_alpn(SSL *, const unsigned char **out, unsigned char *out_len, const unsigned char *in,
-                      unsigned int in_len, void *) {
-    if (in_len == 0 || in_len > 255 || 1 + in[0] > in_len) {
+int select_first_alpn(SSL * /*unused*/, const unsigned char **out, unsigned char *out_len, const unsigned char *in,
+                      unsigned int in_len, void * /*unused*/) {
+    if (in_len == 0 || in_len > 255 || std::cmp_greater(1 + in[0], in_len)) {
         return SSL_TLSEXT_ERR_NOACK;
     }
     *out = in + 1;
@@ -151,8 +151,13 @@ struct EngineQuicSink {
     std::vector<std::pair<char, TlsQuicLevel>> order;
 
     // The config hands this pointer out; the sink outlives the engine.
-    TlsQuicCallbacks cb{&set_secret_fn, &add_data_fn, &on_params_fn, &send_alert_fn, this};
+    TlsQuicCallbacks cb{.set_secret = &set_secret_fn,
+                        .add_handshake_data = &add_data_fn,
+                        .on_peer_transport_params = &on_params_fn,
+                        .send_alert = &send_alert_fn,
+                        .ctx = this};
 
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.Move) member drain: moving out is the point
     [[nodiscard]] std::vector<DataRec> drain_out() noexcept { return std::move(out); }
 
     // The concatenated CRYPTO bytes emitted at `level`.
@@ -178,14 +183,15 @@ struct EngineQuicSink {
     static bool set_secret_fn(void *ctx, TlsQuicLevel level, bool write, TlsCipherSuiteId suite,
                               std::span<const std::uint8_t> secret) noexcept {
         auto &self = *static_cast<EngineQuicSink *>(ctx);
-        self.secrets.push_back(SecretRec{level, write, suite, {secret.begin(), secret.end()}});
+        self.secrets.push_back(
+                SecretRec{.level = level, .write = write, .suite = suite, .bytes = {secret.begin(), secret.end()}});
         self.order.emplace_back(write ? 'W' : 'R', level);
         return true;
     }
 
     static bool add_data_fn(void *ctx, TlsQuicLevel level, std::span<const std::uint8_t> data) noexcept {
         auto &self = *static_cast<EngineQuicSink *>(ctx);
-        const DataRec rec{level, {data.begin(), data.end()}};
+        const DataRec rec{.level = level, .bytes = {data.begin(), data.end()}};
         self.out.push_back(rec);
         self.all.push_back(rec);
         self.order.emplace_back('D', level);
@@ -193,7 +199,7 @@ struct EngineQuicSink {
     }
 
     static void on_params_fn(void *ctx, std::span<const std::uint8_t> params) noexcept {
-        static_cast<EngineQuicSink *>(ctx)->peer_params.push_back({params.begin(), params.end()});
+        static_cast<EngineQuicSink *>(ctx)->peer_params.emplace_back(params.begin(), params.end());
     }
 
     static void send_alert_fn(void *ctx, TlsAlertDesc desc) noexcept {
@@ -234,6 +240,7 @@ struct BoringQuic {
     BoringQuic(const BoringQuic &) = delete;
     BoringQuic &operator=(const BoringQuic &) = delete;
 
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.Move) member drain: moving out is the point
     [[nodiscard]] std::vector<std::pair<int, std::vector<std::uint8_t>>> drain_out() noexcept { return std::move(out); }
 
     [[nodiscard]] const SecretRec *find_secret(int level, bool write) const noexcept {
@@ -312,7 +319,7 @@ struct BoringQuic {
     }
 
     // Runs handshake_step to quiescence (progress or completion).
-    [[nodiscard]] bool step() {
+    [[nodiscard]] bool step() const {
         for (int spin = 0; spin < 32; ++spin) {
             const int rc = handshake_step();
             if (rc == 1) {
@@ -328,7 +335,7 @@ struct BoringQuic {
 
     // Data at `level` in. Post-handshake bytes (NSTs) route through
     // SSL_process_quic_post_handshake.
-    [[nodiscard]] bool provide(int level, std::span<const std::uint8_t> bytes) {
+    [[nodiscard]] bool provide(int level, std::span<const std::uint8_t> bytes) const {
         if (bytes.empty()) {
             return true;
         }
@@ -390,8 +397,10 @@ private:
     static int on_set_read_secret(SSL *ssl, ssl_encryption_level_t level, const SSL_CIPHER *cipher,
                                   const uint8_t *secret, size_t len) {
         auto &self = *static_cast<BoringQuic *>(SSL_get_app_data(ssl));
-        self.secrets.push_back(
-                SecretRec{static_cast<int>(level), false, SSL_CIPHER_get_protocol_id(cipher), {secret, secret + len}});
+        self.secrets.push_back(SecretRec{.level = static_cast<int>(level),
+                                         .write = false,
+                                         .cipher_id = SSL_CIPHER_get_protocol_id(cipher),
+                                         .bytes = {secret, secret + len}});
         self.order.push_back("R" + std::to_string(static_cast<int>(level)));
         return 1;
     }
@@ -399,8 +408,10 @@ private:
     static int on_set_write_secret(SSL *ssl, ssl_encryption_level_t level, const SSL_CIPHER *cipher,
                                    const uint8_t *secret, size_t len) {
         auto &self = *static_cast<BoringQuic *>(SSL_get_app_data(ssl));
-        self.secrets.push_back(
-                SecretRec{static_cast<int>(level), true, SSL_CIPHER_get_protocol_id(cipher), {secret, secret + len}});
+        self.secrets.push_back(SecretRec{.level = static_cast<int>(level),
+                                         .write = true,
+                                         .cipher_id = SSL_CIPHER_get_protocol_id(cipher),
+                                         .bytes = {secret, secret + len}});
         self.order.push_back("W" + std::to_string(static_cast<int>(level)));
         return 1;
     }
@@ -412,9 +423,9 @@ private:
         return 1;
     }
 
-    static int on_flush_flight(SSL *) { return 1; }
+    static int on_flush_flight(SSL * /*unused*/) { return 1; }
 
-    static int on_send_alert(SSL *ssl, ssl_encryption_level_t, uint8_t alert) {
+    static int on_send_alert(SSL *ssl, ssl_encryption_level_t /*unused*/, uint8_t alert) {
         auto &self = *static_cast<BoringQuic *>(SSL_get_app_data(ssl));
         self.alert_bytes.push_back(alert);
         return 1;
@@ -458,7 +469,9 @@ struct QuicMaterial {
 
     [[nodiscard]] TlsServerConfig server_cfg(EngineQuicSink &sink) const {
         TlsServerConfig cfg;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
         cfg.chain = &*chain;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
         cfg.key = &*key;
         cfg.alpn = alpn;
         cfg.now_unix_ms = certfix::kRefNowMs;
@@ -473,6 +486,7 @@ struct QuicMaterial {
         TlsClientConfig cfg;
         cfg.sni_host = "example.com";
         cfg.alpn = alpn;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
         cfg.trust = &*trust;
         cfg.now_unix_ms = certfix::kRefNowMs;
         cfg.min_version = fiber::tls::kTlsVersionTls13;
@@ -815,8 +829,9 @@ public:
         return blob.size();
     }
 
-    static bool lookup(void *ctx, std::span<const std::uint8_t> identity, std::string_view, std::int64_t,
-                       std::span<const std::uint8_t>, fiber::tls::TlsResumedSession &out) noexcept {
+    static bool lookup(void *ctx, std::span<const std::uint8_t> identity, std::string_view /*unused*/,
+                       std::int64_t /*unused*/, std::span<const std::uint8_t> /*unused*/,
+                       fiber::tls::TlsResumedSession &out) noexcept {
         const auto &self = *static_cast<TestSessionStore *>(ctx);
         const auto it = self.entries.find(std::vector<std::uint8_t>(identity.begin(), identity.end()));
         if (it == self.entries.end()) {
@@ -833,8 +848,8 @@ public:
         return true;
     }
 
-    [[nodiscard]] TlsTicketMinter minter_hook() noexcept { return {&mint, this}; }
-    [[nodiscard]] TlsResumptionLookup lookup_hook() noexcept { return {&lookup, this}; }
+    [[nodiscard]] TlsTicketMinter minter_hook() noexcept { return {.mint = &mint, .ctx = this}; }
+    [[nodiscard]] TlsResumptionLookup lookup_hook() noexcept { return {.lookup = &lookup, .ctx = this}; }
 
 private:
     std::map<std::vector<std::uint8_t>, Entry> entries;
@@ -871,10 +886,10 @@ TEST(TlsQuicHandshake, OurClientDrivesBoringServer) {
         // Export order + level shape.
         expect_engine_export_order(sink);
         expect_crypto_level_shape(sink);
-        EXPECT_EQ(0u, sink.alerts.size());
+        EXPECT_EQ(0U, sink.alerts.size());
 
         // No 0-RTT offered: exactly hs+app secrets, nothing at EarlyData.
-        ASSERT_EQ(4u, sink.secrets.size());
+        ASSERT_EQ(4U, sink.secrets.size());
         EXPECT_EQ(nullptr, sink.find_secret(TlsQuicLevel::EarlyData, true));
         EXPECT_EQ(nullptr, sink.find_secret(TlsQuicLevel::EarlyData, false));
 
@@ -888,7 +903,7 @@ TEST(TlsQuicHandshake, OurClientDrivesBoringServer) {
         SSL_get_peer_quic_transport_params(peer->ssl, &server_params, &server_params_len);
         ASSERT_EQ(kClientParams.size(), server_params_len);
         EXPECT_EQ(0, std::memcmp(kClientParams.data(), server_params, server_params_len));
-        ASSERT_EQ(1u, sink.peer_params.size());
+        ASSERT_EQ(1U, sink.peer_params.size());
         EXPECT_TRUE(secrets_equal({kServerParams.begin(), kServerParams.end()}, sink.peer_params[0]));
 
         // The second flight is exactly one Finished (4-byte header +
@@ -900,12 +915,12 @@ TEST(TlsQuicHandshake, OurClientDrivesBoringServer) {
 
         // HandshakeDone tail delivery.
         const TlsQuicHandshakeResult result = engine.take_quic_result();
-        EXPECT_EQ(32u, result.resumption_master.len());
-        ASSERT_EQ(2u, result.alpn_len);
+        EXPECT_EQ(32U, result.resumption_master.len());
+        ASSERT_EQ(2U, result.alpn_len);
         EXPECT_EQ(0, std::memcmp("h2", result.alpn.data(), 2));
         EXPECT_FALSE(result.session_resumed);
         EXPECT_FALSE(result.early_data_accepted);
-        EXPECT_EQ(2u, result.peer_chain.size());
+        EXPECT_EQ(2U, result.peer_chain.size());
 
         // The BoringSSL server emitted its post-handshake NST (1-RTT CRYPTO);
         // consuming it is slice 2's post-handshake consumer, not the engine's.
@@ -935,9 +950,9 @@ TEST(TlsQuicHandshake, OurClientBoringServerHrr) {
                 ++initial_messages;
             }
         }
-        EXPECT_EQ(2u, initial_messages);
+        EXPECT_EQ(2U, initial_messages);
         const TlsQuicHandshakeResult result = engine.take_quic_result();
-        EXPECT_EQ(2u, result.peer_chain.size());
+        EXPECT_EQ(2U, result.peer_chain.size());
     });
 }
 
@@ -965,10 +980,10 @@ TEST(TlsQuicHandshake, OurServerDrivesBoringClient) {
         EXPECT_FALSE(engine.failed());
 
         expect_engine_export_order(sink);
-        EXPECT_EQ(0u, sink.alerts.size());
+        EXPECT_EQ(0U, sink.alerts.size());
 
         // No early data offered by a plain client: hs + app secrets only.
-        ASSERT_EQ(4u, sink.secrets.size());
+        ASSERT_EQ(4U, sink.secrets.size());
         expect_secrets_match(sink, *peer);
 
         // 0x39 both directions: the boring client saw OUR server's params,
@@ -978,7 +993,7 @@ TEST(TlsQuicHandshake, OurServerDrivesBoringClient) {
         SSL_get_peer_quic_transport_params(peer->ssl, &seen_by_client, &seen_by_client_len);
         ASSERT_EQ(kServerParams.size(), seen_by_client_len);
         EXPECT_EQ(0, std::memcmp(kServerParams.data(), seen_by_client, seen_by_client_len));
-        ASSERT_EQ(1u, sink.peer_params.size());
+        ASSERT_EQ(1U, sink.peer_params.size());
         EXPECT_TRUE(secrets_equal({kClientParams.begin(), kClientParams.end()}, sink.peer_params[0]));
 
         // Server flight at Handshake, NST after the client's Fin at
@@ -988,8 +1003,8 @@ TEST(TlsQuicHandshake, OurServerDrivesBoringClient) {
         EXPECT_FALSE(sink.level_bytes(TlsQuicLevel::Application).empty());
 
         const TlsQuicHandshakeResult result = engine.take_quic_result();
-        EXPECT_EQ(32u, result.resumption_master.len());
-        ASSERT_EQ(2u, result.alpn_len); // record_alpn fills the QUIC result in this mode
+        EXPECT_EQ(32U, result.resumption_master.len());
+        ASSERT_EQ(2U, result.alpn_len); // record_alpn fills the QUIC result in this mode
         EXPECT_EQ(0, std::memcmp("h2", result.alpn.data(), 2));
         EXPECT_FALSE(result.session_resumed);
         EXPECT_FALSE(result.early_data_accepted);
@@ -998,7 +1013,7 @@ TEST(TlsQuicHandshake, OurServerDrivesBoringClient) {
         // The minted ticket carries the QUIC sentinel, not a byte budget.
         const TestSessionStore::Entry *entry = store.first_entry();
         ASSERT_NE(nullptr, entry);
-        EXPECT_EQ(0xffffffffu, entry->max_early_data);
+        EXPECT_EQ(0xffffffffU, entry->max_early_data);
         EXPECT_EQ("h2", entry->alpn);
     });
 }
@@ -1031,7 +1046,7 @@ TEST(TlsQuicHandshake, OurServerBoringClientHrr) {
                 EXPECT_EQ(0x02, rec.bytes[0]);
             }
         }
-        EXPECT_EQ(2u, initial_records);
+        EXPECT_EQ(2U, initial_records);
         EXPECT_FALSE(sink.level_bytes(TlsQuicLevel::Handshake).empty());
     });
 }
@@ -1055,7 +1070,7 @@ TEST(TlsQuicHandshake, ServerRejectsCompatSessionId) {
         ASSERT_TRUE(event.has_value());
         EXPECT_EQ(Event::Failed, *event);
         EXPECT_TRUE(server.failed());
-        ASSERT_EQ(1u, server_sink.alerts.size());
+        ASSERT_EQ(1U, server_sink.alerts.size());
         EXPECT_EQ(TlsAlertDesc::IllegalParameter, server_sink.alerts[0]);
         EXPECT_TRUE(server_sink.out.empty()); // nothing was emitted
     });
@@ -1076,7 +1091,7 @@ TEST(TlsQuicHandshake, ServerRequiresAlpn) {
         const auto event = feed_quic(server, TlsQuicLevel::Initial, ch);
         ASSERT_TRUE(event.has_value());
         EXPECT_EQ(Event::Failed, *event);
-        ASSERT_EQ(1u, server_sink.alerts.size());
+        ASSERT_EQ(1U, server_sink.alerts.size());
         EXPECT_EQ(TlsAlertDesc::NoApplicationProtocol, server_sink.alerts[0]);
     });
 }
@@ -1110,7 +1125,7 @@ TEST(TlsQuicHandshake, GarbageFirstMessageAlerts) {
         const auto event = feed_quic(engine, TlsQuicLevel::Initial, garbage);
         ASSERT_TRUE(event.has_value());
         EXPECT_EQ(Event::Failed, *event);
-        ASSERT_EQ(1u, sink.alerts.size());
+        ASSERT_EQ(1U, sink.alerts.size());
         EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, sink.alerts[0]);
         EXPECT_TRUE(sink.out.empty()); // alerts are callback-only, never CRYPTO bytes
     });
@@ -1149,7 +1164,7 @@ TEST(TlsQuicHandshake, MessageCapPartialAndPing) {
             const auto event = feed_quic(engine, TlsQuicLevel::Initial, oversize);
             ASSERT_TRUE(event.has_value());
             EXPECT_EQ(Event::Failed, *event);
-            ASSERT_EQ(1u, sink.alerts.size());
+            ASSERT_EQ(1U, sink.alerts.size());
             EXPECT_EQ(TlsAlertDesc::DecodeError, sink.alerts[0]);
         }
         {
@@ -1225,7 +1240,7 @@ TEST(TlsQuicHandshake, InboundLeftoverAfterDone) {
         ASSERT_TRUE(server.done());
         ASSERT_TRUE(client.done());
         ASSERT_TRUE(fed_tail);
-        ASSERT_EQ(1u, handshake_records); // the tail sat after the final message
+        ASSERT_EQ(1U, handshake_records); // the tail sat after the final message
         const std::vector<std::uint8_t> leftover = [&] {
             fiber::mem::IoBufChain chain = server.take_inbound_leftover();
             std::vector<std::uint8_t> out;
@@ -1286,7 +1301,7 @@ TEST(TlsQuicHandshake, EarlyDataOfferRejectedByBoringServer) {
         const TlsQuicHandshakeResult result = engine.take_quic_result();
         EXPECT_FALSE(result.session_resumed);
         EXPECT_FALSE(result.early_data_accepted);
-        EXPECT_EQ(2u, result.peer_chain.size());
+        EXPECT_EQ(2U, result.peer_chain.size());
     });
 }
 
@@ -1314,7 +1329,7 @@ TEST(TlsQuicHandshake, SelfInteropEarlyDataAccepted) {
         }
         const TestSessionStore::Entry *entry = store.first_entry();
         ASSERT_NE(nullptr, entry);
-        EXPECT_EQ(0xffffffffu, entry->max_early_data); // the QUIC sentinel
+        EXPECT_EQ(0xffffffffU, entry->max_early_data); // the QUIC sentinel
 
         // hop 2: offer the ticket with early data.
         EngineQuicSink client_sink;
@@ -1374,7 +1389,7 @@ TEST(TlsQuicHandshake, SelfInteropEarlyDataAccepted) {
         EXPECT_TRUE(server_result.early_data_accepted);
         EXPECT_TRUE(client_result.peer_chain.empty()); // PSK resume: no certificate flight
         EXPECT_TRUE(server_result.peer_chain.empty());
-        EXPECT_EQ(32u, client_result.resumption_master.len());
+        EXPECT_EQ(32U, client_result.resumption_master.len());
         EXPECT_TRUE(secrets_equal(
                 {client_result.resumption_master.bytes().begin(), client_result.resumption_master.bytes().end()},
                 {server_result.resumption_master.bytes().begin(), server_result.resumption_master.bytes().end()}));
@@ -1411,7 +1426,7 @@ struct CapturingMinter {
         }
         return len;
     }
-    [[nodiscard]] TlsTicketMinter hook() noexcept { return {&mint, this}; }
+    [[nodiscard]] TlsTicketMinter hook() noexcept { return {.mint = &mint, .ctx = this}; }
 };
 
 namespace {
@@ -1421,7 +1436,7 @@ namespace {
     material.id = 1;
     material.created_ms = certfix::kRefNowMs;
     for (std::size_t i = 0; i < material.bytes.size(); ++i) {
-        material.bytes[i] = static_cast<std::uint8_t>(i * 7 + 1);
+        material.bytes[i] = static_cast<std::uint8_t>((i * 7) + 1);
     }
     const std::array<TlsTicketKeyMaterial, 1> keys{{material}};
     auto service = std::make_unique<TlsTicketService>(keys, TlsTicketKeyPolicy{});
@@ -1447,7 +1462,7 @@ TEST(TlsQuicHandshake, EarlyDataContextMismatchResumesAtOneRtt) {
 
         // hop 1: mint a 0-RTT-capable ticket bound to context A.
         TlsSecret master{};
-        CapturingMinter capturing{service.get()};
+        CapturingMinter capturing{.service = service.get()};
         const TlsTicketMinter minter = capturing.hook();
         {
             EngineQuicSink client_sink;

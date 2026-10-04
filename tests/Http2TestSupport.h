@@ -37,8 +37,12 @@ private:
     // stream, so the connection asserts the slot is empty. The factory the
     // caller passed then stays unused, which keeps every call site uniform.
     static const Ops &owner_ops(ConnectionRole role) noexcept {
-        static const Ops server_ops{&create, &state_observer_changed, &capacity_changed};
-        static const Ops client_ops{nullptr, &state_observer_changed, &capacity_changed};
+        static const Ops server_ops{.create_peer_stream = &create,
+                                    .on_state_change = &state_observer_changed,
+                                    .on_capacity_change = &capacity_changed};
+        static const Ops client_ops{.create_peer_stream = nullptr,
+                                    .on_state_change = &state_observer_changed,
+                                    .on_capacity_change = &capacity_changed};
         return role == ConnectionRole::Client ? client_ops : server_ops;
     }
     static fiber::http::Http2Stream::Lease create(void *ctx, std::uint32_t id,
@@ -87,16 +91,19 @@ struct TestHttp2StreamOwner {
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kDecoderOps{
-                &TestHttp2StreamOwner::on_indexed_field, &TestHttp2StreamOwner::on_indexed_name,
-                &TestHttp2StreamOwner::on_name_raw,      &TestHttp2StreamOwner::on_name_huffman,
-                &TestHttp2StreamOwner::on_value_raw,     &TestHttp2StreamOwner::on_value_huffman,
+                .on_indexed_field = &TestHttp2StreamOwner::on_indexed_field,
+                .on_indexed_name = &TestHttp2StreamOwner::on_indexed_name,
+                .on_name_raw = &TestHttp2StreamOwner::on_name_raw,
+                .on_name_huffman = &TestHttp2StreamOwner::on_name_huffman,
+                .on_value_raw = &TestHttp2StreamOwner::on_value_raw,
+                .on_value_huffman = &TestHttp2StreamOwner::on_value_huffman,
         };
         static const fiber::http::Http2Stream::Ops kOps{
-                &TestHttp2StreamOwner::destroy_owner,
-                &TestHttp2StreamOwner::on_header_block_start,
-                &TestHttp2StreamOwner::on_header_block_complete,
-                &TestHttp2StreamOwner::on_body,
-                &TestHttp2StreamOwner::on_abort,
+                .on_destroy = &TestHttp2StreamOwner::destroy_owner,
+                .on_header_block_start = &TestHttp2StreamOwner::on_header_block_start,
+                .on_header_block_complete = &TestHttp2StreamOwner::on_header_block_complete,
+                .on_body = &TestHttp2StreamOwner::on_body,
+                .on_abort = &TestHttp2StreamOwner::on_abort,
         };
         (void) kDecoderOps;
         return kOps;
@@ -212,9 +219,12 @@ struct TestHttp2StreamOwner {
     }
     static const fiber::http::Http2HpackDecoder::Ops &decoder_ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kOps{
-                &TestHttp2StreamOwner::on_indexed_field, &TestHttp2StreamOwner::on_indexed_name,
-                &TestHttp2StreamOwner::on_name_raw,      &TestHttp2StreamOwner::on_name_huffman,
-                &TestHttp2StreamOwner::on_value_raw,     &TestHttp2StreamOwner::on_value_huffman,
+                .on_indexed_field = &TestHttp2StreamOwner::on_indexed_field,
+                .on_indexed_name = &TestHttp2StreamOwner::on_indexed_name,
+                .on_name_raw = &TestHttp2StreamOwner::on_name_raw,
+                .on_name_huffman = &TestHttp2StreamOwner::on_name_huffman,
+                .on_value_raw = &TestHttp2StreamOwner::on_value_raw,
+                .on_value_huffman = &TestHttp2StreamOwner::on_value_huffman,
         };
         return kOps;
     }
@@ -232,7 +242,7 @@ class TestHttp2StreamFactory {
 public:
     [[nodiscard]] static const fiber::http::Http2Connection::Ops &ops() noexcept {
         static const fiber::http::Http2Connection::Ops kOps{
-                &TestHttp2StreamFactory::create_peer_stream_op,
+                .create_peer_stream = &TestHttp2StreamFactory::create_peer_stream_op,
         };
         return kOps;
     }

@@ -189,7 +189,7 @@ TEST(StreamFdTest, ShortReadSuppressesEmptyProbeAndNextPacketWakesReader) {
     int fds[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
     fiber::event::EventLoop loop;
-    EtWatchdog watchdog{loop};
+    EtWatchdog watchdog{.loop = loop};
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         watchdog.arm();
         fiber::net::detail::StreamFd stream(loop, fds[0]);
@@ -214,7 +214,7 @@ TEST(StreamFdTest, FullReadKeepsRemainingBytesRunnableWithoutAnotherEdge) {
     int fds[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
     fiber::event::EventLoop loop;
-    EtWatchdog watchdog{loop};
+    EtWatchdog watchdog{.loop = loop};
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         watchdog.arm();
         fiber::net::detail::StreamFd stream(loop, fds[0]);
@@ -240,7 +240,7 @@ TEST(StreamFdTest, DataThenHalfCloseDrainsEofAndStillAllowsReply) {
     int fds[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
     fiber::event::EventLoop loop;
-    EtWatchdog watchdog{loop};
+    EtWatchdog watchdog{.loop = loop};
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         watchdog.arm();
         fiber::net::detail::StreamFd stream(loop, fds[0]);
@@ -272,7 +272,7 @@ TEST(StreamFdTest, HalfCloseShortReadThenWaitCompletesWithoutNewEdge) {
     int fds[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
     fiber::event::EventLoop loop;
-    EtWatchdog watchdog{loop};
+    EtWatchdog watchdog{.loop = loop};
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         watchdog.arm();
         fiber::net::detail::StreamFd stream(loop, fds[0]);
@@ -306,7 +306,7 @@ TEST(StreamFdTest, HupWithBufferedDataLetsWaitsDrainRemainingThenEof) {
     int fds[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
     fiber::event::EventLoop loop;
-    EtWatchdog watchdog{loop};
+    EtWatchdog watchdog{.loop = loop};
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         watchdog.arm();
         fiber::net::detail::StreamFd stream(loop, fds[0]);
@@ -474,7 +474,7 @@ TEST(StreamFdTest, PeerResetMarksTerminalAndNotifiesOnce) {
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         EXPECT_EQ(stream.set_terminal_callback(&record_terminal_callback, &terminal_result), IoErr::None);
-        linger reset_linger{1, 0};
+        linger reset_linger{.l_onoff = 1, .l_linger = 0};
         if (::setsockopt(client_fd, SOL_SOCKET, SO_LINGER, &reset_linger, sizeof(reset_linger)) == 0) {
             reset_sent = true;
             (void) ::close(client_fd);

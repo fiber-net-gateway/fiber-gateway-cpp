@@ -11,8 +11,8 @@ TEST(HttpUriParseTest, FinalizeSimpleOriginFormUri) {
     ASSERT_EQ(fiber::http::http_parse_uri("/assets/app.js?v=42", state), fiber::common::IoErr::None);
     EXPECT_TRUE(state.has_query);
     EXPECT_TRUE(state.has_exten);
-    EXPECT_EQ(state.query_pos, 15u);
-    EXPECT_EQ(state.exten_pos, 12u);
+    EXPECT_EQ(state.query_pos, 15U);
+    EXPECT_EQ(state.exten_pos, 12U);
 
     fiber::http::HttpUri uri;
     ASSERT_EQ(fiber::http::http_process_uri("/assets/app.js?v=42", state, uri), fiber::common::IoErr::None);

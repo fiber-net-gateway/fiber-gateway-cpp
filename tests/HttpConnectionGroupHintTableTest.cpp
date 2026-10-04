@@ -8,6 +8,7 @@ using fiber::http::HttpConnectionGroupHintTable;
 using fiber::http::HttpConnectionGroupKey;
 
 TEST(HttpConnectionGroupHintTableTest, TracksApproximateCountPerGroupKey) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     HttpConnectionGroupHintTable table;
     auto key = HttpConnectionGroupKey::make("Example.COM", 443, HttpConnectionGroupKey::Scheme::Https);
     ASSERT_TRUE(key.has_value());
@@ -28,9 +29,11 @@ TEST(HttpConnectionGroupHintTableTest, TracksApproximateCountPerGroupKey) {
 
     table.note_idle_remove(*key);
     EXPECT_EQ(table.probe(*key).approx_count, 0);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupHintTableTest, SeparatesDifferentGroups) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     HttpConnectionGroupHintTable table;
     auto http_key = HttpConnectionGroupKey::make("example.com", 80, HttpConnectionGroupKey::Scheme::Http);
     auto https_key = HttpConnectionGroupKey::make("example.com", 443, HttpConnectionGroupKey::Scheme::Https);
@@ -41,9 +44,11 @@ TEST(HttpConnectionGroupHintTableTest, SeparatesDifferentGroups) {
 
     EXPECT_EQ(table.probe(*http_key).approx_count, 1);
     EXPECT_EQ(table.probe(*https_key).approx_count, 0);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupHintTableTest, ClearRemovesPublishedHints) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     HttpConnectionGroupHintTable table;
     const auto ip_key = *HttpConnectionGroupKey::make("127.0.0.1", 8080, HttpConnectionGroupKey::Scheme::Http);
 
@@ -52,9 +57,11 @@ TEST(HttpConnectionGroupHintTableTest, ClearRemovesPublishedHints) {
 
     table.clear();
     EXPECT_EQ(table.probe(ip_key).approx_count, 0);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupHintTableTest, CountSaturatesAtMaxApproxCount) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     HttpConnectionGroupHintTable table;
     auto key = HttpConnectionGroupKey::make("example.com", 8080, HttpConnectionGroupKey::Scheme::Http);
     ASSERT_TRUE(key.has_value());
@@ -64,9 +71,11 @@ TEST(HttpConnectionGroupHintTableTest, CountSaturatesAtMaxApproxCount) {
     }
 
     EXPECT_EQ(table.probe(*key).approx_count, HttpConnectionGroupHintTable::kMaxApproxCount);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupHintTableTest, SeparatesNamesPinnedToTheSameAddress) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     HttpConnectionGroupHintTable table;
     auto first = HttpConnectionGroupKey::make("first.example", 443, HttpConnectionGroupKey::Scheme::Https,
                                               fiber::net::IpAddress::loopback_v4());
@@ -79,6 +88,7 @@ TEST(HttpConnectionGroupHintTableTest, SeparatesNamesPinnedToTheSameAddress) {
 
     EXPECT_EQ(table.probe(*first).approx_count, 1);
     EXPECT_EQ(table.probe(*second).approx_count, 0);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 } // namespace

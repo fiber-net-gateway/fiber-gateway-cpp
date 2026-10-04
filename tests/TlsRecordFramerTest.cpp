@@ -41,7 +41,7 @@ void append_record(std::vector<std::uint8_t> &wire, TlsContentType type, std::ui
     wire.push_back(static_cast<std::uint8_t>((len >> 8) & 0xff));
     wire.push_back(static_cast<std::uint8_t>(len & 0xff));
     for (std::size_t i = 0; i < len; ++i) {
-        wire.push_back(static_cast<std::uint8_t>(seed + i * 31));
+        wire.push_back(static_cast<std::uint8_t>(seed + (i * 31)));
     }
 }
 
@@ -50,8 +50,8 @@ std::span<const std::uint8_t> prefix(const std::vector<std::uint8_t> &wire, std:
 }
 
 void expect_nothing_framed(const TlsFrameResult &result) {
-    EXPECT_EQ(result.count, 0u);
-    EXPECT_EQ(result.consumed, 0u);
+    EXPECT_EQ(result.count, 0U);
+    EXPECT_EQ(result.consumed, 0U);
     EXPECT_FALSE(result.fatal);
 }
 
@@ -78,12 +78,12 @@ TEST(TlsRecordFramerTest, SingleRecordFramesExactly) {
     append_record(wire, TlsContentType::Handshake, 0x0301, 7);
     Batch batch{};
     const TlsFrameResult result = tls_frame_records(wire, batch);
-    ASSERT_EQ(result.count, 1u);
+    ASSERT_EQ(result.count, 1U);
     EXPECT_EQ(result.consumed, wire.size());
     EXPECT_FALSE(result.fatal);
     EXPECT_EQ(batch[0].type, TlsContentType::Handshake);
     EXPECT_EQ(batch[0].legacy_version, 0x0301);
-    EXPECT_EQ(batch[0].length, 7u);
+    EXPECT_EQ(batch[0].length, 7U);
     EXPECT_EQ(batch[0].offset, kTlsRecordHeaderSize);
 }
 
@@ -98,7 +98,7 @@ TEST(TlsRecordFramerTest, CompleteRecordsThenIncompleteTail) {
 
     Batch batch{};
     const TlsFrameResult result = tls_frame_records(wire, batch);
-    ASSERT_EQ(result.count, 3u);
+    ASSERT_EQ(result.count, 3U);
     EXPECT_EQ(result.consumed, complete);
     EXPECT_FALSE(result.fatal);
 
@@ -129,7 +129,7 @@ TEST(TlsRecordFramerTest, StopsWhenTheBatchIsFull) {
 
     // The remainder frames on its own; offsets restart at the new region.
     const TlsFrameResult second = tls_frame_records(std::span<const std::uint8_t>(wire).subspan(first.consumed), batch);
-    ASSERT_EQ(second.count, 1u);
+    ASSERT_EQ(second.count, 1U);
     EXPECT_EQ(first.consumed + second.consumed, wire.size());
     EXPECT_EQ(batch[0].offset, kTlsRecordHeaderSize);
     EXPECT_EQ(batch[0].length, kTlsRecordBatchMax);
@@ -142,7 +142,7 @@ TEST(TlsRecordFramerTest, ShorterOutputSpanBoundsTheBatch) {
     }
     std::array<TlsRecordSpan, 2> two{};
     const TlsFrameResult result = tls_frame_records(wire, two);
-    EXPECT_EQ(result.count, 2u);
+    EXPECT_EQ(result.count, 2U);
     EXPECT_EQ(result.consumed, 2 * (kTlsRecordHeaderSize + 10));
 
     expect_nothing_framed(tls_frame_records(wire, std::span<TlsRecordSpan>{}));
@@ -158,15 +158,15 @@ TEST(TlsRecordFramerTest, UnknownContentTypeIsFatalAfterTheRecordsBeforeIt) {
 
     Batch batch{};
     const TlsFrameResult result = tls_frame_records(wire, batch);
-    EXPECT_EQ(result.count, 2u);
+    EXPECT_EQ(result.count, 2U);
     EXPECT_EQ(result.consumed, good);
     EXPECT_TRUE(result.fatal);
     EXPECT_EQ(result.alert, TlsAlertDesc::UnexpectedMessage);
 
     // First record bad: nothing framed, still fatal.
     const TlsFrameResult head = tls_frame_records(std::span<const std::uint8_t>(wire).subspan(good), batch);
-    EXPECT_EQ(head.count, 0u);
-    EXPECT_EQ(head.consumed, 0u);
+    EXPECT_EQ(head.count, 0U);
+    EXPECT_EQ(head.consumed, 0U);
     EXPECT_TRUE(head.fatal);
     EXPECT_EQ(head.alert, TlsAlertDesc::UnexpectedMessage);
 }
@@ -187,7 +187,7 @@ TEST(TlsRecordFramerTest, OversizeLengthIsFatalBeforeTheBody) {
 
     Batch batch{};
     const TlsFrameResult result = tls_frame_records(wire, batch);
-    EXPECT_EQ(result.count, 0u);
+    EXPECT_EQ(result.count, 0U);
     EXPECT_TRUE(result.fatal);
     EXPECT_EQ(result.alert, TlsAlertDesc::RecordOverflow);
 }
@@ -199,7 +199,7 @@ TEST(TlsRecordFramerTest, MaxLengthWaitsForItsBodyThenFrames) {
     expect_nothing_framed(tls_frame_records(prefix(wire, wire.size() - 1), batch));
 
     const TlsFrameResult result = tls_frame_records(wire, batch);
-    ASSERT_EQ(result.count, 1u);
+    ASSERT_EQ(result.count, 1U);
     EXPECT_EQ(result.consumed, wire.size());
     EXPECT_EQ(batch[0].length, kTlsMaxCiphertextRecordSize);
 }
@@ -210,10 +210,10 @@ TEST(TlsRecordFramerTest, ZeroLengthRecordsPassThrough) {
     append_record(wire, TlsContentType::Handshake, 0x0303, 0);
     Batch batch{};
     const TlsFrameResult result = tls_frame_records(wire, batch);
-    ASSERT_EQ(result.count, 2u);
+    ASSERT_EQ(result.count, 2U);
     EXPECT_EQ(result.consumed, 2 * kTlsRecordHeaderSize);
     EXPECT_EQ(batch[0].offset, kTlsRecordHeaderSize);
-    EXPECT_EQ(batch[0].length, 0u);
+    EXPECT_EQ(batch[0].length, 0U);
     EXPECT_EQ(batch[1].offset, 2 * kTlsRecordHeaderSize);
     EXPECT_EQ(batch[1].type, TlsContentType::Handshake);
 }
@@ -226,7 +226,7 @@ TEST(TlsRecordFramerTest, EveryContentTypeAndLegacyVersionAccepted) {
     append_record(wire, TlsContentType::ApplicationData, 0xffff, 4);
     Batch batch{};
     const TlsFrameResult result = tls_frame_records(wire, batch);
-    ASSERT_EQ(result.count, 4u);
+    ASSERT_EQ(result.count, 4U);
     EXPECT_FALSE(result.fatal);
     EXPECT_EQ(batch[0].type, TlsContentType::ChangeCipherSpec);
     EXPECT_EQ(batch[0].legacy_version, 0x0300);
@@ -277,8 +277,8 @@ TEST(TlsRecordFramerTest, MatchesTheChainReader) {
 
         std::vector<std::uint8_t> wire;
         for (std::size_t i = 0; i < 70; ++i) {
-            const auto type = static_cast<TlsContentType>(20 + i % 4);
-            append_record(wire, type, static_cast<std::uint16_t>(0x0301 + i % 3), (i * 37) % 300,
+            const auto type = static_cast<TlsContentType>(20 + (i % 4));
+            append_record(wire, type, static_cast<std::uint16_t>(0x0301 + (i % 3)), (i * 37) % 300,
                           static_cast<std::uint8_t>(i));
         }
         check(wire); // three batches, ends on a record boundary

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <future>
 #include <memory>
@@ -90,7 +91,7 @@ fiber::async::Task<void> echo_handler(fiber::http::HttpExchange &exchange,
         co_return;
     }
     for (;;) {
-        auto chunk = co_await exchange.read_body(64 * 1024, 2s);
+        auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 2s);
         if (!chunk) {
             observation.error = chunk.error();
             promise->set_value(std::move(observation));
@@ -153,7 +154,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
     fiber::http::Http3Client::Options client_options{};
     client_options.tls.trust_store = trust_store->get();
     client_options.tls.verify_peer = true;
-    fiber::http::Http3Client client(*endpoint, std::move(client_options));
+    fiber::http::Http3Client client(*endpoint, client_options);
 
     auto endpoint_started = endpoint->start();
     if (!endpoint_started) {
@@ -222,7 +223,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
             }
         }
         while (observation.error == fiber::common::IoErr::None && !observation.body_complete) {
-            auto chunk = co_await exchange.read_body(64 * 1024, 2s);
+            auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 2s);
             if (!chunk) {
                 observation.error = chunk.error();
                 break;
@@ -261,7 +262,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
             }
         }
         if (observation.error == fiber::common::IoErr::None) {
-            auto head_body = co_await head_exchange.read_body(64 * 1024, 2s);
+            auto head_body = co_await head_exchange.read_body(static_cast<std::size_t>(64 * 1024), 2s);
             if (!head_body) {
                 observation.error = head_body.error();
             } else {
@@ -287,7 +288,7 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
     ClientObservation observation{};
     fiber::http::Http3Client::Options client_options{};
     client_options.tls.verify_peer = false;
-    fiber::http::Http3Client client(*endpoint, std::move(client_options));
+    fiber::http::Http3Client client(*endpoint, client_options);
 
     auto endpoint_started = endpoint->start();
     if (!endpoint_started) {
@@ -332,7 +333,7 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
             }
         }
         while (observation.error == fiber::common::IoErr::None && !observation.body_complete) {
-            auto chunk = co_await exchange.read_body(64 * 1024, 2s);
+            auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 2s);
             if (!chunk) {
                 observation.error = chunk.error();
                 break;
@@ -365,7 +366,7 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
     fiber::http::Http3Client::Options client_options{};
     client_options.tls.trust_store = trust_store->get();
     client_options.tls.verify_peer = true;
-    fiber::http::Http3Client client(*endpoint, std::move(client_options));
+    fiber::http::Http3Client client(*endpoint, client_options);
 
     auto endpoint_started = endpoint->start();
     if (!endpoint_started) {
@@ -390,7 +391,7 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         constexpr std::size_t kBodySize = 2048;
         std::string body(kBodySize, '\0');
         for (std::size_t i = 0; i < body.size(); ++i) {
-            body[i] = static_cast<char>('a' + i % 26);
+            body[i] = static_cast<char>('a' + (i % 26));
         }
 
         fiber::mem::BufPool pool;
@@ -437,7 +438,7 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
             }
         }
         while (observation.error == fiber::common::IoErr::None && !observation.response_complete) {
-            auto chunk = co_await exchange.read_body(64 * 1024, 2s);
+            auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 2s);
             if (!chunk) {
                 observation.error = chunk.error();
                 break;
@@ -646,7 +647,7 @@ TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
     std::promise<ClientObservation> client_promise;
     auto client_future = client_promise.get_future();
     const fiber::net::SocketAddress server_addr = server_endpoint->local_addr();
-    const std::string cert_path = cert.path();
+    const std::string &cert_path = cert.path();
     fiber::async::spawn(group.at(0),
                         [&]() { return run_client(&client_endpoint, &server_addr, &cert_path, &client_promise); });
 
@@ -723,7 +724,7 @@ TEST(Http3ClientTest, PartialWriteContinuesDataFrameWithoutRepeatingHeader) {
     std::promise<PartialClientObservation> client_promise;
     auto client_future = client_promise.get_future();
     const fiber::net::SocketAddress server_addr = server_endpoint->local_addr();
-    const std::string cert_path = cert.path();
+    const std::string &cert_path = cert.path();
     fiber::async::spawn(group.at(0),
                         [&]() { return run_partial_client(&endpoint, &server_addr, &cert_path, &client_promise); });
 

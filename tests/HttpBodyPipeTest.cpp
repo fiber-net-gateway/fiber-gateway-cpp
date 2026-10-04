@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <future>
 #include <limits>
@@ -196,31 +197,33 @@ HttpBodyPipeResult execute_pipe(FakeBodyReader &reader, FakeBodyWriter &writer, 
 
 TEST(HttpBodyPipeTest, WritesDownToLowWaterThenRefillsToCapacity) {
     FakeBodyReader reader({
-            {.bytes = 64 * 1024},
-            {.bytes = 24 * 1024, .complete = true},
+            {.bytes = static_cast<std::size_t>(64 * 1024)},
+            {.bytes = static_cast<std::size_t>(24 * 1024), .complete = true},
     });
     FakeBodyWriter writer({
-            {.max_bytes = 8 * 1024},
-            {.max_bytes = 16 * 1024},
+            {.max_bytes = static_cast<std::size_t>(8 * 1024)},
+            {.max_bytes = static_cast<std::size_t>(16 * 1024)},
     });
 
     auto result = execute_pipe(reader, writer);
 
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(reader.max_bytes(), (std::vector<std::size_t>{64 * 1024, 24 * 1024}));
-    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{64 * 1024, 56 * 1024, 40 * 1024, 24 * 1024}));
-    EXPECT_EQ(result->bytes_read, 88u * 1024u);
-    EXPECT_EQ(result->bytes_written, 88u * 1024u);
-    EXPECT_EQ(result->peak_buffered_bytes, 64u * 1024u);
-    EXPECT_EQ(result->read_calls, 2u);
-    EXPECT_EQ(result->write_calls, 4u);
+    EXPECT_EQ(reader.max_bytes(), (std::vector<std::size_t>{std::size_t{64} * 1024, std::size_t{24} * 1024}));
+    EXPECT_EQ(writer.buffered_before_write(),
+              (std::vector<std::size_t>{std::size_t{64} * 1024, std::size_t{56} * 1024, std::size_t{40} * 1024,
+                                        std::size_t{24} * 1024}));
+    EXPECT_EQ(result->bytes_read, 88U * 1024U);
+    EXPECT_EQ(result->bytes_written, 88U * 1024U);
+    EXPECT_EQ(result->peak_buffered_bytes, 64U * 1024U);
+    EXPECT_EQ(result->read_calls, 2U);
+    EXPECT_EQ(result->write_calls, 4U);
 }
 
 TEST(HttpBodyPipeTest, AccumulatesUntilExactLowWaterAndForwardsDelayedCompletion) {
     FakeBodyReader reader({
-            {.bytes = 16 * 1024},
-            {.bytes = 16 * 1024},
-            {.bytes = 16 * 1024},
+            {.bytes = static_cast<std::size_t>(16 * 1024)},
+            {.bytes = static_cast<std::size_t>(16 * 1024)},
+            {.bytes = static_cast<std::size_t>(16 * 1024)},
             {.complete = true},
     });
     FakeBodyWriter writer;
@@ -228,22 +231,23 @@ TEST(HttpBodyPipeTest, AccumulatesUntilExactLowWaterAndForwardsDelayedCompletion
     auto result = execute_pipe(reader, writer);
 
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(reader.max_bytes(), (std::vector<std::size_t>{64 * 1024, 48 * 1024, 32 * 1024, 64 * 1024}));
-    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{48 * 1024, 0}));
-    EXPECT_EQ(result->bytes_written, 48u * 1024u);
+    EXPECT_EQ(reader.max_bytes(), (std::vector<std::size_t>{std::size_t{64} * 1024, std::size_t{48} * 1024,
+                                                            std::size_t{32} * 1024, std::size_t{64} * 1024}));
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{std::size_t{48} * 1024, 0}));
+    EXPECT_EQ(result->bytes_written, 48U * 1024U);
 }
 
 TEST(HttpBodyPipeTest, EndOfInputFlushesBelowLowWater) {
     FakeBodyReader reader({
-            {.bytes = 10 * 1024, .complete = true},
+            {.bytes = static_cast<std::size_t>(10 * 1024), .complete = true},
     });
     FakeBodyWriter writer;
 
     auto result = execute_pipe(reader, writer);
 
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{10 * 1024}));
-    EXPECT_EQ(result->bytes_written, 10u * 1024u);
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{std::size_t{10} * 1024}));
+    EXPECT_EQ(result->bytes_written, 10U * 1024U);
 }
 
 TEST(HttpBodyPipeTest, ReadErrorAbortsBothEndpointsAndReportsPhase) {
@@ -257,8 +261,8 @@ TEST(HttpBodyPipeTest, ReadErrorAbortsBothEndpointsAndReportsPhase) {
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, IoErr::TimedOut);
     EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Read);
-    EXPECT_EQ(reader.abort_calls(), 1u);
-    EXPECT_EQ(writer.abort_calls(), 1u);
+    EXPECT_EQ(reader.abort_calls(), 1U);
+    EXPECT_EQ(writer.abort_calls(), 1U);
     EXPECT_EQ(writer.abort_reason(), IoErr::TimedOut);
 }
 
@@ -266,7 +270,7 @@ TEST(HttpBodyPipeTest, DrainsBufferedBytesBeforeReportingReadError) {
     std::vector<char> operations;
     FakeBodyReader reader(
             {
-                    {.bytes = 10 * 1024},
+                    {.bytes = static_cast<std::size_t>(10 * 1024)},
                     {.error = IoErr::ConnReset},
             },
             &operations);
@@ -278,15 +282,15 @@ TEST(HttpBodyPipeTest, DrainsBufferedBytesBeforeReportingReadError) {
     EXPECT_EQ(result.error().code, IoErr::ConnReset);
     EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Read);
     EXPECT_EQ(operations, (std::vector<char>{'R', 'R', 'W'}));
-    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{10 * 1024}));
-    EXPECT_EQ(reader.abort_calls(), 1u);
-    EXPECT_EQ(writer.abort_calls(), 1u);
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{std::size_t{10} * 1024}));
+    EXPECT_EQ(reader.abort_calls(), 1U);
+    EXPECT_EQ(writer.abort_calls(), 1U);
     EXPECT_EQ(writer.abort_reason(), IoErr::ConnReset);
 }
 
 TEST(HttpBodyPipeTest, WriteErrorAbortsBothEndpointsAndReportsPhase) {
     FakeBodyReader reader({
-            {.bytes = 48 * 1024},
+            {.bytes = static_cast<std::size_t>(48 * 1024)},
     });
     FakeBodyWriter writer({
             {.error = IoErr::BrokenPipe},
@@ -297,23 +301,23 @@ TEST(HttpBodyPipeTest, WriteErrorAbortsBothEndpointsAndReportsPhase) {
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, IoErr::BrokenPipe);
     EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Write);
-    EXPECT_EQ(reader.abort_calls(), 1u);
+    EXPECT_EQ(reader.abort_calls(), 1U);
     EXPECT_EQ(reader.abort_reason(), IoErr::BrokenPipe);
-    EXPECT_EQ(writer.abort_calls(), 1u);
+    EXPECT_EQ(writer.abort_calls(), 1U);
 }
 
 TEST(HttpBodyPipeTest, ZeroLowWaterDrainsEachReadBeforeReadingAgain) {
     std::vector<char> operations;
     FakeBodyReader reader(
             {
-                    {.bytes = 8 * 1024},
-                    {.bytes = 6 * 1024, .complete = true},
+                    {.bytes = static_cast<std::size_t>(8 * 1024)},
+                    {.bytes = static_cast<std::size_t>(6 * 1024), .complete = true},
             },
             &operations);
     FakeBodyWriter writer(
             {
-                    {.max_bytes = 3 * 1024},
-                    {.max_bytes = 5 * 1024},
+                    {.max_bytes = static_cast<std::size_t>(3 * 1024)},
+                    {.max_bytes = static_cast<std::size_t>(5 * 1024)},
             },
             &operations);
     HttpBodyPipeOptions options;
@@ -323,13 +327,14 @@ TEST(HttpBodyPipeTest, ZeroLowWaterDrainsEachReadBeforeReadingAgain) {
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(operations, (std::vector<char>{'R', 'W', 'W', 'F', 'R', 'W'}));
-    EXPECT_EQ(reader.max_bytes(), (std::vector<std::size_t>{64 * 1024, 64 * 1024}));
-    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{8 * 1024, 5 * 1024, 6 * 1024}));
-    EXPECT_EQ(result->bytes_read, 14u * 1024u);
-    EXPECT_EQ(result->bytes_written, 14u * 1024u);
-    EXPECT_EQ(result->peak_buffered_bytes, 8u * 1024u);
-    EXPECT_EQ(result->read_calls, 2u);
-    EXPECT_EQ(result->write_calls, 3u);
+    EXPECT_EQ(reader.max_bytes(), (std::vector<std::size_t>{std::size_t{64} * 1024, std::size_t{64} * 1024}));
+    EXPECT_EQ(writer.buffered_before_write(),
+              (std::vector<std::size_t>{std::size_t{8} * 1024, std::size_t{5} * 1024, std::size_t{6} * 1024}));
+    EXPECT_EQ(result->bytes_read, 14U * 1024U);
+    EXPECT_EQ(result->bytes_written, 14U * 1024U);
+    EXPECT_EQ(result->peak_buffered_bytes, 8U * 1024U);
+    EXPECT_EQ(result->read_calls, 2U);
+    EXPECT_EQ(result->write_calls, 3U);
 }
 
 TEST(HttpBodyPipeTest, ZeroLowWaterForwardsCompletionOnlyRead) {
@@ -344,10 +349,10 @@ TEST(HttpBodyPipeTest, ZeroLowWaterForwardsCompletionOnlyRead) {
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(operations, (std::vector<char>{'R', 'W'}));
     EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{0}));
-    EXPECT_EQ(result->bytes_read, 0u);
-    EXPECT_EQ(result->bytes_written, 0u);
-    EXPECT_EQ(result->read_calls, 1u);
-    EXPECT_EQ(result->write_calls, 1u);
+    EXPECT_EQ(result->bytes_read, 0U);
+    EXPECT_EQ(result->bytes_written, 0U);
+    EXPECT_EQ(result->read_calls, 1U);
+    EXPECT_EQ(result->write_calls, 1U);
 }
 
 TEST(HttpBodyPipeTest, ZeroLowWaterReportsFlushFailureAsWriteError) {
@@ -363,9 +368,9 @@ TEST(HttpBodyPipeTest, ZeroLowWaterReportsFlushFailureAsWriteError) {
     EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Write);
     EXPECT_EQ(result.error().code, IoErr::BrokenPipe);
     EXPECT_EQ(operations, (std::vector<char>{'R', 'W', 'F'}));
-    EXPECT_EQ(reader.abort_calls(), 1u);
+    EXPECT_EQ(reader.abort_calls(), 1U);
     EXPECT_EQ(reader.abort_reason(), IoErr::BrokenPipe);
-    EXPECT_EQ(writer.abort_calls(), 1u);
+    EXPECT_EQ(writer.abort_calls(), 1U);
     EXPECT_EQ(writer.abort_reason(), IoErr::BrokenPipe);
 }
 
@@ -382,8 +387,8 @@ TEST(HttpBodyPipeTest, RejectsInvalidBufferBoundsBeforeStartingIo) {
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, IoErr::Invalid);
         EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Validate);
-        EXPECT_EQ(reader.abort_calls(), 0u);
-        EXPECT_EQ(writer.abort_calls(), 0u);
+        EXPECT_EQ(reader.abort_calls(), 0U);
+        EXPECT_EQ(writer.abort_calls(), 0U);
     }
 }
 
@@ -398,13 +403,13 @@ TEST(HttpBodyPipeTest, RejectsEmptyIncompleteReadAndZeroProgressWrite) {
 
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Validate);
-        EXPECT_EQ(reader.abort_calls(), 1u);
-        EXPECT_EQ(writer.abort_calls(), 1u);
+        EXPECT_EQ(reader.abort_calls(), 1U);
+        EXPECT_EQ(writer.abort_calls(), 1U);
     }
 
     {
         FakeBodyReader reader({
-                {.bytes = 48 * 1024},
+                {.bytes = static_cast<std::size_t>(48 * 1024)},
         });
         FakeBodyWriter writer({
                 {.stall = true},

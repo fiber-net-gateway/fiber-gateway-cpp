@@ -13,7 +13,7 @@ TEST(IpAddressTest, ValueInitializationProducesAnyIpv4) {
     fiber::net::IpAddress address{};
     EXPECT_TRUE(address.is_v4());
     EXPECT_TRUE(address.is_unspecified());
-    EXPECT_EQ(address.scope_id(), 0u);
+    EXPECT_EQ(address.scope_id(), 0U);
     EXPECT_EQ(address, fiber::net::IpAddress::any_v4());
 }
 

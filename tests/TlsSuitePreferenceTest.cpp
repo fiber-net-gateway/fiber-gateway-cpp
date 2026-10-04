@@ -21,7 +21,7 @@ template<std::size_t N>
     std::array<std::uint8_t, N * 2> out{};
     for (std::size_t i = 0; i < N; ++i) {
         out[i * 2] = static_cast<std::uint8_t>(suites[i] >> 8);
-        out[i * 2 + 1] = static_cast<std::uint8_t>(suites[i]);
+        out[(i * 2) + 1] = static_cast<std::uint8_t>(suites[i]);
     }
     return out;
 }
@@ -70,7 +70,7 @@ TEST(TlsServerSuiteSelect, ServerPreferenceBeatsClientOrder) {
 
     fiber::tls::TlsCipherSuiteId suite{};
     ASSERT_TRUE(fiber::tls::tls_server_suite_select(ch, true, suite));
-    EXPECT_EQ(fiber::tls::tls_has_aes_hardware() ? 0x1301u : 0x1303u, static_cast<std::uint16_t>(suite));
+    EXPECT_EQ(fiber::tls::tls_has_aes_hardware() ? 0x1301U : 0x1303U, static_cast<std::uint16_t>(suite));
 }
 
 // The 1.2 arm of the same table: ChaCha-first ordering applies to the
@@ -82,7 +82,7 @@ TEST(TlsServerSuiteSelect, ServerPreferenceBeatsClientOrder12) {
 
     fiber::tls::TlsCipherSuiteId suite{};
     ASSERT_TRUE(fiber::tls::tls_server_suite_select(ch, false, suite));
-    EXPECT_EQ(fiber::tls::tls_has_aes_hardware() ? 0xC02Fu : 0xCCA8u, static_cast<std::uint16_t>(suite));
+    EXPECT_EQ(fiber::tls::tls_has_aes_hardware() ? 0xC02FU : 0xCCA8U, static_cast<std::uint16_t>(suite));
 }
 
 // No ChaCha on offer: the first AES entry wins regardless of hardware.
@@ -93,5 +93,5 @@ TEST(TlsServerSuiteSelect, AesOnlyOfferKeepsRegistryOrder) {
 
     fiber::tls::TlsCipherSuiteId suite{};
     ASSERT_TRUE(fiber::tls::tls_server_suite_select(ch, true, suite));
-    EXPECT_EQ(0x1301u, static_cast<std::uint16_t>(suite));
+    EXPECT_EQ(0x1301U, static_cast<std::uint16_t>(suite));
 }

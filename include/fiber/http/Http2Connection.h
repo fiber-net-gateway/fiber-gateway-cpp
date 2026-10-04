@@ -149,6 +149,7 @@ public:
     [[nodiscard]] bool accepts_new_local_stream() const noexcept {
         return local_stream_attach_status() == common::IoErr::None;
     }
+    // NOLINTNEXTLINE(readability-make-member-function-const) non-const twin returns a mutable reference
     [[nodiscard]] event::EventLoop &loop() noexcept {
         FIBER_ASSERT(transport_ != nullptr);
         return transport_->loop();
@@ -157,6 +158,7 @@ public:
         FIBER_ASSERT(transport_ != nullptr);
         return transport_->loop();
     }
+    // NOLINTNEXTLINE(readability-make-member-function-const) non-const twin returns a mutable reference
     [[nodiscard]] HttpTransport &transport() noexcept {
         FIBER_ASSERT(transport_ != nullptr);
         return *transport_;

@@ -158,8 +158,8 @@ TEST(HpackHuffmanTest, IncrementalEncodeCanPauseBeforeFinalFlush) {
             state, input.data() + first.consumed, input.size() - first.consumed, encoded.data() + first.written,
             encoded.size() - first.written, true);
     EXPECT_EQ(second.code, fiber::http::HpackHuffmanCode::Ok);
-    EXPECT_EQ(second.consumed, 0u);
-    EXPECT_EQ(second.written, 1u);
+    EXPECT_EQ(second.consumed, 0U);
+    EXPECT_EQ(second.written, 1U);
 
     const std::vector<std::uint8_t> encoded_exact = encode_text_exact(text);
     EXPECT_EQ(encoded, encoded_exact);
@@ -237,8 +237,8 @@ TEST(HpackHuffmanTest, DecodeFailsWhenOutputBufferIsTooSmall) {
     const auto result = fiber::http::hpack_huffman_decode(state, encoded.data(), encoded.size(), decoded.data(),
                                                           decoded.size(), true);
     EXPECT_EQ(result.code, fiber::http::HpackHuffmanCode::OutputFull);
-    EXPECT_EQ(result.consumed, 3u);
-    EXPECT_EQ(result.written, 3u);
+    EXPECT_EQ(result.consumed, 3U);
+    EXPECT_EQ(result.written, 3U);
 }
 
 TEST(HpackHuffmanTest, DecodeRejectsInvalidPadding) {
@@ -269,6 +269,6 @@ TEST(HpackHuffmanTest, DecodeReportsNeedMoreForIncompleteCode) {
     const auto result = fiber::http::hpack_huffman_decode(state, encoded.data(), encoded.size(), decoded.data(),
                                                           decoded.size(), false);
     EXPECT_EQ(result.code, fiber::http::HpackHuffmanCode::NeedMore);
-    EXPECT_EQ(result.consumed, 1u);
-    EXPECT_EQ(result.written, 0u);
+    EXPECT_EQ(result.consumed, 1U);
+    EXPECT_EQ(result.written, 0U);
 }

@@ -117,11 +117,11 @@ TEST(JsonPathTest, ExtractsMultiplePathsInOneTraversal) {
     auto result = fiber::json::visit_json_paths(
             *compiled, input, pool, JsonPathVisitor{.context = &context, .on_match = &CaptureContext::on_match});
     ASSERT_TRUE(result);
-    ASSERT_EQ(context.matches.size(), 4u);
-    EXPECT_EQ(context.matches[0].action, 1u);
+    ASSERT_EQ(context.matches.size(), 4U);
+    EXPECT_EQ(context.matches[0].action, 1U);
     EXPECT_EQ(context.matches[0].value, "gpt-4o");
     EXPECT_EQ(context.matches[0].raw, R"("gpt-4o")");
-    EXPECT_EQ(context.matches[1].action, 2u);
+    EXPECT_EQ(context.matches[1].action, 2U);
     EXPECT_EQ(context.matches[1].value, "true");
     EXPECT_EQ(context.matches[2].value, "user");
     EXPECT_EQ(context.matches[2].index_capture, "0");
@@ -142,7 +142,7 @@ TEST(JsonPathTest, CapturesEscapedWildcardKeyBeforeParserAdvances) {
     auto result = fiber::json::visit_json_paths(
             *compiled, input, pool, JsonPathVisitor{.context = &context, .on_match = &CaptureContext::on_match});
     ASSERT_TRUE(result);
-    ASSERT_EQ(context.matches.size(), 2u);
+    ASSERT_EQ(context.matches.size(), 2U);
     EXPECT_EQ(context.matches[0].key_capture, "ab");
     EXPECT_EQ(context.matches[1].key_capture, "plain");
 }
@@ -154,13 +154,13 @@ TEST(JsonPathTest, ReportsContainerRawSpanAndRootMatch) {
     auto compiled = JsonPathProgram::compile(rules);
     ASSERT_TRUE(compiled) << compiled.error().message;
 
-    const std::string input = " { \"payload\" : [ 1, {\"x\":true} ], \"tail\":0 } ";
+    const std::string input = R"( { "payload" : [ 1, {"x":true} ], "tail":0 } )";
     BufPool pool;
     CaptureContext context{.input = input};
     auto result = fiber::json::visit_json_paths(
             *compiled, input, pool, JsonPathVisitor{.context = &context, .on_match = &CaptureContext::on_match});
     ASSERT_TRUE(result);
-    ASSERT_EQ(context.matches.size(), 1u);
+    ASSERT_EQ(context.matches.size(), 1U);
     EXPECT_EQ(context.matches[0].kind, TokenKind::StartArr);
     EXPECT_EQ(context.matches[0].raw, R"([ 1, {"x":true} ])");
 
@@ -173,7 +173,7 @@ TEST(JsonPathTest, ReportsContainerRawSpanAndRootMatch) {
     result = fiber::json::visit_json_paths(
             *root, input, pool, JsonPathVisitor{.context = &root_context, .on_match = &CaptureContext::on_match});
     ASSERT_TRUE(result);
-    ASSERT_EQ(root_context.matches.size(), 1u);
+    ASSERT_EQ(root_context.matches.size(), 1U);
     EXPECT_EQ(root_context.matches[0].raw, R"({ "payload" : [ 1, {"x":true} ], "tail":0 })");
 }
 
@@ -207,13 +207,13 @@ TEST(JsonPathTest, DuplicateObjectFieldsEachProduceAMatch) {
     auto result = fiber::json::visit_json_paths(
             *compiled, input, pool, JsonPathVisitor{.context = &context, .on_match = &CaptureContext::on_match});
     ASSERT_TRUE(result);
-    ASSERT_EQ(context.matches.size(), 2u);
+    ASSERT_EQ(context.matches.size(), 2U);
     EXPECT_EQ(context.matches[0].value, "first");
     EXPECT_EQ(context.matches[1].value, "last");
 }
 
 TEST(JsonPathTest, RewritesArbitraryMatchedValuesAndPreservesOtherBytes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &nodes) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*nodes*/) {
         const JsonPathRule rules[] = {
                 {.expression = "$.model", .action = 1},
                 {.expression = "$.items[*].enabled", .action = 2},
@@ -240,7 +240,7 @@ TEST(JsonPathTest, RewritesArbitraryMatchedValuesAndPreservesOtherBytes) {
 }
 
 TEST(JsonPathTest, RejectsInvalidEncodedReplacement) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &nodes) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*nodes*/) {
         const JsonPathRule rules[] = {
                 {.expression = "$.model", .action = 1},
         };
@@ -258,7 +258,7 @@ TEST(JsonPathTest, RejectsInvalidEncodedReplacement) {
 
         ASSERT_FALSE(rewritten);
         EXPECT_EQ(rewritten.error().code, JsonPathRewriteErrorCode::InvalidReplacement);
-        EXPECT_EQ(rewritten.error().action, 1u);
+        EXPECT_EQ(rewritten.error().action, 1U);
     });
 }
 
@@ -332,7 +332,7 @@ TEST(JsonPathTest, ReportsInvalidJsonAndHandlerRejection) {
             JsonPathVisitor{.context = &rejected_context, .on_match = &CaptureContext::on_match});
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().code, JsonPathVisitErrorCode::HandlerRejected);
-    EXPECT_EQ(rejected.error().action, 17u);
+    EXPECT_EQ(rejected.error().action, 17U);
 }
 
 } // namespace

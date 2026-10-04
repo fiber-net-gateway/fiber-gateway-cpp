@@ -88,7 +88,7 @@ std::string make_temp_path(const char *tag) {
     path.push_back('_');
     path.append(std::to_string(static_cast<long>(::getpid())));
     path.push_back('_');
-    path.append(std::to_string(static_cast<long>(::random())));
+    path.append(std::to_string(::random()));
     path.append(".pem");
     return path;
 }

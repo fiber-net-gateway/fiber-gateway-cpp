@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <ranges>
 
 #include <fiber/quic/QuicCongestion.h>
 #include <fiber/quic/QuicConnection.h>
@@ -68,9 +69,10 @@ TEST(QuicCongestionTest, SlowStartAddsAckedPacketLength) {
     fiber::quic::quic_congestion_init(cg, fiber::quic::QuicTime{0});
 
     fiber::quic::quic_congestion_on_packet_sent(cg, 1200, true, false);
-    const bool unblocked =
-            fiber::quic::quic_congestion_on_ack(cg, fiber::quic::QuicAckSample{1200, 0, fiber::quic::QuicTime{0}}, 0,
-                                                fiber::quic::QuicTime{50}, fiber::quic::QuicTime{0});
+    const bool unblocked = fiber::quic::quic_congestion_on_ack(
+            cg,
+            fiber::quic::QuicAckSample{.packet_len = 1200, .packet_number = 0, .send_time = fiber::quic::QuicTime{0}},
+            0, fiber::quic::QuicTime{50}, fiber::quic::QuicTime{0});
 
     EXPECT_FALSE(unblocked);
     EXPECT_EQ(cg.in_flight, 0U);
@@ -82,9 +84,13 @@ TEST(QuicCongestionTest, LossUsesNginxMultiplicativeDecrease) {
     fiber::quic::quic_congestion_init(cg, fiber::quic::QuicTime{0});
     fiber::quic::quic_congestion_on_packet_sent(cg, 12000, true, false);
 
-    const bool unblocked = fiber::quic::quic_congestion_on_loss(
-            cg, fiber::quic::QuicLossSample{1200, 0, fiber::quic::QuicTime{0}, false}, 0, fiber::quic::QuicTime{100},
-            1200);
+    const bool unblocked =
+            fiber::quic::quic_congestion_on_loss(cg,
+                                                 fiber::quic::QuicLossSample{.packet_len = 1200,
+                                                                             .packet_number = 0,
+                                                                             .send_time = fiber::quic::QuicTime{0},
+                                                                             .ignore_loss = false},
+                                                 0, fiber::quic::QuicTime{100}, 1200);
 
     EXPECT_FALSE(unblocked);
     EXPECT_EQ(cg.in_flight, 10800U);
@@ -170,8 +176,8 @@ TEST(QuicOutputFrameListTest, MaintainsReverseLinksAcrossMutations) {
 
     fiber::quic::QuicOutputFrame *next = nullptr;
     frame = queue.back();
-    for (auto it = expected.rbegin(); it != expected.rend(); ++it) {
-        ASSERT_EQ(frame, *it);
+    for (auto *it: std::ranges::reverse_view(expected)) {
+        ASSERT_EQ(frame, it);
         EXPECT_EQ(queue.next_of(*frame), next);
         next = frame;
         frame = queue.prev_of(*frame);
@@ -187,9 +193,9 @@ TEST(QuicOutputFrameListTest, MaintainsReverseLinksAcrossMutations) {
     EXPECT_FALSE(removed_tail->hook.linked());
     queue.push_back(*removed_tail);
 
-    for (std::size_t i = 0; i < expected.size(); ++i) {
+    for (auto *i: expected) {
         fiber::quic::QuicOutputFrame *removed = queue.pop_front();
-        ASSERT_EQ(removed, expected[i]);
+        ASSERT_EQ(removed, i);
         EXPECT_EQ(removed->hook.next, &removed->hook);
         EXPECT_EQ(removed->hook.prev, &removed->hook);
         EXPECT_FALSE(removed->hook.linked());
@@ -344,7 +350,7 @@ TEST(QuicAckHandlerTest, HandlesDescendingAckRangesWithSingleReverseScan) {
     ack.u.ack.largest = 6;
     ack.u.ack.range_count = 2;
     ack.u.ack.first_range = 0;
-    ack.data = {ranges, sizeof(ranges)};
+    ack.data = {.data = ranges, .len = sizeof(ranges)};
 
     auto result = fiber::quic::quic_handle_ack_frame(connection, fiber::quic::QuicEncryptionLevel::Initial, ack,
                                                      fiber::quic::QuicTime{100});

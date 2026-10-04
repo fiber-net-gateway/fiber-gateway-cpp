@@ -207,28 +207,28 @@ TEST_F(TlsClientHelloDecodeTest, FullParseExtractsEveryField) {
     ASSERT_TRUE(decode_full(hello).has_value());
 
     EXPECT_EQ(hello.legacy_version, 0x0303);
-    EXPECT_EQ(hello.random.size(), 32u);
-    EXPECT_EQ(hello.session_id.size(), 4u);
-    EXPECT_EQ(hello.cipher_suites.size(), 8u);
-    EXPECT_EQ(hello.compression_methods.size(), 1u);
+    EXPECT_EQ(hello.random.size(), 32U);
+    EXPECT_EQ(hello.session_id.size(), 4U);
+    EXPECT_EQ(hello.cipher_suites.size(), 8U);
+    EXPECT_EQ(hello.compression_methods.size(), 1U);
     EXPECT_EQ(hello.compression_methods.front(), kCompressionNull);
 
     EXPECT_TRUE(hello.has_server_name);
     EXPECT_EQ(hello.server_name, "example.com");
     EXPECT_TRUE(hello.has_supported_versions);
-    EXPECT_EQ(hello.supported_versions.size(), 4u);
+    EXPECT_EQ(hello.supported_versions.size(), 4U);
     EXPECT_TRUE(hello.has_supported_groups);
-    EXPECT_EQ(hello.supported_groups.size(), 4u);
+    EXPECT_EQ(hello.supported_groups.size(), 4U);
     EXPECT_TRUE(hello.has_signature_algorithms);
-    EXPECT_EQ(hello.signature_algorithms.size(), 6u);
+    EXPECT_EQ(hello.signature_algorithms.size(), 6U);
     EXPECT_TRUE(hello.has_signature_algorithms_cert);
-    EXPECT_EQ(hello.signature_algorithms_cert.size(), 2u);
+    EXPECT_EQ(hello.signature_algorithms_cert.size(), 2U);
     EXPECT_TRUE(hello.has_key_share);
     EXPECT_TRUE(hello.has_alpn);
     EXPECT_TRUE(hello.has_psk_key_exchange_modes);
     EXPECT_TRUE(hello.has_early_data);
     EXPECT_TRUE(hello.has_session_ticket);
-    EXPECT_EQ(hello.session_ticket.size(), 2u);
+    EXPECT_EQ(hello.session_ticket.size(), 2U);
     EXPECT_TRUE(hello.has_record_size_limit);
     EXPECT_EQ(hello.record_size_limit, 0x4001);
     EXPECT_TRUE(hello.has_encrypt_then_mac);
@@ -236,10 +236,10 @@ TEST_F(TlsClientHelloDecodeTest, FullParseExtractsEveryField) {
     EXPECT_TRUE(hello.has_renegotiation_info);
 
     EXPECT_TRUE(hello.has_pre_shared_key);
-    EXPECT_EQ(hello.psk_identity_count, 1u);
-    EXPECT_EQ(hello.psk_binder_count, 1u);
-    EXPECT_EQ(hello.psk_identities.size(), 10u); // u16 len + 4 identity + u32 age
-    EXPECT_EQ(hello.psk_binders.size(), 33u); // u8 len + 32 bytes
+    EXPECT_EQ(hello.psk_identity_count, 1U);
+    EXPECT_EQ(hello.psk_binder_count, 1U);
+    EXPECT_EQ(hello.psk_identities.size(), 10U); // u16 len + 4 identity + u32 age
+    EXPECT_EQ(hello.psk_binders.size(), 33U); // u8 len + 32 bytes
 
     EXPECT_TRUE(tls_version_list_contains(hello.supported_versions, fiber::tls::kTlsVersionTls13));
     EXPECT_TRUE(tls_version_list_contains(hello.supported_versions, fiber::tls::kTlsVersionTls12));
@@ -266,9 +266,9 @@ TEST_F(TlsClientHelloDecodeTest, MinimalTls12HelloWithoutExtensions) {
     TlsClientHello hello;
     ASSERT_TRUE(tls_decode_client_hello(body.data(), body.size(), hello).has_value());
     EXPECT_EQ(hello.legacy_version, 0x0303);
-    EXPECT_EQ(hello.session_id.size(), 0u);
-    EXPECT_EQ(hello.cipher_suites.size(), 2u);
-    EXPECT_EQ(hello.extensions_block.size(), 0u);
+    EXPECT_EQ(hello.session_id.size(), 0U);
+    EXPECT_EQ(hello.cipher_suites.size(), 2U);
+    EXPECT_EQ(hello.extensions_block.size(), 0U);
     EXPECT_FALSE(hello.has_server_name || hello.has_supported_versions || hello.has_key_share ||
                  hello.has_pre_shared_key);
 }
@@ -322,7 +322,7 @@ TEST_F(TlsClientHelloDecodeTest, SessionIdOf32BytesAccepted) {
             build_client_hello(0x0303, random, session_id, as_bytes({0x13, 0x01}), as_bytes({kCompressionNull}), {});
     TlsClientHello hello;
     ASSERT_TRUE(tls_decode_client_hello(body.data(), body.size(), hello).has_value());
-    EXPECT_EQ(hello.session_id.size(), 32u);
+    EXPECT_EQ(hello.session_id.size(), 32U);
     EXPECT_EQ(hello.session_id.data(), body.data() + 35);
 }
 
@@ -371,7 +371,7 @@ TEST_F(TlsClientHelloDecodeTest, ExtensionCapEnforced) {
 
 TEST_F(TlsClientHelloDecodeTest, EmptyPayloadExtensionCarriesPayloadRejected) {
     const std::vector<std::uint8_t> random(32, 0x00);
-    for (const std::uint16_t type: {42u, 22u, 23u}) {
+    for (const std::uint16_t type: {42U, 22U, 23U}) {
         const auto extensions = ext(type, {0x00});
         const auto body = build_client_hello(0x0303, random, {}, as_bytes({0x13, 0x01}), as_bytes({kCompressionNull}),
                                              extensions);
@@ -447,7 +447,7 @@ TEST_F(TlsClientHelloDecodeTest, SupportedVersionsLengthMismatchRejected) {
 TEST_F(TlsClientHelloDecodeTest, SupportedGroupsAndSigAlgsOddLengthRejected) {
     const std::vector<std::uint8_t> random(32, 0x00);
     TlsClientHello hello;
-    for (const std::uint16_t type: {10u, 13u, 50u}) {
+    for (const std::uint16_t type: {10U, 13U, 50U}) {
         // Claimed list_len covers only 3 bytes: odd and mismatched.
         const auto bad = ext(type, {0x00, 0x03, 0x00, 0x1D, 0x17});
         const auto body =
@@ -532,7 +532,7 @@ TEST_F(TlsClientHelloDecodeTest, PskBinderBlockOffsetAnchorsTranscriptTruncation
     const std::size_t ext_block = body.size() - extensions.size();
     const std::size_t ext_data = ext_block + 4;
     const std::size_t expected = ext_data + 2 + hello.psk_identities.size();
-    ASSERT_EQ(hello.psk_identities.size(), 10u);
+    ASSERT_EQ(hello.psk_identities.size(), 10U);
     EXPECT_EQ(hello.psk_binder_block_offset, expected);
     EXPECT_EQ(hello.psk_binder_block_offset, ext_data + 12);
     // The anchored bytes are the binders vector length prefix (1 + 32 = 33).
@@ -583,7 +583,7 @@ TEST(TlsHandshakeHeaderDecode, DecodesTypeAndLength) {
     const auto decoded = tls_decode_handshake_header(header, sizeof(header));
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded->type, TlsHandshakeType::ClientHello);
-    EXPECT_EQ(decoded->length, 0x0102u);
+    EXPECT_EQ(decoded->length, 0x0102U);
 
     const std::uint8_t truncated[] = {0x01, 0x00, 0x01};
     EXPECT_EQ(tls_decode_handshake_header(truncated, sizeof(truncated)).error(), IoErr::Invalid);

@@ -135,16 +135,16 @@ std::size_t operand_index_for_code(std::int32_t code) {
 
 std::size_t func_index_for_call(std::int32_t code) {
     const auto raw = static_cast<std::uint32_t>(code);
-    std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFu);
+    std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFU);
     if (op == Code::CALL_FUNC || op == Code::CALL_ASYNC_FUNC) {
-        return static_cast<std::size_t>(raw >> 16u);
+        return static_cast<std::size_t>(raw >> 16U);
     }
-    return static_cast<std::size_t>(raw >> 8u);
+    return static_cast<std::size_t>(raw >> 8U);
 }
 
 std::uint32_t argc_for_call(std::int32_t code) {
     const auto raw = static_cast<std::uint32_t>(code);
-    return (raw >> 8u) & 0xFFu;
+    return (raw >> 8U) & 0xFFU;
 }
 
 std::size_t find_first_opcode(const Compiled &compiled, std::uint8_t opcode) {
@@ -180,11 +180,11 @@ TEST(CompiledOperandTest, CompilerEmitsDirectConstantsAndFuncConsts) {
     EXPECT_EQ(std::string_view(name.data, name.len), "foo");
 
     std::int32_t sync_call_code = compiled.codes()[call_func];
-    EXPECT_EQ(argc_for_call(sync_call_code), 1u);
+    EXPECT_EQ(argc_for_call(sync_call_code), 1U);
     EXPECT_EQ(compiled.func_const(func_index_for_call(sync_call_code)).sync_func, &dummy_function);
 
     std::int32_t async_call_code = compiled.codes()[call_async_func];
-    EXPECT_EQ(argc_for_call(async_call_code), 1u);
+    EXPECT_EQ(argc_for_call(async_call_code), 1U);
     EXPECT_EQ(compiled.func_const(func_index_for_call(async_call_code)).async_func, &dummy_async_function);
 
     EXPECT_EQ(compiled.func_const(func_index_for_call(compiled.codes()[call_const])).sync_ct, &dummy_constant);

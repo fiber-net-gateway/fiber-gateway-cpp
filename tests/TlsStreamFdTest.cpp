@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -13,12 +15,12 @@
 #include <future>
 #include <memory>
 #include <optional>
-#include <signal.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include <fiber/async/Sleep.h>
@@ -105,7 +107,7 @@ std::string make_temp_path(const char *tag) {
     path.push_back('_');
     path.append(std::to_string(static_cast<long>(::getpid())));
     path.push_back('_');
-    path.append(std::to_string(static_cast<long>(::random())));
+    path.append(std::to_string(::random()));
     path.append(".pem");
     return path;
 }
@@ -302,7 +304,7 @@ DetachedTask reset_tls_server_after_client_handshake(fiber::net::detail::TlsStre
         co_await fiber::async::sleep(1ms);
     }
 
-    linger reset_linger{1, 0};
+    linger reset_linger{.l_onoff = 1, .l_linger = 0};
     if (::setsockopt(server_stream->fd(), SOL_SOCKET, SO_LINGER, &reset_linger, sizeof(reset_linger)) != 0) {
         const fiber::common::IoErr err = fiber::common::io_err_from_errno(errno);
         server_stream->close();
@@ -549,8 +551,7 @@ TEST(TlsStreamFdTest, CloseDuringSuspendedHandshakeUnwindsCleanly) {
 // Build an IoBufChain of segments with the given sizes. Each segment i is filled
 // with a distinct byte (0x40 + i) so that reordering, drops, or duplication in the
 // coalesce path show up as a mismatched byte. Returns the expected concatenation.
-std::string build_distinct_chain(fiber::mem::IoBufNodePool &pool, fiber::mem::IoBufChain &chain,
-                                 const std::vector<std::size_t> &sizes) {
+std::string build_distinct_chain(fiber::mem::IoBufChain &chain, const std::vector<std::size_t> &sizes) {
     std::string expected;
     for (std::size_t i = 0; i < sizes.size(); ++i) {
         std::size_t n = sizes[i];
@@ -558,7 +559,7 @@ std::string build_distinct_chain(fiber::mem::IoBufNodePool &pool, fiber::mem::Io
         std::memset(buf.writable_data(), static_cast<int>(0x40 + (i & 0x3f)), n);
         buf.commit(n);
         chain.append(std::move(buf));
-        expected.append(static_cast<std::size_t>(n), static_cast<char>(0x40 + (i & 0x3f)));
+        expected.append(n, static_cast<char>(0x40 + (i & 0x3f)));
     }
     return expected;
 }
@@ -876,7 +877,7 @@ TEST(TlsStreamFdTest, TlsTransportWaitReadableSeesPendingDecryptedData) {
 // small nodes (coalesced into <=8k groups), a >8k node (solo, zero-copy), and
 // enough nodes to exceed the 16-iovec snapshot cap (forces a re-snapshot).
 TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         SigpipeGuard sigpipe_guard;
         TempFile cert("cert", kSelfSignedCertPem);
         TempFile key("key", kSelfSignedKeyPem);
@@ -909,7 +910,7 @@ TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
         for (int i = 0; i < 20; ++i) {
             sizes.push_back(100);
         }
-        std::string expected = build_distinct_chain(pool, chain, sizes);
+        std::string expected = build_distinct_chain(chain, sizes);
 
         std::promise<fiber::common::IoResult<std::string>> server_promise;
         std::promise<fiber::common::IoResult<std::size_t>> client_promise;
@@ -985,7 +986,7 @@ DetachedTask write_chain_recording_records(fiber::http::TlsTransport *transport,
 // try_writev reports its whole sealed batch, backs off with WouldBlock while
 // that batch drains on its own, and every byte arrives in order.
 TEST(TlsStreamFdTest, TlsTransportTryWritevBacksOffWhileTheSealedBatchDrains) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         SigpipeGuard sigpipe_guard;
         TempFile cert("cert", kSelfSignedCertPem);
         TempFile key("key", kSelfSignedKeyPem);
@@ -1016,7 +1017,7 @@ TEST(TlsStreamFdTest, TlsTransportTryWritevBacksOffWhileTheSealedBatchDrains) {
 
         fiber::mem::IoBufChain chain;
         std::vector<std::size_t> sizes(64, 4096);
-        std::string expected = build_distinct_chain(pool, chain, sizes);
+        std::string expected = build_distinct_chain(chain, sizes);
 
         std::promise<fiber::common::IoResult<std::string>> server_promise;
         std::promise<fiber::common::IoResult<PollWriteStats>> client_promise;
@@ -1072,7 +1073,7 @@ std::vector<SSL_SESSION *> &stashed_sessions() {
     return stash;
 }
 
-int stash_new_session(SSL *, SSL_SESSION *sess) noexcept {
+int stash_new_session(SSL * /*unused*/, SSL_SESSION *sess) noexcept {
     stashed_sessions().push_back(sess);
     return 1; // the stash took ownership
 }
@@ -1093,7 +1094,7 @@ struct BsslSocketClient {
     // tls12_only pins the version; collect_tickets routes received tickets
     // into the stash above.
     static bool make(bool tls12_only, bool collect_tickets, std::unique_ptr<BsslSocketClient> &out) {
-        auto client = std::unique_ptr<BsslSocketClient>(new BsslSocketClient);
+        auto client = std::make_unique<BsslSocketClient>();
         client->ctx = SSL_CTX_new(TLS_client_method());
         if (client->ctx == nullptr) {
             return false;
@@ -1132,28 +1133,28 @@ struct BsslSocketClient {
     BsslSocketClient(const BsslSocketClient &) = delete;
     BsslSocketClient &operator=(const BsslSocketClient &) = delete;
 
-    void attach_fd(int fd) { SSL_set_bio(ssl, BIO_new_socket(fd, BIO_NOCLOSE), BIO_new_socket(fd, BIO_NOCLOSE)); }
+    void attach_fd(int fd) const { SSL_set_bio(ssl, BIO_new_socket(fd, BIO_NOCLOSE), BIO_new_socket(fd, BIO_NOCLOSE)); }
 
-    bool handshake() { return SSL_do_handshake(ssl) == 1; }
+    bool handshake() const { return SSL_do_handshake(ssl) == 1; }
 
-    bool round_trip(const char *request, const char *expect_reply) {
-        const int request_len = static_cast<int>(std::strlen(request));
-        if (SSL_write(ssl, request, request_len) != request_len) {
+    bool round_trip(std::string_view request, std::string_view expect_reply) const {
+        const int request_len = static_cast<int>(request.size());
+        if (SSL_write(ssl, request.data(), request_len) != request_len) {
             return false;
         }
         char buffer[64] = {};
         const int got = SSL_read(ssl, buffer, sizeof(buffer) - 1);
-        if (got != static_cast<int>(std::strlen(expect_reply))) {
+        if (std::cmp_not_equal(got, expect_reply.size())) {
             return false;
         }
-        return std::memcmp(buffer, expect_reply, static_cast<std::size_t>(got)) == 0;
+        return std::memcmp(buffer, expect_reply.data(), static_cast<std::size_t>(got)) == 0;
     }
 
     // The 1.3 NST trails the handshake flight; process pending records (the
     // read path digests handshake messages and fires the stash callback)
     // until the stash holds a session or the wire stays quiet past the
     // deadline. Returns true when at least one session was stashed.
-    bool slurp_tickets(int fd, int attempts, int per_attempt_ms) {
+    bool slurp_tickets(int fd, int attempts, int per_attempt_ms) const {
         for (int i = 0; i < attempts && stashed_sessions().empty(); ++i) {
             pollfd watched{.fd = fd, .events = POLLIN, .revents = 0};
             if (::poll(&watched, 1, per_attempt_ms) == 1 && (watched.revents & POLLIN) != 0) {
@@ -1187,7 +1188,7 @@ std::string run_server_against_bssl_client(fiber::event::EventLoopGroup &group, 
     if (!client.handshake()) {
         return "client-handshake-failed";
     }
-    if (!client.round_trip(expect_request.data(), "pong")) {
+    if (!client.round_trip(expect_request, "pong")) {
         return "client-round-trip-failed";
     }
     if (await_ticket && !client.slurp_tickets(client_fd, 20, 100)) {
@@ -1302,7 +1303,7 @@ TEST(TlsStreamFdTest, BoringsslClientResumesAcrossTicketServiceRebuild) {
         EXPECT_EQ(run_server_against_bssl_client(group, fds[0], param, *collector, fds[1], "ping", true), "ping");
         // The 1.2 ticket rides the flight (consumed by the handshake); the
         // 1.3 NST may trail it — the helper slurped either way.
-        ASSERT_EQ(stashed_sessions().size(), 1u) << "exactly one ticket minted";
+        ASSERT_EQ(stashed_sessions().size(), 1U) << "exactly one ticket minted";
         SSL_SESSION *banked = stashed_sessions().back();
 
         // Phase 2: a brand-new service from the same material, a brand-new
@@ -1365,7 +1366,7 @@ struct RotatingSelector {
 };
 
 fiber::common::IoErr select_and_retire(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
-                                       const fiber::tls::TlsClientHelloView &) noexcept {
+                                       const fiber::tls::TlsClientHelloView & /*unused*/) noexcept {
     auto *selector = static_cast<RotatingSelector *>(ctx);
     selector->selected.store(true, std::memory_order_release);
     switch (selector->mode) {
@@ -1481,7 +1482,7 @@ TEST(TlsStreamFdTest, RetiredDynamicCredentialSurvivesHelloRetryRequest) {
         ASSERT_TRUE(client_send_first_hello_and_await_hrr(*client, fds[1]));
         EXPECT_TRUE(selector.selected.load(std::memory_order_acquire));
         EXPECT_TRUE(selector.published.empty()) << "the publisher retired its handle";
-        EXPECT_EQ(probe.use_count(), 2u) << "the parked handshake must retain the identity";
+        EXPECT_EQ(probe.use_count(), 2U) << "the parked handshake must retain the identity";
 
         ASSERT_TRUE(client_finish_handshake(*client, fds[1]));
         EXPECT_EQ(SSL_used_hello_retry_request(client->ssl), 1);
@@ -1490,7 +1491,7 @@ TEST(TlsStreamFdTest, RetiredDynamicCredentialSurvivesHelloRetryRequest) {
         auto served = server_future.get();
         ASSERT_TRUE(served);
         EXPECT_EQ(*served, "ping");
-        EXPECT_EQ(probe.use_count(), 1u) << "released once the handshake ended";
+        EXPECT_EQ(probe.use_count(), 1U) << "released once the handshake ended";
 
         (void) SSL_shutdown(client->ssl);
         ::close(fds[1]);
@@ -1537,7 +1538,7 @@ TEST(TlsStreamFdTest, CanceledHandshakeReleasesRetainedCredential) {
         // The server is parked awaiting ClientHello #2 with the identity
         // retained; closing it cancels the handshake mid-flight.
         ASSERT_TRUE(client_send_first_hello_and_await_hrr(*client, fds[1]));
-        EXPECT_EQ(probe.use_count(), 2u);
+        EXPECT_EQ(probe.use_count(), 2U);
 
         std::promise<void> close_promise;
         auto close_future = close_promise.get_future();
@@ -1545,7 +1546,7 @@ TEST(TlsStreamFdTest, CanceledHandshakeReleasesRetainedCredential) {
         ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
         ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
         EXPECT_EQ(server_future.get(), fiber::common::IoErr::Canceled);
-        EXPECT_EQ(probe.use_count(), 1u);
+        EXPECT_EQ(probe.use_count(), 1U);
 
         ::close(fds[1]);
         group.stop();
@@ -1589,7 +1590,7 @@ TEST(TlsStreamFdTest, FailedConfigureCallbackReleasesRetainedCredential) {
         ASSERT_EQ(server_future.wait_for(5s), std::future_status::ready);
         EXPECT_EQ(server_future.get(), fiber::common::IoErr::Permission);
         EXPECT_TRUE(selector.selected.load(std::memory_order_acquire));
-        EXPECT_EQ(probe.use_count(), 1u);
+        EXPECT_EQ(probe.use_count(), 1U);
 
         ::close(fds[1]);
         std::promise<void> close_done;
@@ -1642,8 +1643,8 @@ TEST(TlsStreamFdTest, ReplacingOrClearingCredentialReleasesEarlierOwner) {
         EXPECT_TRUE(selector.callback_ok);
         EXPECT_TRUE(selector.released_by_borrowed_replace);
         EXPECT_TRUE(selector.released_by_clear);
-        EXPECT_EQ(probe_first.use_count(), 1u);
-        EXPECT_EQ(probe_second.use_count(), 1u);
+        EXPECT_EQ(probe_first.use_count(), 1U);
+        EXPECT_EQ(probe_second.use_count(), 1U);
 
         group.stop();
         group.join();
@@ -1668,7 +1669,7 @@ enum class WirePath {
 
 void relay_bytes(int src, int dst, WirePath path) {
     static constexpr std::size_t kPieces[] = {1, 4, 2, 7, 3, 5, 6, 700};
-    std::vector<std::uint8_t> buf(64 * 1024);
+    std::vector<std::uint8_t> buf(std::size_t{64} * 1024);
     std::size_t next_piece = 0;
     for (;;) {
         if (path == WirePath::Gathered) {
@@ -1679,7 +1680,7 @@ void relay_bytes(int src, int dst, WirePath path) {
             break;
         }
         std::size_t off = 0;
-        while (off < static_cast<std::size_t>(got)) {
+        while (std::cmp_less(off, got)) {
             std::size_t len = static_cast<std::size_t>(got) - off;
             if (path == WirePath::TinyPieces) {
                 len = std::min(len, kPieces[next_piece++ % std::size(kPieces)]);
@@ -1732,7 +1733,7 @@ struct WireRelay {
 std::string byte_pattern(std::size_t len, std::uint8_t seed) {
     std::string out(len, '\0');
     for (std::size_t i = 0; i < len; ++i) {
-        out[i] = static_cast<char>(seed + i * 31 + (i >> 8));
+        out[i] = static_cast<char>(seed + (i * 31) + (i >> 8));
     }
     return out;
 }
@@ -1938,7 +1939,7 @@ struct PendingPlaintextOutcome {
     std::string received;
 };
 
-void ignore_ready(void *, fiber::common::IoErr) noexcept {}
+void ignore_ready(void * /*unused*/, fiber::common::IoErr /*unused*/) noexcept {}
 
 fiber::async::Task<fiber::common::IoErr> read_append(fiber::net::detail::TlsStreamFd &stream, std::size_t size,
                                                      std::string &out) {
@@ -2199,14 +2200,14 @@ fiber::async::Task<fiber::common::IoErr> read_exact(fiber::net::detail::TlsStrea
     co_return fiber::common::IoErr::None;
 }
 
-constexpr std::size_t kDrainBatch = 64 * 1024; // TlsStreamFd's write batch, sealed from 4 KiB nodes
+constexpr std::size_t kDrainBatch =
+        static_cast<const std::size_t>(64 * 1024); // TlsStreamFd's write batch, sealed from 4 KiB nodes
 
 // The client's first write: one batch out of 64 x 4 KiB, which the tiny send
 // buffer cannot take whole.
 fiber::common::IoResult<std::size_t> write_blocked_batch(fiber::net::detail::TlsStreamFd &stream,
                                                          fiber::mem::IoBufChain &chain, std::string &expected) {
-    expected = build_distinct_chain(fiber::event::EventLoop::current().io_buf_node_pool(), chain,
-                                    std::vector<std::size_t>(64, 4096));
+    expected = build_distinct_chain(chain, std::vector<std::size_t>(64, 4096));
     return stream.try_write(chain);
 }
 
@@ -2252,6 +2253,7 @@ using TlsStreamFdDrainDeathTest = TlsStreamFdDrainTest;
 // only part of it; until the rest is out every write backs off, and it gets
 // out with no further call.
 TEST_F(TlsStreamFdDrainTest, TryWriteAcceptsTheSealedBatchAndDrainsItAlone) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::common::IoResult<std::size_t> first = std::unexpected(fiber::common::IoErr::Unknown);
     std::size_t left_in_chain = 0;
     bool ready = true;
@@ -2286,18 +2288,20 @@ TEST_F(TlsStreamFdDrainTest, TryWriteAcceptsTheSealedBatchAndDrainsItAlone) {
     ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
     ASSERT_TRUE(first);
     EXPECT_EQ(*first, kDrainBatch);
-    EXPECT_EQ(left_in_chain, 64U * 4096U - kDrainBatch);
+    EXPECT_EQ(left_in_chain, (std::size_t{64} * 4096U) - kDrainBatch);
     EXPECT_FALSE(ready);
     EXPECT_EQ(same_chain, fiber::common::IoErr::WouldBlock);
     EXPECT_EQ(other_chain, fiber::common::IoErr::WouldBlock);
     EXPECT_TRUE(drained);
     EXPECT_EQ(read_err, fiber::common::IoErr::None);
     EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // The TLS-level write subscriber is notified once, after the drain: never
 // inline from the setter, never while sealed output is still pending.
 TEST_F(TlsStreamFdDrainTest, WriteCallbackFiresOnlyOnceTheDrainIsDone) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     WriteReadyProbe probe;
     fiber::common::IoErr subscribed = fiber::common::IoErr::Unknown;
     int calls_after_subscribe = -1;
@@ -2331,11 +2335,13 @@ TEST_F(TlsStreamFdDrainTest, WriteCallbackFiresOnlyOnceTheDrainIsDone) {
     EXPECT_EQ(probe.err, fiber::common::IoErr::None);
     EXPECT_TRUE(probe.ready);
     EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // close() mid-drain drops the sealed output and completes the TLS-level
 // write subscriber once, with Canceled.
 TEST_F(TlsStreamFdDrainTest, CloseDuringTheDrainCancelsTheWriteSubscriber) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     WriteReadyProbe probe;
     bool ready_before = true;
     std::string expected;
@@ -2358,11 +2364,13 @@ TEST_F(TlsStreamFdDrainTest, CloseDuringTheDrainCancelsTheWriteSubscriber) {
     EXPECT_FALSE(ready_before);
     EXPECT_EQ(probe.calls, 1);
     EXPECT_EQ(probe.err, fiber::common::IoErr::Canceled);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // writev returns each batch only once it is on the wire, so a writev user
 // never leaves sealed output behind.
 TEST_F(TlsStreamFdDrainTest, WritevReturnsOnlyOnceItsBatchLeft) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     std::vector<std::size_t> returns;
     bool blocked_after_any = false;
     fiber::common::IoErr write_err = fiber::common::IoErr::None;
@@ -2371,8 +2379,7 @@ TEST_F(TlsStreamFdDrainTest, WritevReturnsOnlyOnceItsBatchLeft) {
 
     const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
         fiber::mem::IoBufChain chain;
-        expected = build_distinct_chain(fiber::event::EventLoop::current().io_buf_node_pool(), chain,
-                                        std::vector<std::size_t>(64, 4096));
+        expected = build_distinct_chain(chain, std::vector<std::size_t>(64, 4096));
         while (chain.readable_bytes() > 0) {
             auto written = co_await stream.writev(chain, 5s);
             if (!written) {
@@ -2385,7 +2392,7 @@ TEST_F(TlsStreamFdDrainTest, WritevReturnsOnlyOnceItsBatchLeft) {
     };
     const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
         co_await fiber::async::sleep(20ms);
-        (void) co_await read_exact(stream, 64 * 4096, received);
+        (void) co_await read_exact(stream, static_cast<std::size_t>(64 * 4096), received);
     };
     DrainPairRun run;
     run_drain_pair(*tls_pair_, server, client, run);
@@ -2396,12 +2403,14 @@ TEST_F(TlsStreamFdDrainTest, WritevReturnsOnlyOnceItsBatchLeft) {
     EXPECT_EQ(returns, std::vector<std::size_t>(4, kDrainBatch));
     EXPECT_FALSE(blocked_after_any);
     EXPECT_TRUE(received == expected);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // wait_writable waits for the drain, not the socket: it times out while the
 // peer reads nothing, an abandoned wait (timeout_for) frees the slot, and it
 // completes once the drain is done.
 TEST_F(TlsStreamFdDrainTest, WaitWritableWaitsForTheDrainAndUnsubscribesWhenAbandoned) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::common::IoErr own_timeout = fiber::common::IoErr::None;
     fiber::common::IoErr wrapped_timeout = fiber::common::IoErr::None;
     fiber::common::IoErr resubscribed = fiber::common::IoErr::Unknown;
@@ -2442,11 +2451,13 @@ TEST_F(TlsStreamFdDrainTest, WaitWritableWaitsForTheDrainAndUnsubscribesWhenAban
     EXPECT_EQ(drained_wait, fiber::common::IoErr::None);
     EXPECT_TRUE(ready_after);
     EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // A graceful shutdown queues close_notify behind the batch still draining:
 // the peer reads the whole batch, then EOF.
 TEST_F(TlsStreamFdDrainTest, PollShutdownSendsCloseNotifyBehindTheDrain) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::common::IoErr shutdown_err = fiber::common::IoErr::Unknown;
     bool blocked_on_write = false;
     bool eof = false;
@@ -2499,11 +2510,13 @@ TEST_F(TlsStreamFdDrainTest, PollShutdownSendsCloseNotifyBehindTheDrain) {
     EXPECT_EQ(read_err, fiber::common::IoErr::None);
     EXPECT_TRUE(eof);
     EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // Handover is for writev users, whose output is always out by then: a stream
 // still draining must not move loops.
 TEST_F(TlsStreamFdDrainDeathTest, HandoverWithUndrainedOutputAsserts) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const StreamBody client = [](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
         fiber::mem::IoBufChain chain;
         std::string expected;
@@ -2518,11 +2531,13 @@ TEST_F(TlsStreamFdDrainDeathTest, HandoverWithUndrainedOutputAsserts) {
                 run_drain_pair(*tls_pair_, server, client, run);
             },
             "FIBER_ASSERT failed: out_pending_");
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // A shutdown's own flush can finish the drain with the socket left Ready, so
 // no edge would ever reach a standing write subscriber: the two are exclusive.
 TEST_F(TlsStreamFdDrainDeathTest, PollShutdownWithWriteSubscriberAsserts) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const StreamBody client = [](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
         fiber::mem::IoBufChain chain;
         std::string expected;
@@ -2541,6 +2556,7 @@ TEST_F(TlsStreamFdDrainDeathTest, PollShutdownWithWriteSubscriberAsserts) {
                 run_drain_pair(*tls_pair_, server, client, run);
             },
             "FIBER_ASSERT failed: write_callback_ == nullptr");
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // =====================================================================
@@ -2553,7 +2569,8 @@ using TlsStreamFdReadTest = TlsStreamFdDrainTest;
 // not one record per call: the client's three full records arrive in a
 // single write, behind a server already parked on its read.
 TEST_F(TlsStreamFdReadTest, ReadDeliversSeveralRecordsInOneCall) {
-    constexpr std::size_t kRecordPlaintext = 16 * 1024;
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
+    constexpr std::size_t kRecordPlaintext = static_cast<const std::size_t>(16 * 1024);
     const std::string payload = byte_pattern(3 * kRecordPlaintext, 13);
     bool server_reading = false;
     fiber::common::IoErr write_err = fiber::common::IoErr::Unknown;
@@ -2563,7 +2580,7 @@ TEST_F(TlsStreamFdReadTest, ReadDeliversSeveralRecordsInOneCall) {
     const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
         server_reading = true;
         fiber::mem::IoBufChain chain;
-        first_read = co_await stream.readv(64 * 1024, chain, 5s);
+        first_read = co_await stream.readv(static_cast<std::size_t>(64 * 1024), chain, 5s);
         for (const fiber::mem::IoBufNode *node = chain.front_node(); node != nullptr; node = node->next) {
             received.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
         }
@@ -2588,6 +2605,7 @@ TEST_F(TlsStreamFdReadTest, ReadDeliversSeveralRecordsInOneCall) {
     ASSERT_TRUE(first_read) << static_cast<int>(first_read.error());
     EXPECT_EQ(*first_read, payload.size());
     EXPECT_TRUE(received == payload);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 
@@ -2599,7 +2617,7 @@ TEST_F(TlsStreamFdReadTest, ReadDeliversSeveralRecordsInOneCall) {
 // and reports what each try_writev returned; the peer must read the bytes
 // back unchanged. A sealed batch is only ever reported whole, so the
 // sequence of returns is deterministic whatever WouldBlock does.
-void write_chain_through_tls(::fiber::mem::IoBufNodePool &pool, const std::vector<std::size_t> &sizes,
+void write_chain_through_tls(::fiber::mem::IoBufNodePool & /*pool*/, const std::vector<std::size_t> &sizes,
                              PollWriteStats &stats) {
     SigpipeGuard sigpipe_guard;
     TempFile cert("cert_batch", kSelfSignedCertPem);
@@ -2624,7 +2642,7 @@ void write_chain_through_tls(::fiber::mem::IoBufNodePool &pool, const std::vecto
     auto *client_transport = client_transport_result->release();
 
     fiber::mem::IoBufChain chain;
-    const std::string expected = build_distinct_chain(pool, chain, sizes);
+    const std::string expected = build_distinct_chain(chain, sizes);
 
     std::promise<fiber::common::IoResult<std::string>> server_promise;
     std::promise<fiber::common::IoResult<PollWriteStats>> client_promise;
@@ -2698,7 +2716,7 @@ TEST(TlsStreamFdTest, TlsTransportWritevBatchesALargeNode) {
 // Forwards src → dst unchanged and logs every TLS record crossing it as
 // (outer content type, record length), parsing headers across reads.
 void relay_logging_records(int src, int dst, std::vector<std::pair<std::uint8_t, std::size_t>> *records) {
-    std::vector<std::uint8_t> buf(64 * 1024);
+    std::vector<std::uint8_t> buf(std::size_t{64} * 1024);
     std::vector<std::uint8_t> pending;
     for (;;) {
         const ssize_t got = ::read(src, buf.data(), buf.size());
@@ -2706,7 +2724,7 @@ void relay_logging_records(int src, int dst, std::vector<std::pair<std::uint8_t,
             break;
         }
         std::size_t off = 0;
-        while (off < static_cast<std::size_t>(got)) {
+        while (std::cmp_less(off, got)) {
             const ssize_t put = ::write(dst, buf.data() + off, static_cast<std::size_t>(got) - off);
             if (put <= 0) {
                 return;
@@ -2734,7 +2752,7 @@ void relay_logging_records(int src, int dst, std::vector<std::pair<std::uint8_t,
 // nodes instead of becoming a short record of its own. One write batch
 // covers the first four records.
 TEST(TlsStreamFdTest, TlsTransportWritevFillsRecordsAcrossSmallAndLargeNodes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         SigpipeGuard sigpipe_guard;
         TempFile cert("cert_fill", kSelfSignedCertPem);
         TempFile key("key_fill", kSelfSignedKeyPem);
@@ -2772,7 +2790,7 @@ TEST(TlsStreamFdTest, TlsTransportWritevFillsRecordsAcrossSmallAndLargeNodes) {
 
         fiber::mem::IoBufChain chain;
         const std::vector<std::size_t> sizes = {9, 16384, 9, 16384, 9, 16384, 20000, 9, 300};
-        const std::string expected = build_distinct_chain(pool, chain, sizes);
+        const std::string expected = build_distinct_chain(chain, sizes);
 
         std::promise<fiber::common::IoResult<std::string>> server_promise;
         std::promise<fiber::common::IoResult<std::vector<std::size_t>>> client_promise;
@@ -2818,10 +2836,10 @@ TEST(TlsStreamFdTest, TlsTransportWritevFillsRecordsAcrossSmallAndLargeNodes) {
                 sealed.push_back(len - 17);
             }
         }
-        ASSERT_GE(sealed.size(), 7u);
+        ASSERT_GE(sealed.size(), 7U);
         const std::vector<std::size_t> app(sealed.begin() + 1, sealed.end() - 1);
         EXPECT_EQ(app, (std::vector<std::size_t>{16384, 16384, 16384, 16384, 3643 + 9 + 300}));
-        EXPECT_EQ(sealed.back(), 2u); // close_notify: level + description
+        EXPECT_EQ(sealed.back(), 2U); // close_notify: level + description
     });
 }
 

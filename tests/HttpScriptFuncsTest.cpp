@@ -137,7 +137,7 @@ std::shared_ptr<fiber::script::Script> compile_http_script(std::string_view sour
     return std::make_shared<fiber::script::Script>(std::move(*compiled));
 }
 
-fiber::http::HttpHandler make_script_handler(std::shared_ptr<fiber::script::Script> script) {
+fiber::http::HttpHandler make_script_handler(const std::shared_ptr<fiber::script::Script> &script) {
     return [script](fiber::http::HttpExchange &exchange) -> Task<void> {
         fiber::script::GcHeap heap;
         fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
@@ -317,7 +317,7 @@ CompiledRouteScript compile_route_script(std::string_view source, const std::vec
 
 // Route matcher context that collects path vars (mirrors lite_nginx LocationMatchContext).
 struct RouteMatchCollector {
-    bool matched(std::uint32_t, const std::uint32_t &) { return true; }
+    bool matched(std::uint32_t /*unused*/, const std::uint32_t & /*unused*/) { return true; }
     void add_path_var(std::string_view name, std::string_view value) { vars.emplace_back(name, value); }
     void pop_path_var() {
         if (!vars.empty()) {
@@ -328,13 +328,13 @@ struct RouteMatchCollector {
 };
 
 struct TestRouteVarDefiner {
-    void add_path_var_definer(int &, std::string_view, std::uint32_t) {}
-    std::uint32_t on_route_mount(std::uint32_t, std::string_view, int &) { return 0; }
+    void add_path_var_definer(int & /*unused*/, std::string_view /*unused*/, std::uint32_t /*unused*/) {}
+    std::uint32_t on_route_mount(std::uint32_t /*unused*/, std::string_view /*unused*/, int & /*unused*/) { return 0; }
 };
 
 // Builds a handler that matches the request path against `pattern` (collecting path vars)
 // and feeds the captures to the script's ScriptExchangeCtx.
-fiber::http::HttpHandler make_route_script_handler(CompiledRouteScript compiled, std::string_view pattern) {
+fiber::http::HttpHandler make_route_script_handler(const CompiledRouteScript &compiled, std::string_view pattern) {
     auto matcher = std::make_shared<fiber::util::RoutePathMatcher<std::uint32_t>>();
     TestRouteVarDefiner definer;
     fiber::util::RoutePathMatcher<std::uint32_t>::Builder<int, TestRouteVarDefiner> builder(definer);
@@ -424,7 +424,7 @@ TEST(HttpScriptFuncsTest, ReadJsonBodyAndEcho) {
     req.method = fiber::http::HttpMethod::Post;
     req.target = "/echo";
     req.headers = {{"content-type", "application/json"}};
-    req.body = std::string("{\"name\":\"fiber\",\"n\":42}");
+    req.body = std::string(R"({"name":"fiber","n":42})");
     ClientResult result = s.request(std::move(req));
 
     EXPECT_EQ(result.err, fiber::common::IoErr::None) << "err=" << static_cast<int>(result.err);
@@ -475,7 +475,7 @@ TEST(HttpScriptFuncsTest, SetHeadersAndAddCookieAndSend) {
         }
     }
     EXPECT_EQ(x_from, "script");
-    ASSERT_EQ(x_multi.size(), 2u);
+    ASSERT_EQ(x_multi.size(), 2U);
     EXPECT_EQ(x_multi[0], "a");
     EXPECT_EQ(x_multi[1], "b");
     EXPECT_TRUE(contains(set_cookie, "sid=v")) << set_cookie;
@@ -579,7 +579,7 @@ TEST(RouteVarTest, ConnectionFieldsDescribeDownstreamConnection) {
                                          "version: $conn.http_version, scheme: $conn.scheme, tls: $conn.tls});",
                                          {});
     ASSERT_TRUE(compiled.ok) << compiled.error;
-    s.start(make_route_script_handler(std::move(compiled), "/*"));
+    s.start(make_route_script_handler(compiled, "/*"));
 
     ClientRequest req;
     req.method = fiber::http::HttpMethod::Get;
@@ -673,7 +673,7 @@ TEST(RouteVarTest, RejectsExecutionAgainstAnotherConstantPackage) {
     // Keep the script's userdata owner alive while preparing slots from another package.
     auto userdata_package = compiled.const_package;
     compiled.const_package = std::move(other.const_package);
-    s.start(make_route_script_handler(std::move(compiled), "/*"));
+    s.start(make_route_script_handler(compiled, "/*"));
 
     ClientRequest req;
     req.method = fiber::http::HttpMethod::Get;
@@ -691,7 +691,7 @@ TEST(RouteVarTest, PathVarResolvesCapturedValue) {
             "resp.sendJson(200, {id: $path.id, uri: $req.uri, method: $req.method, path: $req.path, q: $req.query});",
             {"id"});
     ASSERT_TRUE(compiled.ok) << compiled.error;
-    s.start(make_route_script_handler(std::move(compiled), "/users/:id"));
+    s.start(make_route_script_handler(compiled, "/users/:id"));
 
     ClientRequest req;
     req.method = fiber::http::HttpMethod::Get;
@@ -712,7 +712,7 @@ TEST(RouteVarTest, QueryHeaderCookieVars) {
     auto compiled = compile_route_script(
             "resp.sendJson(200, {q: $query.a, h: $header.x_forwarded_for, c: $cookie.session});", {});
     ASSERT_TRUE(compiled.ok) << compiled.error;
-    s.start(make_route_script_handler(std::move(compiled), "/*"));
+    s.start(make_route_script_handler(compiled, "/*"));
 
     ClientRequest req;
     req.method = fiber::http::HttpMethod::Get;
@@ -736,7 +736,7 @@ TEST(RouteVarTest, AbsentVarsResolveToNull) {
     auto compiled = compile_route_script(
             "resp.sendJson(200, {p: $path.id, q: $query.a, h: $header.x_forwarded_for, c: $cookie.session});", {"id"});
     ASSERT_TRUE(compiled.ok) << compiled.error;
-    s.start(make_route_script_handler(std::move(compiled), "/*"));
+    s.start(make_route_script_handler(compiled, "/*"));
 
     ClientRequest req;
     req.method = fiber::http::HttpMethod::Get;

@@ -51,7 +51,7 @@ struct AcceptResult {
         return fd;
     }
     [[nodiscard]] const SocketAddress &peer() const noexcept { return peer_; }
-    SocketAddress take_peer() { return peer_; }
+    SocketAddress take_peer() const { return peer_; }
 
 private:
     void close_fd() noexcept {

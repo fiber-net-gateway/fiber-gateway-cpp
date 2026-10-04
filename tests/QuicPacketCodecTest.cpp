@@ -104,8 +104,9 @@ TEST(QuicPacketCodecTest, EncodesAndDecodesProtectedInitialPacket) {
     spec.frame_count = 1;
     spec.min_packet_len = fiber::quic::kMinInitialDatagramSize;
 
-    auto encoded = fiber::quic::quic_encode_packet(server, spec, {encode_plaintext.data(), encode_plaintext.size()},
-                                                   datagram.data(), datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(
+            server, spec, {.data = encode_plaintext.data(), .capacity = encode_plaintext.size()}, datagram.data(),
+            datagram.size());
 
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
     EXPECT_EQ(encoded->packet_number, 0U);
@@ -147,8 +148,9 @@ TEST(QuicPacketCodecTest, EncodesInitialPacketAboveFourKilobytes) {
     spec.frame_count = 1;
     spec.min_packet_len = 4800;
 
-    auto encoded = fiber::quic::quic_encode_packet(server, spec, {encode_plaintext.data(), encode_plaintext.size()},
-                                                   datagram.data(), datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(
+            server, spec, {.data = encode_plaintext.data(), .capacity = encode_plaintext.size()}, datagram.data(),
+            datagram.size());
 
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
     EXPECT_GE(encoded->packet_len, 4800U);
@@ -187,7 +189,7 @@ TEST(QuicPacketCodecTest, CreatesAndParsesRetryPacket) {
     spec.original_dcid = cid_from_hex("8394c8f03e515708");
     spec.dcid = cid_from_hex("01020304");
     spec.scid = cid_from_hex("11223344");
-    spec.token = {token.data(), token.size()};
+    spec.token = {.data = token.data(), .len = token.size()};
 
     std::array<std::uint8_t, 128> buf{};
     fiber::quic::QuicWriteCursor out(buf.data(), buf.size());
@@ -255,8 +257,9 @@ TEST_P(QuicPacketCodecSuiteTest, EncodesAndDecodesApplicationPacket) {
     spec.frames = &frame;
     spec.frame_count = 1;
 
-    auto encoded = fiber::quic::quic_encode_packet(server, spec, {encode_plaintext.data(), encode_plaintext.size()},
-                                                   datagram.data(), datagram.size());
+    auto encoded = fiber::quic::quic_encode_packet(
+            server, spec, {.data = encode_plaintext.data(), .capacity = encode_plaintext.size()}, datagram.data(),
+            datagram.size());
     ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
 
     auto decoded = fiber::quic::quic_decode_packet(client, datagram.data(), encoded->packet_len,

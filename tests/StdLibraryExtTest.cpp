@@ -15,32 +15,35 @@ using fiber::script::JsValue;
 using fiber::script::Library;
 using fiber::script::std_lib::StdLibrary;
 
-AbiResult sync_func(void *, const Library::HostCallFrame &, Library::Arguments) noexcept {
+AbiResult sync_func(void * /*unused*/, const Library::HostCallFrame & /*unused*/,
+                    Library::Arguments /*unused*/) noexcept {
     return AbiResult::success(JsValue::make_undefined());
 }
 
-AsyncTask async_func(void *, const Library::HostCallFrame &, Library::Arguments) noexcept {
+AsyncTask async_func(void * /*unused*/, const Library::HostCallFrame & /*unused*/,
+                     Library::Arguments /*unused*/) noexcept {
     co_return AbiResult::success(JsValue::make_undefined());
 }
 
-AbiResult sync_constant(void *, const Library::HostCallFrame &) noexcept {
+AbiResult sync_constant(void * /*unused*/, const Library::HostCallFrame & /*unused*/) noexcept {
     return AbiResult::success(JsValue::make_undefined());
 }
 
-AsyncTask async_constant(void *, const Library::HostCallFrame &) noexcept {
+AsyncTask async_constant(void * /*unused*/, const Library::HostCallFrame & /*unused*/) noexcept {
     co_return AbiResult::success(JsValue::make_undefined());
 }
 
 class TestDirectiveDef final : public Library::DirectiveDef {
 public:
-    Library::FunctionMatchResult resolve_func(std::string_view, std::string_view, const Library::FunctionMatchRequest &,
-                                              const Library &) const override {
+    Library::FunctionMatchResult resolve_func(std::string_view /*directive*/, std::string_view /*function*/,
+                                              const Library::FunctionMatchRequest & /*request*/,
+                                              const Library & /*library*/) const override {
         return Library::FunctionMatchResult::not_found();
     }
 
-    Library::FunctionMatchResult resolve_async_func(std::string_view, std::string_view,
-                                                    const Library::FunctionMatchRequest &,
-                                                    const Library &) const override {
+    Library::FunctionMatchResult resolve_async_func(std::string_view /*directive*/, std::string_view /*function*/,
+                                                    const Library::FunctionMatchRequest & /*request*/,
+                                                    const Library & /*library*/) const override {
         return Library::FunctionMatchResult::not_found();
     }
 };
@@ -82,7 +85,8 @@ struct ExtContext {
     TestDirectiveDef directive;
 };
 
-Library::FunctionMatchResult resolve_func(void *ctx, std::string_view name, const Library::FunctionMatchRequest &) {
+Library::FunctionMatchResult resolve_func(void *ctx, std::string_view name,
+                                          const Library::FunctionMatchRequest & /*unused*/) {
     auto &ext = *static_cast<ExtContext *>(ctx);
     ++ext.function_calls;
     if (name != ext.function_name) {
@@ -99,7 +103,7 @@ Library::FunctionMatchResult resolve_func(void *ctx, std::string_view name, cons
 }
 
 Library::FunctionMatchResult resolve_async_func(void *ctx, std::string_view name,
-                                                const Library::FunctionMatchRequest &) {
+                                                const Library::FunctionMatchRequest & /*unused*/) {
     auto &ext = *static_cast<ExtContext *>(ctx);
     ++ext.async_function_calls;
     if (name != ext.async_function_name) {
@@ -122,8 +126,8 @@ const Library::HostCallable *resolve_async_constant(void *ctx, std::string_view 
                                                                                            : nullptr;
 }
 
-Library::DirectiveDef *resolve_directive_def(void *ctx, std::string_view type, std::string_view,
-                                             const std::vector<JsValue> &) {
+Library::DirectiveDef *resolve_directive_def(void *ctx, std::string_view type, std::string_view /*unused*/,
+                                             const std::vector<JsValue> & /*unused*/) {
     auto &ext = *static_cast<ExtContext *>(ctx);
     ++ext.directive_calls;
     return type == ext.directive_type ? &ext.directive : nullptr;

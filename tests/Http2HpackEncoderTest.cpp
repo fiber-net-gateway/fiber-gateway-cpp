@@ -57,7 +57,8 @@ struct FixedEncoderOutput {
     }
 
     static const Http2HpackEncoder::OutputOps &ops() noexcept {
-        static const Http2HpackEncoder::OutputOps kOps{&FixedEncoderOutput::acquire, &FixedEncoderOutput::commit};
+        static const Http2HpackEncoder::OutputOps kOps{.acquire = &FixedEncoderOutput::acquire,
+                                                       .commit = &FixedEncoderOutput::commit};
         return kOps;
     }
 
@@ -105,7 +106,7 @@ struct DecodeRecorder {
     }
 
     static IoErr on_value_raw(void *ctx, const std::uint8_t *data, std::size_t len,
-                              Http2HpackDecoder::FieldView *) noexcept {
+                              Http2HpackDecoder::FieldView * /*unused*/) noexcept {
         auto *self = static_cast<DecodeRecorder *>(ctx);
         self->fields.emplace_back(self->pending_name + "=" + std::string(reinterpret_cast<const char *>(data), len));
         self->pending_name.clear();
@@ -115,7 +116,7 @@ struct DecodeRecorder {
     }
 
     static IoErr on_value_huffman(void *ctx, const std::uint8_t *data, std::size_t len,
-                                  Http2HpackDecoder::FieldView *) noexcept {
+                                  Http2HpackDecoder::FieldView * /*unused*/) noexcept {
         auto *self = static_cast<DecodeRecorder *>(ctx);
         bool ok = false;
         const std::size_t decoded_len = fiber::http::hpack_huffman_decoded_length(data, len, &ok);
@@ -138,8 +139,12 @@ struct DecodeRecorder {
 
     static const Http2HpackDecoder::Ops &ops() noexcept {
         static const Http2HpackDecoder::Ops kOps{
-                &DecodeRecorder::on_indexed_field, &DecodeRecorder::on_indexed_name, &DecodeRecorder::on_name_raw,
-                &DecodeRecorder::on_name_huffman,  &DecodeRecorder::on_value_raw,    &DecodeRecorder::on_value_huffman,
+                .on_indexed_field = &DecodeRecorder::on_indexed_field,
+                .on_indexed_name = &DecodeRecorder::on_indexed_name,
+                .on_name_raw = &DecodeRecorder::on_name_raw,
+                .on_name_huffman = &DecodeRecorder::on_name_huffman,
+                .on_value_raw = &DecodeRecorder::on_value_raw,
+                .on_value_huffman = &DecodeRecorder::on_value_huffman,
         };
         return kOps;
     }
@@ -152,7 +157,7 @@ struct DecodeRecorder {
 };
 
 TEST(Http2HpackEncoderTest, EncodesStaticExactAsIndexedField) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http2HpackEncoder encoder({});
         Http2HpackEncoderIoBufWriter writer(encoder);
         ASSERT_EQ(writer.begin(), IoErr::None);
@@ -206,7 +211,7 @@ TEST(Http2HpackEncoderTest, EncodesCommonPseudoHeadersAsFixedStaticIndexes) {
 }
 
 TEST(Http2HpackEncoderTest, EncodesNonStaticStatusUsingIndexedName) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http2HpackEncoder encoder({.huffman_threshold = 1024});
         Http2HpackEncoderIoBufWriter writer(encoder);
         ASSERT_EQ(writer.begin(), IoErr::None);
@@ -228,7 +233,7 @@ TEST(Http2HpackEncoderTest, EncodesNonStaticStatusUsingIndexedName) {
 }
 
 TEST(Http2HpackEncoderTest, EncodesStaticNameMatchWithoutIndexingAndDecodesBack) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http2HpackEncoder encoder({.huffman_threshold = 1024});
         Http2HpackEncoderIoBufWriter writer(encoder);
         ASSERT_EQ(writer.begin(), IoErr::None);
@@ -254,7 +259,7 @@ TEST(Http2HpackEncoderTest, EncodesStaticNameMatchWithoutIndexingAndDecodesBack)
 }
 
 TEST(Http2HpackEncoderTest, RepeatedFieldsNeverUseDynamicIndexes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http2HpackEncoder encoder({.huffman_threshold = 1024});
 
         Http2HpackEncoderIoBufWriter first_writer(encoder);
@@ -280,7 +285,7 @@ TEST(Http2HpackEncoderTest, RepeatedFieldsNeverUseDynamicIndexes) {
 }
 
 TEST(Http2HpackEncoderTest, UsesRawOrHuffmanStringEncodingBasedOnThreshold) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http2HpackEncoder raw_encoder({.huffman_threshold = 1024});
         Http2HpackEncoderIoBufWriter raw_writer(raw_encoder);
         ASSERT_EQ(raw_writer.begin(), IoErr::None);
@@ -309,7 +314,7 @@ TEST(Http2HpackEncoderTest, UsesRawOrHuffmanStringEncodingBasedOnThreshold) {
 }
 
 TEST(Http2HpackEncoderTest, DoesNotHuffmanEncodeValueThatWouldExpand) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         // RFC 7541 §6.2: Huffman must only be used when it shortens the string.
         // "!!!" expands under Huffman (3 -> 4 bytes), so it must be sent raw even
         // though the threshold gate (here 1) would otherwise permit Huffman.
@@ -336,7 +341,7 @@ TEST(Http2HpackEncoderTest, DoesNotHuffmanEncodeValueThatWouldExpand) {
 }
 
 TEST(Http2HpackEncoderTest, UsesNewTailWhenContiguousHuffmanOutputDoesNotFit) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http2HpackEncoder encoder({.huffman_threshold = 1});
         Http2HpackEncoderIoBufWriter writer(encoder, 4);
         ASSERT_EQ(writer.begin(), IoErr::None);
@@ -360,7 +365,7 @@ TEST(Http2HpackEncoderTest, UsesNewTailWhenContiguousHuffmanOutputDoesNotFit) {
 }
 
 TEST(Http2HpackEncoderTest, EmitsTableSizeZeroOnEveryBlock) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http2HpackEncoder encoder({});
 
         Http2HpackEncoderIoBufWriter first_writer(encoder);
@@ -388,7 +393,7 @@ TEST(Http2HpackEncoderTest, EmitsTableSizeZeroOnEveryBlock) {
 }
 
 TEST(Http2HpackEncoderTest, CanceledBlockDoesNotAffectNextBlock) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http2HpackEncoder encoder({});
 
         Http2HpackEncoderIoBufWriter canceled_writer(encoder);

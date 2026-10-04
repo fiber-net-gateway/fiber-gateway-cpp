@@ -66,7 +66,7 @@ public:
         path_vars_.clear();
     }
 
-    bool matched(std::uint32_t, const int &handler) { return handler == matched_token_; }
+    bool matched(std::uint32_t /*unused*/, const int &handler) const { return handler == matched_token_; }
 
     void add_path_var(std::string_view name, std::string_view value) {
         path_vars_.emplace_back(std::string(name), std::string(value));
@@ -185,7 +185,7 @@ TEST(RoutePathMatcherTest, ReportsMaxPathVarCount) {
     tester.add_path("/a/:first/b/:second/*tail");
     tester.add_path("/x");
     tester.expect_match("/x", 1);
-    EXPECT_EQ(tester.max_path_var_count(), 3u);
+    EXPECT_EQ(tester.max_path_var_count(), 3U);
 }
 
 TEST(RoutePathMatcherTest, RejectsWildcardInMiddleSegment) {

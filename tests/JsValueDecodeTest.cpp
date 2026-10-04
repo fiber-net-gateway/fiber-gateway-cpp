@@ -65,7 +65,7 @@ const JsValue *object_get(GcHeap &heap, const GcObject *obj, const char *key) {
 }
 
 std::string to_utf8(const JsValue &value) {
-    auto *str = fiber::script::js_value_heap_ptr<const GcString>(value);
+    const auto *str = fiber::script::js_value_heap_ptr<const GcString>(value);
     EXPECT_NE(str, nullptr);
     std::string out;
     EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
@@ -106,7 +106,7 @@ TEST(JsValueDecodeTest, DecodeScalarValues) {
 
 TEST(JsValueDecodeTest, DecodesEscapedUnicodeString) {
     GcHeap heap;
-    ValueHandle out = decode_ok(heap, "\"line\\n\\u00E9 \\uD83D\\uDE00\"");
+    ValueHandle out = decode_ok(heap, R"("line\n\u00E9 \uD83D\uDE00")");
     ASSERT_NE(out, nullptr);
     ASSERT_EQ(fiber::script::js_value_type(*out), JsNodeType::String);
 
@@ -123,7 +123,7 @@ TEST(JsValueDecodeTest, DecodesEscapedUnicodeString) {
 
 TEST(JsValueDecodeTest, DecodesArrayAndObject) {
     GcHeap heap;
-    ValueHandle out = decode_ok(heap, "{\"items\":[1,false,{\"name\":\"fiber\"}],\"empty\":{}}");
+    ValueHandle out = decode_ok(heap, R"({"items":[1,false,{"name":"fiber"}],"empty":{}})");
     ASSERT_NE(out, nullptr);
     ASSERT_EQ(fiber::script::js_value_type(*out), JsNodeType::Object);
 
@@ -133,14 +133,14 @@ TEST(JsValueDecodeTest, DecodesArrayAndObject) {
     const JsValue *items_value = object_get(heap, obj, "items");
     ASSERT_NE(items_value, nullptr);
     ASSERT_EQ(fiber::script::js_value_type(*items_value), JsNodeType::Array);
-    auto *items = fiber::script::js_value_heap_ptr<const GcArray>(*items_value);
+    const auto *items = fiber::script::js_value_heap_ptr<const GcArray>(*items_value);
     ASSERT_NE(items, nullptr);
-    ASSERT_EQ(items->size, 3u);
+    ASSERT_EQ(items->size, 3U);
     EXPECT_EQ(fiber::script::js_value_int64(items->elems[0]), 1);
     EXPECT_FALSE(fiber::script::js_value_bool(items->elems[1]));
 
     ASSERT_EQ(fiber::script::js_value_type(items->elems[2]), JsNodeType::Object);
-    auto *nested = fiber::script::js_value_heap_ptr<const GcObject>(items->elems[2]);
+    const auto *nested = fiber::script::js_value_heap_ptr<const GcObject>(items->elems[2]);
     ASSERT_NE(nested, nullptr);
     const JsValue *name = object_get(heap, nested, "name");
     ASSERT_NE(name, nullptr);
@@ -149,14 +149,14 @@ TEST(JsValueDecodeTest, DecodesArrayAndObject) {
     const JsValue *empty = object_get(heap, obj, "empty");
     ASSERT_NE(empty, nullptr);
     ASSERT_EQ(fiber::script::js_value_type(*empty), JsNodeType::Object);
-    auto *empty_obj = fiber::script::js_value_heap_ptr<const GcObject>(*empty);
+    const auto *empty_obj = fiber::script::js_value_heap_ptr<const GcObject>(*empty);
     ASSERT_NE(empty_obj, nullptr);
-    EXPECT_EQ(empty_obj->size, 0u);
+    EXPECT_EQ(empty_obj->size, 0U);
 }
 
 TEST(JsValueDecodeTest, DuplicateKeysOverwriteInOriginalOrder) {
     GcHeap heap;
-    ValueHandle out = decode_ok(heap, "{\"a\":1,\"b\":2,\"a\":3}");
+    ValueHandle out = decode_ok(heap, R"({"a":1,"b":2,"a":3})");
     ASSERT_NE(out, nullptr);
 
     StringSink sink;
@@ -210,7 +210,7 @@ TEST(JsValueDecodeTest, SurvivesCollectionDuringBuild) {
     ValueHandle out = heap.global_value();
     ASSERT_NE(out, nullptr);
 
-    const char *json = "{\"items\":[{\"name\":\"a\",\"value\":1},{\"name\":\"b\",\"value\":2}],\"ok\":true}";
+    const char *json = R"({"items":[{"name":"a","value":1},{"name":"b","value":2}],"ok":true})";
     ParseError error;
     DecodeStatus status = fiber::script::json::decode_js_value(heap, json, std::strlen(json), out, &error);
     ASSERT_EQ(status, DecodeStatus::Complete) << (error.message ? error.message : "");
@@ -222,9 +222,9 @@ TEST(JsValueDecodeTest, SurvivesCollectionDuringBuild) {
     ASSERT_NE(obj, nullptr);
     const JsValue *items_value = object_get(heap, obj, "items");
     ASSERT_NE(items_value, nullptr);
-    auto *items = fiber::script::js_value_heap_ptr<const GcArray>(*items_value);
+    const auto *items = fiber::script::js_value_heap_ptr<const GcArray>(*items_value);
     ASSERT_NE(items, nullptr);
-    ASSERT_EQ(items->size, 2u);
+    ASSERT_EQ(items->size, 2U);
 
     const JsValue *ok = object_get(heap, obj, "ok");
     ASSERT_NE(ok, nullptr);
@@ -238,7 +238,7 @@ TEST(JsValueDecodeTest, DoesNotCollectDuringDecodeWhenThresholdCrossed) {
     ValueHandle out = heap.global_value();
     ASSERT_NE(out, nullptr);
 
-    const char *json = "{\"items\":[1,2,3],\"name\":\"hello\"}";
+    const char *json = R"({"items":[1,2,3],"name":"hello"})";
     ParseError error;
     DecodeStatus status = fiber::script::json::decode_js_value(heap, json, std::strlen(json), out, &error);
     ASSERT_EQ(status, DecodeStatus::Complete) << (error.message ? error.message : "");
@@ -248,7 +248,7 @@ TEST(JsValueDecodeTest, DoesNotCollectDuringDecodeWhenThresholdCrossed) {
     // NoGcScopes inside gc_make_*/gc_array_push/gc_object_set would each fire a
     // full collect as depth returned to 0). A collect raises threshold to
     // >= 1MiB; observing it still at 1 proves none ran during decode.
-    EXPECT_EQ(heap.threshold, 1u);
+    EXPECT_EQ(heap.threshold, 1U);
 
     // The decoded result stays rooted and intact through a post-decode collect.
     heap.collect();
@@ -257,7 +257,7 @@ TEST(JsValueDecodeTest, DoesNotCollectDuringDecodeWhenThresholdCrossed) {
 
 TEST(JsValueDecodeTest, RoundTripsThroughEncoder) {
     GcHeap heap;
-    ValueHandle out = decode_ok(heap, "{\"n\":1,\"arr\":[true,null,\"x\"]}");
+    ValueHandle out = decode_ok(heap, R"({"n":1,"arr":[true,null,"x"]})");
     ASSERT_NE(out, nullptr);
 
     StringSink sink;

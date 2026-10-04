@@ -57,7 +57,7 @@ struct BusyDefer {
 
 TEST(EventLoopTest, RepostingNextDeferDoesNotStarveTimerOrBlockInPoll) {
     fiber::event::EventLoop loop;
-    BusyDefer busy{loop};
+    BusyDefer busy{.loop = loop};
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         loop.post_next<BusyDefer, &BusyDefer::work, &BusyDefer::run>(busy);
         loop.post_at<BusyDefer, &BusyDefer::timer, &BusyDefer::finish>(loop.now() + std::chrono::milliseconds(2), busy);
@@ -97,7 +97,7 @@ struct TurnOrder {
     struct Item : fiber::event::Poller::Item {
         TurnOrder *owner = nullptr;
     } item;
-    static void on_event(fiber::event::Poller::Item *raw, int, fiber::event::IoEvent) {
+    static void on_event(fiber::event::Poller::Item *raw, int /*unused*/, fiber::event::IoEvent /*unused*/) {
         auto *self = static_cast<Item *>(raw)->owner;
         self->order.push_back(3);
         self->loop.post_local<TurnOrder, &TurnOrder::after_poll, &TurnOrder::on_after_poll>(*self);
@@ -108,7 +108,7 @@ struct TurnOrder {
 
 TEST(EventLoopTest, NextTurnDeferRunsAfterPollBehindLocalWork) {
     fiber::event::EventLoop loop;
-    TurnOrder context{loop};
+    TurnOrder context{.loop = loop};
     context.item.owner = &context;
     context.item.callback = &TurnOrder::on_event;
     context.fd = ::eventfd(1, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -131,7 +131,7 @@ struct DeleteEventPeer {
     fiber::event::EventLoop &loop;
     Item *items[2]{};
     int calls = 0;
-    static void on_event(fiber::event::Poller::Item *raw, int, fiber::event::IoEvent) {
+    static void on_event(fiber::event::Poller::Item *raw, int /*unused*/, fiber::event::IoEvent /*unused*/) {
         auto *self = static_cast<Item *>(raw)->owner;
         ++self->calls;
         for (auto *&item: self->items) {
@@ -147,7 +147,7 @@ struct DeleteEventPeer {
 
 TEST(EventLoopTest, CallbackCanDestroyAnotherItemInSameKernelBatch) {
     fiber::event::EventLoop loop;
-    DeleteEventPeer context{loop};
+    DeleteEventPeer context{.loop = loop};
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         for (auto *&item: context.items) {
             item = new DeleteEventPeer::Item;
@@ -169,7 +169,7 @@ struct ObservePollTime : fiber::event::Poller::Item {
     std::chrono::steady_clock::time_point signaled_at{};
     std::uint64_t turn_before_wait = 0;
     bool called = false;
-    static void on_event(fiber::event::Poller::Item *raw, int, fiber::event::IoEvent) noexcept {
+    static void on_event(fiber::event::Poller::Item *raw, int /*unused*/, fiber::event::IoEvent /*unused*/) noexcept {
         auto *self = static_cast<ObservePollTime *>(raw);
         self->called = true;
         EXPECT_GE(self->loop->now(), self->signaled_at);

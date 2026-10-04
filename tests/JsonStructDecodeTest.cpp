@@ -106,6 +106,7 @@ ParseStatus parse_document(std::string_view input, BufPool &pool, T &out, JsonPa
 static_assert(fiber::json::struct_field_count<json_struct_test::Config> == 8);
 
 TEST(JsonStructDecodeTest, ParsesRegisteredFieldsRecursivelyAndPreservesWirePolicies) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     constexpr std::string_view Input =
             R"({"name":"first","name":null,"limit":7,"enabled":true,"items":[{"value":1},{}],)"
             R"("flags":{"fast":true},"module":"config","success":false,"future":{"nested":[1]}})";
@@ -120,13 +121,14 @@ TEST(JsonStructDecodeTest, ParsesRegisteredFieldsRecursivelyAndPreservesWirePoli
     ASSERT_TRUE(value.limit.has_value());
     EXPECT_EQ(*value.limit, 7);
     EXPECT_TRUE(value.enabled);
-    ASSERT_EQ(value.items.size(), 2u);
+    ASSERT_EQ(value.items.size(), 2U);
     ASSERT_TRUE(value.items[0].value.is_present());
     EXPECT_EQ(value.items[0].value.value(), 1);
     EXPECT_TRUE(value.items[1].value.is_absent());
-    ASSERT_EQ(value.flags.size(), 1u);
+    ASSERT_EQ(value.flags.size(), 1U);
     EXPECT_EQ(value.flags[0].key, "fast");
     EXPECT_TRUE(value.flags[0].value);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(JsonStructDecodeTest, RejectsMissingRequiredFieldTransactionally) {

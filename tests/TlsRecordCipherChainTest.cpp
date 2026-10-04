@@ -44,23 +44,28 @@ std::vector<std::uint8_t> key_iv(const char *hex) {
 }
 
 const KindVec &tls13_vec() {
-    static const KindVec v{TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13,
-                           key_iv("3fce516009c21727d0f2e4e86ee403bc"), key_iv("5d313eb2671276ee13000b30")};
+    static const KindVec v{.suite = TlsCipherSuiteId::TlsAes128GcmSha256,
+                           .kind = TlsRecordProtectionKind::Tls13,
+                           .key = key_iv("3fce516009c21727d0f2e4e86ee403bc"),
+                           .iv = key_iv("5d313eb2671276ee13000b30")};
     return v;
 }
 
 const KindVec &tls12_vec() {
-    static const KindVec v{TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsRecordProtectionKind::Tls12,
-                           key_iv("0102030405060708090a0b0c0d0e0f10"), key_iv("11121314")};
+    static const KindVec v{.suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256,
+                           .kind = TlsRecordProtectionKind::Tls12,
+                           .key = key_iv("0102030405060708090a0b0c0d0e0f10"),
+                           .iv = key_iv("11121314")};
     return v;
 }
 
 // The 1.2 ChaCha20 form (RFC 7905 §2): 12-byte implicit IV, no wire nonce —
 // exercises the same chain shapes with the nonce prefix length at 0.
 const KindVec &tls12_chacha_vec() {
-    static const KindVec v{TlsCipherSuiteId::EcdheRsaChacha20Poly1305, TlsRecordProtectionKind::Tls12,
-                           key_iv("21022dda596ed5d9acd890e3c63f5051a1b2c3d4e5f60718293a4b5c6d7e8f90"),
-                           key_iv("1112131415161718191a1b1c")};
+    static const KindVec v{.suite = TlsCipherSuiteId::EcdheRsaChacha20Poly1305,
+                           .kind = TlsRecordProtectionKind::Tls12,
+                           .key = key_iv("21022dda596ed5d9acd890e3c63f5051a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+                           .iv = key_iv("1112131415161718191a1b1c")};
     return v;
 }
 
@@ -90,7 +95,7 @@ std::vector<std::uint8_t> seal_wire(TlsRecordCipher &cipher, TlsContentType type
     return wire;
 }
 
-IoBufChain make_chain(IoBufNodePool &pool, const std::vector<std::vector<std::uint8_t>> &pieces) {
+IoBufChain make_chain(const std::vector<std::vector<std::uint8_t>> &pieces) {
     IoBufChain chain;
     for (const auto &piece: pieces) {
         IoBuf buf = IoBuf::allocate(piece.size());
@@ -103,7 +108,7 @@ IoBufChain make_chain(IoBufNodePool &pool, const std::vector<std::vector<std::ui
 }
 
 std::vector<std::vector<std::uint8_t>> split_at(const std::vector<std::uint8_t> &wire,
-                                                std::vector<std::size_t> points) {
+                                                const std::vector<std::size_t> &points) {
     std::vector<std::vector<std::uint8_t>> pieces;
     std::size_t prev = 0;
     for (std::size_t point: points) {
@@ -136,8 +141,8 @@ TEST(TlsRecordChainSizes, OpenDstSizePerKind) {
         TlsRecordCipher c12;
         init_cipher(c12, tls12_vec());
 
-        EXPECT_EQ(fiber::tls::tls_record_open_dst_size(c13, 117), 117u); // stages body+tag
-        EXPECT_EQ(fiber::tls::tls_record_open_dst_size(c12, 124), 116u); // nonce stays on the chain
+        EXPECT_EQ(fiber::tls::tls_record_open_dst_size(c13, 117), 117U); // stages body+tag
+        EXPECT_EQ(fiber::tls::tls_record_open_dst_size(c12, 124), 116U); // nonce stays on the chain
     });
 }
 
@@ -148,7 +153,7 @@ TEST(TlsRecordChainSizes, OpenDstSizePerKind) {
 // wrapped below the 8-byte explicit nonce and aborted the handshake context's
 // scratch assert: a remote crash).
 TEST(TlsRecordChainOpen, ShorterThanOverheadIsMalformedInBothForms) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
             TlsRecordCipher cipher;
             init_cipher(cipher, *v);
@@ -160,13 +165,13 @@ TEST(TlsRecordChainOpen, ShorterThanOverheadIsMalformedInBothForms) {
                 std::vector<std::uint8_t> dst(dst_size + 1);
 
                 IoBufChain transcribe_payload =
-                        length == 0 ? IoBufChain{} : make_chain(pool, std::vector<std::vector<std::uint8_t>>{wire});
+                        length == 0 ? IoBufChain{} : make_chain(std::vector<std::vector<std::uint8_t>>{wire});
                 const auto t = fiber::tls::tls_record_open_transcribe(
                         cipher, outer_for(cipher, TlsContentType::Handshake), 0x0303, len16, transcribe_payload, dst);
                 EXPECT_EQ(TlsRecordCipher::Status::Malformed, t.status) << "transcribe length " << length;
 
                 IoBufChain in_place_payload =
-                        length == 0 ? IoBufChain{} : make_chain(pool, std::vector<std::vector<std::uint8_t>>{wire});
+                        length == 0 ? IoBufChain{} : make_chain(std::vector<std::vector<std::uint8_t>>{wire});
                 const auto r = fiber::tls::tls_record_open_in_place(
                         cipher, outer_for(cipher, TlsContentType::Handshake), 0x0303, len16, in_place_payload, dst);
                 EXPECT_EQ(TlsRecordCipher::Status::Malformed, r.open.status) << "in place length " << length;
@@ -180,7 +185,7 @@ TEST(TlsRecordChainOpen, ShorterThanOverheadIsMalformedInBothForms) {
 // ---------------------------------------------------------------- open: transcribe
 
 TEST(TlsRecordChainOpen, TranscribeLeavesTheChainUntouched) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
             TlsRecordCipher seal_side;
             init_cipher(seal_side, *v);
@@ -192,7 +197,7 @@ TEST(TlsRecordChainOpen, TranscribeLeavesTheChainUntouched) {
             const auto wire = seal_wire(seal_side, type, plain);
 
 
-            IoBufChain chain = make_chain(pool, {wire});
+            IoBufChain chain = make_chain({wire});
             std::vector<std::uint8_t> dst(
                     fiber::tls::tls_record_open_dst_size(opener, static_cast<std::uint16_t>(wire.size())));
 
@@ -210,7 +215,7 @@ TEST(TlsRecordChainOpen, TranscribeLeavesTheChainUntouched) {
 }
 
 TEST(TlsRecordChainOpen, TranscribeAcrossStraddlingTopologies) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const std::size_t plain_len = 100;
         const auto plain = ramp(plain_len, 0x20);
 
@@ -232,7 +237,7 @@ TEST(TlsRecordChainOpen, TranscribeAcrossStraddlingTopologies) {
                 TlsRecordCipher opener; // fresh per topology: wire was sealed at seq 0
                 init_cipher(opener, *v);
 
-                IoBufChain chain = make_chain(pool, split_at(wire, points));
+                IoBufChain chain = make_chain(split_at(wire, points));
                 std::vector<std::uint8_t> dst(
                         fiber::tls::tls_record_open_dst_size(opener, static_cast<std::uint16_t>(wire.size())));
 
@@ -250,7 +255,7 @@ TEST(TlsRecordChainOpen, TranscribeAcrossStraddlingTopologies) {
 // ---------------------------------------------------------------- open: in place
 
 TEST(TlsRecordChainOpen, InPlaceShrinksTheChainView) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
             TlsRecordCipher seal_side;
             init_cipher(seal_side, *v);
@@ -262,7 +267,7 @@ TEST(TlsRecordChainOpen, InPlaceShrinksTheChainView) {
             const auto wire = seal_wire(seal_side, type, plain);
 
 
-            IoBufChain chain = make_chain(pool, {wire});
+            IoBufChain chain = make_chain({wire});
             std::vector<std::uint8_t> dst(
                     fiber::tls::tls_record_open_dst_size(opener, static_cast<std::uint16_t>(wire.size())));
 
@@ -281,7 +286,7 @@ TEST(TlsRecordChainOpen, InPlaceShrinksTheChainView) {
 // The scatter win: the body ends exactly at a node boundary and the tag lives
 // in the NEXT node — still zero-copy in place.
 TEST(TlsRecordChainOpen, InPlaceWorksWhenTagIsInNextNode) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
             TlsRecordCipher seal_side;
             init_cipher(seal_side, *v);
@@ -294,7 +299,7 @@ TEST(TlsRecordChainOpen, InPlaceWorksWhenTagIsInNextNode) {
             const std::size_t body_end = wire.size() - 16;
 
 
-            IoBufChain chain = make_chain(pool, split_at(wire, {body_end}));
+            IoBufChain chain = make_chain(split_at(wire, {body_end}));
             std::vector<std::uint8_t> dst(
                     fiber::tls::tls_record_open_dst_size(opener, static_cast<std::uint16_t>(wire.size())));
 
@@ -309,7 +314,7 @@ TEST(TlsRecordChainOpen, InPlaceWorksWhenTagIsInNextNode) {
 }
 
 TEST(TlsRecordChainOpen, StraddlingBodyDegradesToTranscribe) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const KindVec &v = tls13_vec();
         TlsRecordCipher seal_side;
         init_cipher(seal_side, v);
@@ -320,7 +325,7 @@ TEST(TlsRecordChainOpen, StraddlingBodyDegradesToTranscribe) {
         const auto wire = seal_wire(seal_side, TlsContentType::ApplicationData, plain);
 
 
-        IoBufChain chain = make_chain(pool, split_at(wire, {60})); // mid-body
+        IoBufChain chain = make_chain(split_at(wire, {60})); // mid-body
         std::vector<std::uint8_t> dst(
                 fiber::tls::tls_record_open_dst_size(opener, static_cast<std::uint16_t>(wire.size())));
 
@@ -336,7 +341,7 @@ TEST(TlsRecordChainOpen, StraddlingBodyDegradesToTranscribe) {
 }
 
 TEST(TlsRecordChainOpen, AuthFailDoesNotAdvanceSequence) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const KindVec &v = tls13_vec();
         TlsRecordCipher seal_side;
         init_cipher(seal_side, v);
@@ -348,21 +353,21 @@ TEST(TlsRecordChainOpen, AuthFailDoesNotAdvanceSequence) {
         wire.back() ^= 0x01; // break the tag
 
 
-        IoBufChain chain = make_chain(pool, {wire});
+        IoBufChain chain = make_chain({wire});
         std::vector<std::uint8_t> dst(
                 fiber::tls::tls_record_open_dst_size(opener, static_cast<std::uint16_t>(wire.size())));
 
         const auto r = fiber::tls::tls_record_open_in_place(opener, TlsContentType::ApplicationData, 0x0303,
                                                             static_cast<std::uint16_t>(wire.size()), chain, dst);
         EXPECT_EQ(r.open.status, TlsRecordCipher::Status::AuthFail);
-        EXPECT_EQ(opener.sequence(), 0u);
+        EXPECT_EQ(opener.sequence(), 0U);
     });
 }
 
 // ---------------------------------------------------------------- seal
 
 TEST(TlsRecordChainSeal, TranscribeMatchesSeal) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
             const auto plain = ramp(120, 0x70);
             const TlsContentType type = TlsContentType::Alert;
@@ -377,7 +382,7 @@ TEST(TlsRecordChainSeal, TranscribeMatchesSeal) {
 
             // Single node and three straddling nodes must both reproduce the
             // span seal byte for byte (each against its own sequence number).
-            IoBufChain one = make_chain(pool, {plain});
+            IoBufChain one = make_chain({plain});
             std::vector<std::uint8_t> dst(chain_cipher.seal_output_size(plain.size()));
             auto r = fiber::tls::tls_record_seal_transcribe(chain_cipher, type, one, dst);
             ASSERT_EQ(r.status, TlsRecordCipher::Status::Ok);
@@ -388,7 +393,7 @@ TEST(TlsRecordChainSeal, TranscribeMatchesSeal) {
             const auto p1 = std::vector<std::uint8_t>(plain.begin(), plain.begin() + 30);
             const auto p2 = std::vector<std::uint8_t>(plain.begin() + 30, plain.begin() + 90);
             const auto p3 = std::vector<std::uint8_t>(plain.begin() + 90, plain.end());
-            IoBufChain many = make_chain(pool, {p1, p2, p3});
+            IoBufChain many = make_chain({p1, p2, p3});
             std::vector<std::uint8_t> dst2(chain_cipher.seal_output_size(plain.size()));
             r = fiber::tls::tls_record_seal_transcribe(chain_cipher, type, many, dst2);
             ASSERT_EQ(r.status, TlsRecordCipher::Status::Ok);
@@ -398,7 +403,7 @@ TEST(TlsRecordChainSeal, TranscribeMatchesSeal) {
 }
 
 TEST(TlsRecordChainSeal, InPlaceSplitsWireIntoHeaderChainTailer) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
             const auto plain = ramp(80, 0x80);
             const TlsContentType type = TlsContentType::ApplicationData;
@@ -412,7 +417,7 @@ TEST(TlsRecordChainSeal, InPlaceSplitsWireIntoHeaderChainTailer) {
             const std::size_t off = chain_cipher.explicit_nonce_len();
 
 
-            IoBufChain chain = make_chain(pool, {plain});
+            IoBufChain chain = make_chain({plain});
             std::vector<std::uint8_t> header(chain_cipher.explicit_nonce_len());
             std::vector<std::uint8_t> tailer(17);
             std::vector<std::uint8_t> dst(chain_cipher.seal_output_size(plain.size()));
@@ -435,7 +440,7 @@ TEST(TlsRecordChainSeal, InPlaceSplitsWireIntoHeaderChainTailer) {
 // In-place seal writes only the plaintext's own bytes: shared node storage
 // (a retain_slice sibling) needs no unique() and observes the ciphertext.
 TEST(TlsRecordChainSeal, InPlaceSharedStorageNeedsNoUnique) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const KindVec &v = tls13_vec();
         const auto plain = ramp(64, 0x90);
 
@@ -472,7 +477,7 @@ TEST(TlsRecordChainSeal, InPlaceSharedStorageNeedsNoUnique) {
 }
 
 TEST(TlsRecordChainSeal, StraddlingDegradesToTranscribe) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         const KindVec &v = tls12_vec();
         const auto plain = ramp(90, 0xA0);
 
@@ -484,7 +489,7 @@ TEST(TlsRecordChainSeal, StraddlingDegradesToTranscribe) {
         init_cipher(chain_cipher, v);
 
 
-        IoBufChain chain = make_chain(pool, split_at(plain, {40}));
+        IoBufChain chain = make_chain(split_at(plain, {40}));
         std::vector<std::uint8_t> header(8);
         std::vector<std::uint8_t> tailer(17);
         std::vector<std::uint8_t> dst(chain_cipher.seal_output_size(plain.size()));
@@ -501,7 +506,7 @@ TEST(TlsRecordChainSeal, StraddlingDegradesToTranscribe) {
 }
 
 TEST(TlsRecordChainSeal, EmptyPlaintextBothForms) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
             TlsRecordCipher reference;
             init_cipher(reference, *v);
@@ -540,7 +545,7 @@ TEST(TlsRecordChainSeal, EmptyPlaintextBothForms) {
 // ------------------------------------- full stack: in-place seal -> reader -> in-place open
 
 TEST(TlsRecordChainRoundTrip, InPlaceSealFeedsInPlaceOpen) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
             TlsRecordCipher seal_side;
             init_cipher(seal_side, *v);
@@ -552,7 +557,7 @@ TEST(TlsRecordChainRoundTrip, InPlaceSealFeedsInPlaceOpen) {
             const std::size_t off = seal_side.explicit_nonce_len();
 
 
-            IoBufChain chain = make_chain(pool, {plain});
+            IoBufChain chain = make_chain({plain});
             std::vector<std::uint8_t> header(seal_side.explicit_nonce_len());
             std::vector<std::uint8_t> tailer(17);
             std::vector<std::uint8_t> scratch(seal_side.seal_output_size(plain.size()));

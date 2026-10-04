@@ -56,7 +56,7 @@ public:
                             std::size_t write_limit = std::numeric_limits<std::size_t>::max()) :
         loop_(loop), metrics_(metrics), input_(std::move(input)), write_limit_(write_limit) {}
 
-    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds /*timeout*/) override {
         metrics_.events.push_back(TransportEvent::Shutdown);
         co_return fiber::common::IoResult<void>{};
     }
@@ -92,7 +92,7 @@ public:
     }
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> writev(fiber::mem::IoBufChain &buf,
-                                                                    std::chrono::milliseconds) override {
+                                                                    std::chrono::milliseconds /*unused*/) override {
         if (writev_error_ != fiber::common::IoErr::None) {
             if (writev_successes_before_error_ == 0) {
                 record_write();

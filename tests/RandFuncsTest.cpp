@@ -30,7 +30,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -87,13 +87,13 @@ TEST(RandFuncsTest, RandomFloatMaxTruncatesTowardZero) {
 }
 
 TEST(RandFuncsTest, RandomNonNumberRaisesTypeError) {
-    expect_caught("try { rand.random(\"x\"); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_caught("try { rand.random(null); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_caught(R"(try { rand.random("x"); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_caught(R"(try { rand.random(null); return "no-throw"; } catch (e) { return "caught"; })", "caught");
 }
 
 TEST(RandFuncsTest, RandomNonPositiveBoundRaisesRangeError) {
-    expect_caught("try { rand.random(0); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_caught("try { rand.random(-5); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_caught(R"(try { rand.random(0); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_caught(R"(try { rand.random(-5); return "no-throw"; } catch (e) { return "caught"; })", "caught");
 }
 
 // ---- rand.canary ratio bounds & lenient ratio ----
@@ -148,19 +148,19 @@ TEST(RandFuncsTest, CanaryNullKeyContributesNullText) {
 TEST(RandFuncsTest, CanaryAllEmptyKeysHitsZeroBucket) {
     // No non-empty key text -> CRC of nothing == 0 -> 0 % 100 == 0 < 50 -> true.
     expect_script_bool("return rand.canary(50, \"\");", true);
-    expect_script_bool("return rand.canary(50, \"\", \"\");", true);
+    expect_script_bool(R"(return rand.canary(50, "", "");)", true);
 }
 
 TEST(RandFuncsTest, CanaryMultipleKeysAreCumulativeAndOrderSensitive) {
     // crc32("abcuser-1") % 100 = 40; crc32("user-1abc") % 100 = 66.
-    expect_script_bool("return rand.canary(50, \"abc\", \"user-1\");", true); // 40 < 50
-    expect_script_bool("return rand.canary(40, \"abc\", \"user-1\");", false); // 40 < 40 false
-    expect_script_bool("return rand.canary(50, \"user-1\", \"abc\");", false); // 66 < 50 false (order matters)
-    expect_script_bool("return rand.canary(67, \"user-1\", \"abc\");", true); // 66 < 67
+    expect_script_bool(R"(return rand.canary(50, "abc", "user-1");)", true); // 40 < 50
+    expect_script_bool(R"(return rand.canary(40, "abc", "user-1");)", false); // 40 < 40 false
+    expect_script_bool(R"(return rand.canary(50, "user-1", "abc");)", false); // 66 < 50 false (order matters)
+    expect_script_bool(R"(return rand.canary(67, "user-1", "abc");)", true); // 66 < 67
 }
 
 TEST(RandFuncsTest, CanaryEmptyKeysSkippedBetweenNonEmpty) {
     // Empty key in the middle is skipped; crc == crc32("abcuser-1") % 100 = 40.
-    expect_script_bool("return rand.canary(50, \"abc\", \"\", \"user-1\");", true);
-    expect_script_bool("return rand.canary(40, \"abc\", \"\", \"user-1\");", false);
+    expect_script_bool(R"(return rand.canary(50, "abc", "", "user-1");)", true);
+    expect_script_bool(R"(return rand.canary(40, "abc", "", "user-1");)", false);
 }

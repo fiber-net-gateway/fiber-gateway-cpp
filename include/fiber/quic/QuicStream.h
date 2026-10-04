@@ -128,6 +128,7 @@ public:
     [[nodiscard]] bool send_aborted() const noexcept { return send_aborted_; }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
+    // NOLINTNEXTLINE(readability-make-member-function-const) non-const twin returns a mutable pointer
     [[nodiscard]] void *owner() noexcept { return destroy_owner_; }
     [[nodiscard]] const void *owner() const noexcept { return destroy_owner_; }
     [[nodiscard]] DestroyCallback destroy_callback() const noexcept { return on_destroy_; }

@@ -224,11 +224,11 @@ TEST(QuicTransportParamsCodecTest, RejectsInvalidConstrainedParamsOnParse) {
         std::uint64_t value;
     };
     constexpr std::array<InvalidParam, 5> invalid_params{{
-            {fiber::quic::kQuicTpMaxUdpPayloadSize, fiber::quic::kMinInitialDatagramSize - 1},
-            {fiber::quic::kQuicTpMaxUdpPayloadSize, fiber::quic::kQuicMaxUdpPayloadSize + 1},
-            {fiber::quic::kQuicTpAckDelayExponent, 21},
-            {fiber::quic::kQuicTpMaxAckDelay, 1ULL << 14U},
-            {fiber::quic::kQuicTpActiveConnectionIdLimit, 1},
+            {.id = fiber::quic::kQuicTpMaxUdpPayloadSize, .value = fiber::quic::kMinInitialDatagramSize - 1},
+            {.id = fiber::quic::kQuicTpMaxUdpPayloadSize, .value = fiber::quic::kQuicMaxUdpPayloadSize + 1},
+            {.id = fiber::quic::kQuicTpAckDelayExponent, .value = 21},
+            {.id = fiber::quic::kQuicTpMaxAckDelay, .value = 1ULL << 14U},
+            {.id = fiber::quic::kQuicTpActiveConnectionIdLimit, .value = 1},
     }};
 
     for (const InvalidParam invalid: invalid_params) {

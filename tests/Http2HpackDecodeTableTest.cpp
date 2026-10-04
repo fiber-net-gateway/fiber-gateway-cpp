@@ -11,6 +11,7 @@ namespace {
 
 using fiber::http::Http2HpackDecodeTable;
 
+// NOLINTNEXTLINE(modernize-return-braced-init-list) braced form narrows size_t into the initializer_list<char> ctor
 std::string repeated(char ch, std::size_t count) { return std::string(count, ch); }
 
 } // namespace
@@ -42,7 +43,7 @@ TEST(Http2HpackDecodeTableTest, EvictsOldestEntryWhenCapacityWouldBeExceeded) {
     ASSERT_TRUE(table.insert("b", "2"));
     ASSERT_TRUE(table.insert("c", "3"));
 
-    EXPECT_EQ(table.entry_count(), 2u);
+    EXPECT_EQ(table.entry_count(), 2U);
 
     fiber::http::Http2HpackTableEntryView view;
     ASSERT_TRUE(table.get_by_index(1, view));
@@ -69,7 +70,7 @@ TEST(Http2HpackDecodeTableTest, CompactsBytesWhenTailSpaceIsInsufficient) {
     ASSERT_TRUE(table.insert(name_b, value_b));
     ASSERT_TRUE(table.insert(name_c, value_c));
 
-    EXPECT_EQ(table.entry_count(), 2u);
+    EXPECT_EQ(table.entry_count(), 2U);
 
     fiber::http::Http2HpackTableEntryView view;
     ASSERT_TRUE(table.get_by_index(1, view));
@@ -89,8 +90,8 @@ TEST(Http2HpackDecodeTableTest, SetMaxSizeShrinksAndOversizedInsertClearsTable) 
     ASSERT_TRUE(table.insert("beta", "2"));
     table.set_max_size(40);
 
-    EXPECT_LE(table.current_size(), 40u);
-    EXPECT_EQ(table.entry_count(), 1u);
+    EXPECT_LE(table.current_size(), 40U);
+    EXPECT_EQ(table.entry_count(), 1U);
 
     const std::string large_name = repeated('n', 16);
     const std::string large_value = repeated('v', 40);

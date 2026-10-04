@@ -262,7 +262,7 @@ TEST(ScriptRuntimeOpsTest, ExpandObjectMergesAndOverwritesInOrder) {
         keys.push_back(k);
         values.push_back(js_value_int64(e->value));
     }
-    ASSERT_EQ(keys.size(), 3u);
+    ASSERT_EQ(keys.size(), 3U);
     EXPECT_EQ(keys[0], "a");
     EXPECT_EQ(keys[1], "b");
     EXPECT_EQ(keys[2], "c");
@@ -282,7 +282,7 @@ TEST(ScriptRuntimeOpsTest, ExpandArrayFromObjectPreservesInsertionOrder) {
     ASSERT_EQ(js_value_type(result.value), JsNodeType::Array);
     const GcArray *arr = js_value_heap_ptr<const GcArray>(result.value);
     ASSERT_NE(arr, nullptr);
-    ASSERT_EQ(arr->size, 2u);
+    ASSERT_EQ(arr->size, 2U);
     EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 0)), 10);
     EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 1)), 20);
 }
@@ -296,7 +296,7 @@ TEST(ScriptRuntimeOpsTest, ExpandArrayFromArrayAppends) {
     ASSERT_EQ(status, CallResult::Success);
     const GcArray *arr = js_value_heap_ptr<const GcArray>(result.value);
     ASSERT_NE(arr, nullptr);
-    ASSERT_EQ(arr->size, 4u);
+    ASSERT_EQ(arr->size, 4U);
     EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 0)), 1);
     EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 1)), 2);
     EXPECT_EQ(js_value_int64(*fiber::script::gc_array_get(arr, 2)), 3);

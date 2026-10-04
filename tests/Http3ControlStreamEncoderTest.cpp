@@ -25,7 +25,7 @@ std::vector<std::uint8_t> collect(fiber::mem::IoBufChain &chain) {
 } // namespace
 
 TEST(Http3ControlStreamEncoderTest, EncodesEmptySettingsPreface) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         fiber::http::Http3Settings settings{};
 
         auto encoded = fiber::http::encode_http3_control_stream_preface(settings);
@@ -37,7 +37,7 @@ TEST(Http3ControlStreamEncoderTest, EncodesEmptySettingsPreface) {
 }
 
 TEST(Http3ControlStreamEncoderTest, EncodesNonDefaultSettingsPreface) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         fiber::http::Http3Settings settings{};
         settings.qpack_blocked_streams = 8;
         settings.enable_connect_protocol = true;
@@ -51,7 +51,7 @@ TEST(Http3ControlStreamEncoderTest, EncodesNonDefaultSettingsPreface) {
 }
 
 TEST(Http3ControlStreamEncoderTest, EncodesGoaway) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         auto encoded = fiber::http::encode_http3_goaway_frame(0);
 
         ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
