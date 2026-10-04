@@ -102,7 +102,7 @@ void with_server_flight(F &&test) {
         client_tls.max_version = 0x0304;
         client_tls.alpn = kAlpn;
         client_tls.server_name = "localhost";
-        ASSERT_TRUE(client.tls().init_client(client_tls, client, /*allow_insecure=*/true));
+        ASSERT_TRUE(client.tls().init_client(client_tls, /*allow_insecure=*/true));
         auto client_driven = client.tls().drive_handshake();
         ASSERT_TRUE(client_driven || client_driven.error() == fiber::common::IoErr::WouldBlock);
         const auto hello = queued_crypto(client, fiber::quic::QuicEncryptionLevel::Initial);
@@ -116,7 +116,7 @@ void with_server_flight(F &&test) {
         fiber::quic::QuicConnection server(fiber::test::quic_endpoint(), server_options);
         ASSERT_TRUE(fiber::quic::quic_init_initial_crypto(server.crypto(), fiber::quic::QuicConnectionRole::Server,
                                                           server_cid));
-        ASSERT_TRUE(server.tls().init_server(server_tls, server));
+        ASSERT_TRUE(server.tls().init_server(server_tls));
         auto hello_chain = crypto_chain(hello);
         ASSERT_TRUE(server.tls().provide_crypto_data(fiber::quic::QuicEncryptionLevel::Initial, hello_chain));
         EXPECT_TRUE(hello_chain.empty());
@@ -139,6 +139,50 @@ void with_server_flight(F &&test) {
 constexpr std::array<std::uint8_t, 18> kTicket{4, 0, 0, 14, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 1, 0x42, 0, 0};
 
 } // namespace
+
+TEST(QuicTlsSessionTest, RoleMismatchLeavesSessionAvailableForCorrectRole) {
+    ::fiber::test::run_in_quic_loop([](::fiber::mem::IoBufNodePool &) {
+        fiber::net::TlsCredentialOptions credential_options{};
+        credential_options.certificate_chain =
+                fiber::net::TlsPemSource::from_content(fiber::test::kQuicTestCertificatePem);
+        credential_options.private_key = fiber::net::TlsPemSource::from_content(fiber::test::kQuicTestPrivateKeyPem);
+        auto credential = fiber::net::TlsCredential::create(credential_options);
+        ASSERT_TRUE(credential.has_value());
+        fiber::net::TlsServerParam server_tls{};
+        server_tls.configure_callback = &fiber::net::configure_tls_with_credential;
+        server_tls.configure_ctx = &*credential;
+        server_tls.alpn = kAlpn;
+        fiber::net::TlsClientParam client_tls{};
+        client_tls.alpn = kAlpn;
+        client_tls.server_name = "localhost";
+
+        using fiber::quic::QuicConnectionRole;
+        for (auto role: {QuicConnectionRole::Client, QuicConnectionRole::Server}) {
+            auto options = fiber::test::quic_options();
+            options.role = role;
+            options.local_connection_id = cid(0x10);
+            options.remote_connection_id = cid(0x40);
+            options.original_destination_connection_id = options.remote_connection_id;
+            fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), options);
+            ASSERT_TRUE(fiber::quic::quic_init_initial_crypto(connection.crypto(), role,
+                                                              options.original_destination_connection_id));
+            auto &session = connection.tls();
+            const bool is_client = role == QuicConnectionRole::Client;
+            auto rejected = is_client ? session.init_server(server_tls) : session.init_client(client_tls, true);
+            ASSERT_FALSE(rejected);
+            EXPECT_EQ(rejected.error(), fiber::common::IoErr::Invalid);
+            EXPECT_FALSE(session.initialized());
+            EXPECT_FALSE(session.handshake_done());
+            EXPECT_TRUE(queued_crypto(connection, fiber::quic::QuicEncryptionLevel::Initial).empty());
+
+            auto initialized = is_client ? session.init_client(client_tls, true) : session.init_server(server_tls);
+            ASSERT_TRUE(initialized);
+            EXPECT_TRUE(session.initialized());
+            EXPECT_FALSE(session.handshake_done());
+            EXPECT_EQ(queued_crypto(connection, fiber::quic::QuicEncryptionLevel::Initial).empty(), !is_client);
+        }
+    });
+}
 
 // RFC 9001 §4.1.3: TLS consumes CRYPTO data level by level. A client that
 // sends a 1-RTT CRYPTO frame (the server already holds 1-RTT read keys after
@@ -176,7 +220,7 @@ TEST(QuicTlsSessionTest, CryptoBelowProvidedLevelClosesWithUnexpectedMessage) {
         client_tls.max_version = 0x0304;
         client_tls.alpn = kAlpn;
         client_tls.server_name = "localhost";
-        ASSERT_TRUE(client.tls().init_client(client_tls, client, /*allow_insecure=*/true));
+        ASSERT_TRUE(client.tls().init_client(client_tls, /*allow_insecure=*/true));
         auto client_driven = client.tls().drive_handshake();
         ASSERT_TRUE(client_driven || client_driven.error() == fiber::common::IoErr::WouldBlock);
         const auto hello = queued_crypto(client, fiber::quic::QuicEncryptionLevel::Initial);
@@ -190,7 +234,7 @@ TEST(QuicTlsSessionTest, CryptoBelowProvidedLevelClosesWithUnexpectedMessage) {
         fiber::quic::QuicConnection server(fiber::test::quic_endpoint(), server_options);
         ASSERT_TRUE(fiber::quic::quic_init_initial_crypto(server.crypto(), fiber::quic::QuicConnectionRole::Server,
                                                           server_cid));
-        ASSERT_TRUE(server.tls().init_server(server_tls, server));
+        ASSERT_TRUE(server.tls().init_server(server_tls));
         auto hello_chain = crypto_chain(hello);
         ASSERT_TRUE(server.tls().provide_crypto_data(fiber::quic::QuicEncryptionLevel::Initial, hello_chain));
         EXPECT_TRUE(hello_chain.empty());

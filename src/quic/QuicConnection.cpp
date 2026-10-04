@@ -642,7 +642,7 @@ common::IoResult<void> QuicConnection::connect(const QuicClientConnectParams &pa
     if (!initial_crypto) {
         return fail(QuicConnectPhase::InitialCrypto, initial_crypto.error());
     }
-    auto initialized_tls = tls_.init_client(params.tls, *this, params.allow_insecure, params.resumption_session);
+    auto initialized_tls = tls_.init_client(params.tls, params.allow_insecure, params.resumption_session);
     if (!initialized_tls) {
         return fail(QuicConnectPhase::Tls, initialized_tls.error());
     }
@@ -2523,7 +2523,7 @@ common::IoResult<void> QuicConnection::ensure_server_tls() noexcept {
     if (options_.server_tls == nullptr) {
         return {};
     }
-    return tls_.init_server(*options_.server_tls, *this);
+    return tls_.init_server(*options_.server_tls);
 }
 
 common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTransportParams &params) noexcept {

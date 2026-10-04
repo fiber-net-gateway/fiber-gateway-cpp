@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <variant>
 
 #include <fiber/common/mem/IoBufChain.h>
 #include "../common/IoError.h"
@@ -46,13 +47,11 @@ class QuicConnection;
 // (IoBufChain node-pool affinity), which is where every entry point runs.
 class QuicTlsSession : public common::NonCopyable, public common::NonMovable {
 public:
-    QuicTlsSession() noexcept = default;
+    explicit QuicTlsSession(QuicConnection &connection) noexcept;
     ~QuicTlsSession();
 
-    [[nodiscard]] common::IoResult<void> init_server(const net::TlsServerParam &options,
-                                                     QuicConnection &connection) noexcept;
-    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientParam &param, QuicConnection &connection,
-                                                     bool allow_insecure,
+    [[nodiscard]] common::IoResult<void> init_server(const net::TlsServerParam &options) noexcept;
+    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientParam &param, bool allow_insecure,
                                                      const tls::TlsSessionState *session = nullptr) noexcept;
     // Takes all nodes after validation, leaving data empty even if TLS then fails.
     // Runs on the connection loop; data must not carry the stream-complete flag.
@@ -104,11 +103,14 @@ private:
     [[nodiscard]] const tls::TlsClientHandshakeEngine &client() const noexcept;
     [[nodiscard]] const tls::TlsServerHandshakeEngine &server() const noexcept;
 
-    QuicConnection *connection_ = nullptr; // borrowed; the session is a member
-    // The role's engine, from init_* until the done-transition (or the dtor
-    // on a failed/abandoned handshake).
-    tls::TlsClientHandshakeEngine *client_ = nullptr;
-    tls::TlsServerHandshakeEngine *server_ = nullptr;
+    [[nodiscard]] bool is_client() const noexcept;
+
+    QuicConnection &connection_; // borrowed; the session is a member
+    // A live alternative always owns a non-null engine. monostate means no
+    // engine: before init or after the done-transition releases it.
+    using Engine = std::variant<std::monostate, std::unique_ptr<tls::TlsClientHandshakeEngine>,
+                                std::unique_ptr<tls::TlsServerHandshakeEngine>>;
+    Engine engine_;
 
     // The callbacks and configs borrow these members, so both must stay
     // address-stable for the engine's lifetime (built in init_*, never moved).
@@ -156,7 +158,6 @@ private:
     // connection close state is never mutated re-entrantly.
     std::optional<std::uint8_t> pending_alert_;
     std::optional<std::uint8_t> last_alert_;
-    bool client_mode_ = false;
     bool verify_peer_ = false;
 };
 

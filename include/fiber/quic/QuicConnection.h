@@ -1106,7 +1106,7 @@ private:
     mem::IoBuf initial_token_{};
     QuicPeerTransportState peer_transport_{};
     QuicStreamTable streams_{};
-    QuicTlsSession tls_{};
+    QuicTlsSession tls_{*this};
     QuicPathManager path_manager_{*this};
     std::array<QuicLocalConnectionIdSlot, kQuicLocalConnectionIdSlotCount> local_cids_{};
     std::uint64_t next_local_cid_sequence_ = 1;
