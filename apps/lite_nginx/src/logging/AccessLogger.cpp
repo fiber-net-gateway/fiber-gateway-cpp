@@ -76,8 +76,9 @@ void AccessLogger::write(fiber::http::HttpExchange &exchange, const RequestLogCo
         return;
     }
 
+    const char *const func = __func__; // the enclosing function; __func__ inside emit would name operator()
     auto emit = [&](std::string_view message) noexcept {
-        fiber::log::LogLine(*bound.logger, fiber::log::LogLevel::Info, __FILE__, __LINE__, __func__) << message;
+        fiber::log::LogLine(*bound.logger, fiber::log::LogLevel::Info, __FILE__, __LINE__, func) << message;
     };
     if (!bound.runtime->template_script) {
         emit(bound.runtime->literal_message);

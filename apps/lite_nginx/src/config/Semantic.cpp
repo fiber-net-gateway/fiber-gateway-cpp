@@ -46,12 +46,12 @@ std::optional<StrippedScheme> strip_server_scheme(std::string_view value) noexce
         return true;
     };
     if (icase_prefix(value, kHttps)) {
-        return StrippedScheme{value.substr(kHttps.size()), true};
+        return StrippedScheme{.rest = value.substr(kHttps.size()), .tls = true};
     }
     if (icase_prefix(value, kHttp)) {
-        return StrippedScheme{value.substr(kHttp.size()), false};
+        return StrippedScheme{.rest = value.substr(kHttp.size()), .tls = false};
     }
-    return StrippedScheme{value, false};
+    return StrippedScheme{.rest = value, .tls = false};
 }
 
 struct ProxySettingsBuilder {
@@ -100,8 +100,8 @@ std::expected<std::size_t, ConfigError> parse_positive_size(const DirectiveNode 
     }
 
     std::size_t parsed = 0;
-    auto begin = value.data();
-    auto end = value.data() + value.size();
+    const auto *begin = value.data();
+    const auto *end = value.data() + value.size();
     auto result = std::from_chars(begin, end, parsed);
     if (result.ec != std::errc() || result.ptr != end || parsed == 0) {
         return std::unexpected(make_error(directive, std::string(field_name) + " must be a positive integer"));
@@ -150,9 +150,9 @@ std::expected<std::chrono::milliseconds, ConfigError> parse_duration(const Direc
     } else if (unit_part == "ms") {
         multiplier = 1;
     } else if (unit_part == "m") {
-        multiplier = 60 * 1000;
+        multiplier = std::uint64_t{60} * 1000;
     } else if (unit_part == "h") {
-        multiplier = 60 * 60 * 1000;
+        multiplier = std::uint64_t{60} * 60 * 1000;
     } else {
         return std::unexpected(make_error(directive, std::string(field_name) + " has unsupported duration unit"));
     }
@@ -172,7 +172,7 @@ std::expected<std::size_t, ConfigError> parse_size(const DirectiveNode &directiv
         multiplier = 1024;
         value.remove_suffix(1);
     } else if (suffix == 'm' || suffix == 'M') {
-        multiplier = 1024 * 1024;
+        multiplier = std::size_t{1024} * 1024;
         value.remove_suffix(1);
     }
     if (value.empty()) {
@@ -368,6 +368,8 @@ GzipSettings resolve_gzip_settings(const GzipSettingsBuilder &settings, const Gz
     }
     if (settings.types.has_value()) {
         result.types = *settings.types;
+        // any_type is populated iff types is (parse-time invariant of GzipSettingsBuilder).
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         result.any_type = *settings.any_type;
     }
     if (settings.min_length.has_value()) {
@@ -1712,7 +1714,7 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
             if (!pool) {
                 return std::unexpected(pool.error());
             }
-            http.connection_pool = std::move(*pool);
+            http.connection_pool = *pool;
             continue;
         }
         if (child.name == "access_log") {

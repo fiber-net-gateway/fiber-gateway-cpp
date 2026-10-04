@@ -23,7 +23,7 @@ private:
     // SemanticAnalyzer. `ancestors` is the stack of canonical paths currently being
     // expanded (for cycle detection). Mutates `directives` in place.
     static std::expected<void, ConfigError> expand_includes(std::vector<DirectiveNode> &directives,
-                                                            std::vector<std::string> ancestors);
+                                                            const std::vector<std::string> &ancestors);
 
     // Reads and parses an included file at `canonical_path`, returning its Document
     // (whose directives carry source_name = canonical_path, so nested includes and

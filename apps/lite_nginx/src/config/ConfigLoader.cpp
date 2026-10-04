@@ -97,7 +97,7 @@ std::expected<Document, ConfigError> ConfigLoader::load_include_document(const s
 }
 
 std::expected<void, ConfigError> ConfigLoader::expand_includes(std::vector<DirectiveNode> &directives,
-                                                               std::vector<std::string> ancestors) {
+                                                               const std::vector<std::string> &ancestors) {
     std::vector<DirectiveNode> result;
     result.reserve(directives.size());
 
@@ -146,7 +146,7 @@ std::expected<void, ConfigError> ConfigLoader::expand_includes(std::vector<Direc
 
         auto sub_ancestors = ancestors;
         sub_ancestors.push_back(canonical);
-        auto expand_result = expand_includes(sub_document->directives, std::move(sub_ancestors));
+        auto expand_result = expand_includes(sub_document->directives, sub_ancestors);
         if (!expand_result) {
             return std::unexpected(expand_result.error());
         }

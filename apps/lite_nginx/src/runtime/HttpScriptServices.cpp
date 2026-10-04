@@ -77,12 +77,16 @@ HttpScriptServicesImpl::acquire(const fiber::http_script::HttpTargetSpec &target
         if (!upstream_name.empty() && upstream_name.front() == '@') {
             upstream_name.remove_prefix(1);
         }
+        // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) OOM is fatal by policy
         co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired), std::string(upstream_name))};
     }
 
     // Url target: the key is host:port:scheme; a literal host dials directly, a name resolves via
     // DNS. HttpTargetSpec::parse already rejected https:// with a literal host at directive bind.
-    const std::uint16_t port = target.port != 0 ? target.port : static_cast<std::uint16_t>(target.tls ? 443 : 80);
+    std::uint16_t port = target.port;
+    if (port == 0) {
+        port = target.tls ? 443 : 80;
+    }
     const auto scheme = target.tls ? fiber::http::HttpConnectionGroupKey::Scheme::Https
                                    : fiber::http::HttpConnectionGroupKey::Scheme::Http;
     auto key = fiber::http::HttpConnectionGroupKey::make(target.name, port, scheme);
@@ -94,6 +98,7 @@ HttpScriptServicesImpl::acquire(const fiber::http_script::HttpTargetSpec &target
     if (!acquired) {
         co_return std::unexpected(acquired.error());
     }
+    // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new) OOM is fatal by policy
     co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired), url_target_authority(target))};
 }
 
