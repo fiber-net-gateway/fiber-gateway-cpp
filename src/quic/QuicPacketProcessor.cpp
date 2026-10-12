@@ -175,7 +175,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 }
 
 [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicConnection &conn, QuicEncryptionLevel level,
-                                                         std::uint64_t offset, mem::IoBuf data) noexcept {
+                                                         std::uint64_t offset, mem::IoBuf &&data) noexcept {
     if (!conn.tls().initialized()) {
         return {};
     }
@@ -202,7 +202,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
 }
 
 [[nodiscard]] common::IoResult<bool> handle_crypto_frame(QuicConnection &conn, QuicEncryptionLevel level,
-                                                         const QuicInputFrame &frame, mem::IoBuf data,
+                                                         const QuicInputFrame &frame, mem::IoBuf &&data,
                                                          bool &handshake_confirmed) noexcept {
     auto provided = provide_crypto_data(conn, level, frame.u.crypto.offset, std::move(data));
     if (!provided) {
