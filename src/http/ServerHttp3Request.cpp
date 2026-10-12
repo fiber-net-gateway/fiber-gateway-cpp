@@ -820,7 +820,8 @@ async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease le
     co_await (*handler_)(exchange_);
     handler_done_ = true;
     if (response_finished_ && !stream_.recv_closed() && !stream_.stop_sending()) {
-        (void) stream_.stop_read(error_value(Http3ErrorCode::RequestCancelled));
+        // RFC 9114 section 4.1: preserve the complete response while stopping the remaining request body.
+        (void) stream_.stop_read(error_value(Http3ErrorCode::NoError));
     }
     exchange_.set_io(nullptr);
 
