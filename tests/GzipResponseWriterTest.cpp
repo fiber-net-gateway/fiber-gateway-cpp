@@ -703,6 +703,7 @@ TEST(GzipResponseWriterTest, TrailerHeaderFinishesActiveBody) {
             OutgoingHeaderBlockView trailer;
             trailer.kind = OutgoingHeaderKind::Trailer;
             trailer.headers = &trailers;
+            trailer.end_stream = true;
             const auto sent = co_await w.send_header(trailer);
             EXPECT_TRUE(sent.has_value());
             stats = gzip.stats();
@@ -714,12 +715,35 @@ TEST(GzipResponseWriterTest, TrailerHeaderFinishesActiveBody) {
 
         ASSERT_EQ(sink.headers.size(), 2U);
         EXPECT_EQ(sink.headers[1].kind, OutgoingHeaderKind::Trailer);
+        EXPECT_TRUE(sink.headers[1].end_stream);
         EXPECT_EQ(field_value(sink.headers[1], "X-Checksum"), std::optional<std::string>("deadbeef"));
         EXPECT_EQ(sink.body, reference_gzip(body, 1));
         EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
         EXPECT_EQ(stats.input_bytes, body.size());
     });
 }
+
+#if GTEST_HAS_DEATH_TEST
+TEST(GzipResponseWriterDeathTest, TrailerWithoutEndStreamAssertsBeforeFinishingBody) {
+    EXPECT_DEATH(run_scenario([]() -> Task<void> {
+                     HttpExchange exchange(SocketAddress{});
+                     CaptureSink sink;
+                     GzipResponseWriter gzip(exchange, sink.writer(), active_options());
+                     auto writer = gzip.writer();
+                     HttpHeaders headers(exchange.pool());
+                     headers.add("Content-Type", "text/html");
+                     auto header = co_await writer.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+                     EXPECT_TRUE(header.has_value());
+                     const std::string body = html_payload(4000);
+                     auto written = co_await writer.write_all(bytes_of(body), body.size(), false);
+                     EXPECT_TRUE(written.has_value());
+                     OutgoingHeaderBlockView trailer;
+                     trailer.kind = OutgoingHeaderKind::Trailer;
+                     (void) co_await writer.send_header(trailer);
+                 }),
+                 "header.end_stream");
+}
+#endif
 
 // ---- bypass paths ----
 

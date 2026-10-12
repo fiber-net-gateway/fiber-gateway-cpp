@@ -276,6 +276,7 @@ async::Task<common::IoResult<void>> GzipResponseWriter::send_header(const Outgoi
         co_return co_await next_.send_header(header, timeout);
     }
     if (header.kind == OutgoingHeaderKind::Trailer) {
+        FIBER_ASSERT(header.end_stream);
         if (state_ == State::Active) {
             auto result = co_await finish(false, timeout);
             if (!result) {

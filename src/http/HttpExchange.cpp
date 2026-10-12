@@ -281,6 +281,11 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::send_header(const Outgo
     if (response_write_error_ != common::IoErr::None) {
         co_return std::unexpected(response_write_error_);
     }
+    if (header.kind == OutgoingHeaderKind::Trailer) {
+        FIBER_ASSERT(header.end_stream);
+        FIBER_ASSERT(response_stats_.header_sent);
+        FIBER_ASSERT(!response_stats_.completed);
+    }
     auto result = co_await io_->send_header(*this, header, timeout);
     if (!result) {
         record_response_write_error(result.error());
