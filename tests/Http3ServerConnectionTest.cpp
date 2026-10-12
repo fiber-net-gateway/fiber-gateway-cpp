@@ -287,8 +287,21 @@ TEST(Http3ServerConnectionTest, ServerCanSendFinalResponseHeader) {
     });
 }
 
-TEST(Http3ServerConnectionTest, ServerFinalResponseStopsOnlyUnreadRequestReceiveDirection) {
+namespace {
+struct UnreadRequestResponseCase {
+    const char *name;
+    std::size_t body_length;
+    bool write_body;
+    bool end_stream;
+    bool abort_response;
+};
+
+class Http3UnreadRequestBodyTest : public testing::TestWithParam<UnreadRequestResponseCase> {};
+} // namespace
+
+TEST_P(Http3UnreadRequestBodyTest, HandlerCompletionStopsUnreadRequestWithAppropriateCode) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        const auto response = GetParam();
         fiber::event::EventLoopGroup group(1);
         group.start();
 
@@ -297,14 +310,26 @@ TEST(Http3ServerConnectionTest, ServerFinalResponseStopsOnlyUnreadRequestReceive
         ServerRequestContext ctx;
         auto header_promise = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
         auto header_future = header_promise->get_future();
-        ctx.handler = [header_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        ctx.handler = [header_promise, response](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
             auto result = co_await exchange.send_header({
                     .kind = fiber::http::OutgoingHeaderKind::Final,
                     .status_code = 413,
                     .headers = nullptr,
-                    .body = fiber::http::HttpBodySpec::ContentLength(0),
-                    .end_stream = true,
+                    .body = fiber::http::HttpBodySpec::ContentLength(response.body_length),
+                    .end_stream = response.body_length == 0 && response.end_stream,
             });
+            if (result && response.write_body) {
+                auto body = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5,
+                                                        response.end_stream);
+                if (!body) {
+                    result = std::unexpected(body.error());
+                } else {
+                    EXPECT_EQ(*body, 5U);
+                }
+            }
+            if (result && response.abort_response) {
+                result = exchange.abort();
+            }
             header_promise->set_value(result);
         };
 
@@ -322,32 +347,59 @@ TEST(Http3ServerConnectionTest, ServerFinalResponseStopsOnlyUnreadRequestReceive
         std::vector<std::uint8_t> request = headers_frame(headers);
         std::promise<void> feed_done;
         auto feed_future = feed_done.get_future();
-        fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
-            return feed_stream_then_delay(&quic, &request, 0, &feed_done);
-        });
+        fiber::quic::QuicStream::Lease request_stream;
+        fiber::async::spawn(group.at(0),
+                            [&quic, &request, &feed_done, &request_stream]() -> fiber::async::DetachedTask {
+                                auto stream = quic.get_or_create_peer_stream(0);
+                                EXPECT_TRUE(stream.has_value());
+                                if (stream && *stream != nullptr) {
+                                    // Cancellation can retire the stream before the state is inspected.
+                                    request_stream = (*stream)->lease();
+                                }
+                                return feed_stream_then_delay(&quic, &request, 0, &feed_done);
+                            });
 
         ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
         ASSERT_EQ(header_future.wait_for(2s), std::future_status::ready);
         EXPECT_TRUE(header_future.get().has_value());
 
-        std::promise<std::pair<bool, bool>> stream_state;
+        struct StreamState {
+            bool receive_stopped;
+            bool response_aborted;
+            std::uint64_t stop_error_code;
+        };
+        std::promise<StreamState> stream_state;
         auto stream_state_future = stream_state.get_future();
-        fiber::async::spawn(group.at(0), [&quic, &stream_state]() -> fiber::async::DetachedTask {
-            const fiber::quic::QuicStream *stream = quic.find_stream(0);
-            stream_state.set_value(
-                    {stream != nullptr && stream->stop_sending(), stream != nullptr && stream->send_aborted()});
+        fiber::async::spawn(group.at(0), [&request_stream, &stream_state]() -> fiber::async::DetachedTask {
+            const fiber::quic::QuicStream *stream = request_stream.get();
+            stream_state.set_value({.receive_stopped = stream != nullptr && stream->stop_sending(),
+                                    .response_aborted = stream != nullptr && stream->send_aborted(),
+                                    .stop_error_code = stream != nullptr ? stream->stop_error_code() : 0});
+            request_stream.reset();
             co_return;
         });
         ASSERT_EQ(stream_state_future.wait_for(2s), std::future_status::ready);
-        const auto [receive_stopped, response_aborted] = stream_state_future.get();
+        const auto [receive_stopped, response_aborted, stop_error_code] = stream_state_future.get();
+        const bool response_complete = response.end_stream && !response.abort_response;
         EXPECT_TRUE(receive_stopped);
-        EXPECT_FALSE(response_aborted);
+        EXPECT_EQ(response_aborted, !response_complete);
+        EXPECT_EQ(stop_error_code,
+                  static_cast<std::uint64_t>(response_complete ? fiber::http::Http3ErrorCode::NoError
+                                                               : fiber::http::Http3ErrorCode::RequestCancelled));
 
         fixture.finish();
         group.stop();
         group.join();
     });
 }
+
+INSTANTIATE_TEST_SUITE_P(ResponseStates, Http3UnreadRequestBodyTest,
+                         testing::Values(UnreadRequestResponseCase{"CompleteHeaders", 0, false, true, false},
+                                         UnreadRequestResponseCase{"CompleteBody", 5, true, true, false},
+                                         UnreadRequestResponseCase{"IncompleteHeaders", 5, false, false, false},
+                                         UnreadRequestResponseCase{"IncompleteBody", 10, true, false, false},
+                                         UnreadRequestResponseCase{"ExplicitAbort", 0, false, true, true}),
+                         [](const testing::TestParamInfo<UnreadRequestResponseCase> &info) { return info.param.name; });
 
 TEST(Http3ServerConnectionTest, ServerCanWriteFinalResponseBody) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
