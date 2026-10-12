@@ -287,9 +287,34 @@ TEST(Http2HpackDecoderTest, RejectsFifthIntegerContinuationByte) {
     DecoderRecorder recorder;
     decoder.begin_block(&recorder, &DecoderRecorder::ops());
 
-    // Indexed field, prefix 1 plus five zero-payload continuations (shifts
-    // 0/7/14/21/28). The fifth continuation rides at shift 28; accepting it
-    // would compute 0u << 35 on the terminator — UB even for a zero payload.
-    const std::uint8_t block[] = {0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00};
+    // A saturated table-size prefix enters integer continuation parsing.
+    // Five zero-payload continuations would advance the shift to 35 before
+    // the terminator, causing UB without the continuation-length guard.
+    const std::uint8_t block[] = {0x3f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00};
     EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2HpackDecoderTest, RejectsFifthIntegerContinuationByteAcrossCalls) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+
+    const std::uint8_t prefix[] = {0x3f, 0x80, 0x80, 0x80, 0x80};
+    EXPECT_EQ(decoder.decode(prefix, sizeof(prefix), false), fiber::common::IoErr::None);
+    const std::uint8_t fifth[] = {0x80};
+    EXPECT_EQ(decoder.decode(fifth, sizeof(fifth), false), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2HpackDecoderTest, AcceptsIntegerTerminatedInFourthContinuationByte) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+
+    // The same table size (31) fits within the supported continuation length.
+    const std::uint8_t block[] = {0x3f, 0x80, 0x80, 0x80, 0x00};
+    EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::None);
 }
