@@ -136,6 +136,8 @@ HttpBodyPipeWriter make_http_body_pipe_writer(T &sink) noexcept {
     };
 }
 
+// Each sink write may accept a prefix. Success requires end of input, all
+// buffered bytes accepted by the sink, and the completion marker consumed.
 async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBodyPipeWriter sink,
                                                const HttpBodyPipeOptions &options) noexcept;
 

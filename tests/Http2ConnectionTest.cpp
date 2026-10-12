@@ -5809,6 +5809,82 @@ TEST(Http2ConnectionTest, ServerWriteTimeoutResetsStreamAndRejectsRetry) {
     });
 }
 
+namespace {
+ServerHeaderRunOutcome run_server_response_trailer(bool send_final, bool end_body, bool end_trailer) {
+    std::string request(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0, 0, {});
+    request += build_headers_frame_bytes(
+            1, {{":method", "GET"}, {":scheme", "https"}, {":path", "/trailers"}, {":authority", "example.com"}}, true);
+    fiber::http::HttpHandler handler = [send_final, end_body,
+                                        end_trailer](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        if (send_final) {
+            auto header = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+            });
+            EXPECT_TRUE(header.has_value());
+            if (!header) {
+                co_return;
+            }
+        }
+        if (end_body) {
+            auto body = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+            EXPECT_TRUE(body.has_value());
+            if (!body) {
+                co_return;
+            }
+        }
+        fiber::http::HttpHeaders trailers(exchange.pool());
+        trailers.set("digest", "xyz");
+        auto trailer = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Trailer,
+                .headers = &trailers,
+                .end_stream = end_trailer,
+        });
+        EXPECT_TRUE(trailer.has_value());
+        EXPECT_TRUE(exchange.response_stats().completed);
+    };
+    return execute_server_request({std::move(request)}, std::move(handler));
+}
+} // namespace
+
+#if GTEST_HAS_DEATH_TEST
+TEST(Http2ConnectionDeathTest, TrailerBeforeFinalHeaderAsserts) {
+    EXPECT_DEATH(::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+                     (void) run_server_response_trailer(false, false, true);
+                 }),
+                 "response_stats_.header_sent");
+}
+
+TEST(Http2ConnectionDeathTest, TrailerWithoutEndStreamAsserts) {
+    EXPECT_DEATH(::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+                     (void) run_server_response_trailer(true, false, false);
+                 }),
+                 "header.end_stream");
+}
+
+TEST(Http2ConnectionDeathTest, TrailerAfterBodyEndAsserts) {
+    EXPECT_DEATH(::fiber::test::run_in_loop(
+                         [&](::fiber::mem::IoBufNodePool &) { (void) run_server_response_trailer(true, true, true); }),
+                 "!response_stats_.completed");
+}
+#endif
+
+TEST(Http2ConnectionTest, ServerHandlerCanSendEmptyBodyResponseTrailers) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        const auto outcome = run_server_response_trailer(true, false, true);
+        ASSERT_TRUE(outcome.result.has_value());
+        const auto blocks = collect_stream_header_blocks(outcome.written, 1);
+        ASSERT_EQ(blocks.size(), 2U);
+        EXPECT_EQ(blocks[0].first_flags & 0x1U, 0U);
+        EXPECT_EQ(blocks[1].first_flags & 0x1U, 1U);
+        const auto fields = decode_header_block(blocks[1].header_block);
+        ASSERT_EQ(fields.size(), 1U);
+        EXPECT_EQ(fields[0].first, "digest");
+        EXPECT_EQ(fields[0].second, "xyz");
+    });
+}
+
 TEST(Http2ConnectionTest, ServerHandlerCanSendResponseTrailers) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         std::string request = std::string(kClientConnectionPreface);
