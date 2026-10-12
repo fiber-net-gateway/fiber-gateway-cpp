@@ -1,7 +1,7 @@
 # access-server 崩溃分析 — 2026-09-30 16:05
 
-- **机器**: `172.28.2.219`（vdi 正式机，2026-09-30 14:07 从 openresty 切换）
-- **二进制**: `/opt/access-gateway/access-server`，master 84027c2，sha256 `b2d301574fd7…`（与 111/218 同一构建；本地 `native/build/apps/access-server` 一致，可符号化）
+- **机器**: 生产节点（2026-09-30 14:07 从 openresty 切换）
+- **二进制**: `/opt/access-gateway/access-server`，master 84027c2，sha256 `b2d301574fd7…`（与其他生产节点同一构建；本地 `native/build/apps/access-server` 一致，可符号化）
 - **结论**: Fiber h2 teardown 断言失败自杀（SIGABRT），systemd 2 秒拉起，全机中断约 2~3 秒。**Fiber 子模块 bug，非 access-server 仓库代码缺陷**；触发面 = 客户端 h2 + 流式响应管道 + 取消恰逢响应体写批次在途。
 
 ## 1. 时间线（journalctl -u access-server）
@@ -75,7 +75,7 @@ fiber::event::EventLoop::run_once → EventLoopGroup worker 线程
 ## 4. 触发场景与流量画像
 
 - 崩溃流本身死在管道中间，**没有 access log 行**（LogWorker 异步、请求未完结不落行）。
-- 16:05:03~16:05:08 邻域全部是 `ai-gateway.haierxj.cn/v1/messages`（`fiber-ai-server`，上游 172.28.2.113/.120，响应体 2~4 KB 流式、耗时数百 ms 级）；在途流极可能即是一条 `/v1/messages` 流式响应写 h2 客户端。
+- 16:05:03~16:05:08 邻域全部是 `/v1/messages` 请求（`fiber-ai-server`，响应体 2~4 KB 流式、耗时数百 ms 级）；在途流极可能即是一条 `/v1/messages` 流式响应写 h2 客户端。
 - 取消源（从 `execute [resume]` 由 WaitAwaiter 唤醒看）为 executor 等待的一方先就绪/取消：客户端断开（abort 回调）、上游读结束/出错、或 body 空闲计时器（84027c2 当天 14:07 才上线，但静默超时触发时写在途概率低——静默意味着本侧也少有新写；客户端 RST 撞在途写是更贴切的画像）。
 - 概率画像：需要 客户端 h2（本机占比仅 4%，h1 60%/h3 36%）× 流式管道 × 取消恰逢写批次 InFlight —— 低概率、非确定性，**会重复发生**。
 
@@ -83,15 +83,15 @@ fiber::event::EventLoop::run_once → EventLoopGroup worker 线程
 
 | 机器 | 构建 | FIBER_ASSERT (8h) | 说明 |
 |---|---|---|---|
-| 172.28.2.219 (vdi 正式) | 84027c2 | **1 次** | SSE/AI 流式主力，最暴露 |
+| 生产节点 | 84027c2 | **1 次** | SSE/AI 流式主力，最暴露 |
 
-影响：单次全机中断 ~2~3s（含 h3/UDP 连接重置重连），systemd 自愈，无需回滚。风险留存：上游修复前，219 上同型崩溃会零星复发。
+影响：单次全机中断 ~2~3s（含 h3/UDP 连接重置重连），systemd 自愈，无需回滚。风险留存：上游修复前，该生产节点上同型崩溃会零星复发。
 
 ## 6. 后续动作
 
 - [x] 按第 7 节实现并验证上游修复，另修复同一触发面上的写永久挂起问题（见第 8 节；工作区改动，尚未提交）
 - [ ] 上游提交（用户亲自提交），更新 gitlink 后三台统一换二进制
-- [ ] 修复前观察点：`systemctl show access-server -p NRestarts`（219 当前 =1，>1 即复发）+ `journalctl -u access-server | grep FIBER_ASSERT`
+- [ ] 修复前观察点：`systemctl show access-server -p NRestarts`（该生产节点当前 =1，>1 即复发）+ `journalctl -u access-server | grep FIBER_ASSERT`
 - [ ] 复发时取证（无需 core）：journal 偏移栈 + 本地 `addr2line`；邻域 access log 定位流量类型
 
 ## 7. 代码修改方案（已实施）
