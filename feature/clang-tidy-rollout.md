@@ -3,11 +3,10 @@
 记录日期:2026-10-03;工具:clang-tidy-20(20.1.8,与工具链 clang-20 同版本)。
 关闭 `docs/project-review-2026-10.zh-CN.md` 工程缺口 #2(无 clang-tidy)。
 
-**状态:批次 1(src + include + example)已完成清零并提交(13 个模块提交,
-见 §3.1;compression/log 为终扫补入的两模块);收官终扫 `./run_tidy.sh src
-example`(260 TU)0 发现 0 前端错误;根 `.clang-tidy` 已启用
-`WarningsAsErrors: '*'`,批次 2/3 目录经嵌套 `.clang-tidy` 暂缓(见 §6)。**
-批次 2/3 见 §7 backlog。
+**状态:批次 1/2/3 均已完成清零,全仓项目代码已启用
+`WarningsAsErrors: '*'`,apps/tests/fuzz 的临时嵌套覆盖均已删除(见 §3、§6)。**
+历史批次 1 终扫覆盖 src + include + example(260 TU),0 发现、0 前端错误。
+fuzz 仍需使用独立构建树的编译数据库。
 
 ## 1. 基础设施
 
@@ -18,12 +17,18 @@ example`(260 TU)0 发现 0 前端错误;根 `.clang-tidy` 已启用
   `HeaderFilterRegex: (^|/)(src|include)/` 限定项目头文件,
   `ExcludeHeaderFilterRegex` 排除 temp/_deps、系统头(/usr)、构建树生成头。
 - `run_tidy.sh`(镜像 `format_code.sh` 惯例):
-  - 版本探测 clang-tidy-20→17→裸 clang-tidy,**主版本 <17 拒跑**;
-  - 默认只查改动 TU;改动的头文件按文件名扇出到包含它的 TU(>50 提示);
+  - 固定 **clang-tidy 20.x** 基线,优先 clang-tidy-20,其次验证裸 clang-tidy
+    的主版本;其他主版本拒跑。编译器最低版本不等于分析工具最低版本;
+    `ExcludeHeaderFilterRegex` 直到 LLVM 19 才可用,通配检查集也会随版本变化;
+  - 默认只查改动 TU;一旦选中头文件,保守检查当前编译数据库中的全部项目
+    TU,覆盖直接/间接包含。包括未跟踪/删除的头文件、显式头文件和目录内的
+    头文件;待引入完整依赖图后才能安全收窄。所有候选 TU 统一为绝对路径;
   - 位置参数支持单文件/目录(替换改动集),`-a` 全量,`-f` 修复+格式化+复验;
   - compile-db 成员预过滤(新文件/陈旧 GLOB 给可见提示);
   - db 编译器为 g++ 时退出 2(SelectToolchain 自动选 clang,重配即好);
-  - 优先 run-clang-tidy(-fix 时跨 TU 同头文件修复去重);缺则 xargs 回退,
+  - `-p` 支持绝对路径;相对路径先按调用目录、再按仓库根目录查找;
+  - 优先 run-clang-tidy-20(-fix 时配套 clang-apply-replacements-20,
+    跨 TU 同头文件修复去重);缺则 xargs 回退,
     回退的 -f 逐文件串行(不做并发 -fix,避免同头文件并发写丢失);
   - 排除 `**/generated/**`(其目录级 `Checks: '-*'` 会让 tidy 硬错);
   - 退出码:0 干净 / 1 有告警 / 2 环境错误(CI-ready)。
@@ -267,4 +272,15 @@ memcpy 原始二进制区域)。tests/ 的 misc-unused-parameters 15 处一律
 - CI 接线(评审缺口 #1,另案)
 - 编译器告警旗标(-Wall/-Wextra)为独立后续事项
   (tests 批顺手清零了 ClientHttp1ExchangeTest 两处既有 nodiscard 告警:
-  adopt_loop 返回值改 EXPECT_EQ 断言)
+    adopt_loop 返回值改 EXPECT_EQ 断言)
+
+## 11. 检查入口回归验证
+
+`python3 tests/RunTidyTest.py` 使用隔离 Git 仓库和记录调用的 clang-tidy 桩,
+验证选中文件集合、编译数据库路径与版本门禁,不要求本机安装 clang-tidy。
+安装 Python3 时也通过 CTest 的 `fiber_run_tidy_check` 运行。
+桩测试不能替代真实 clang-tidy 扫描;真实扫描仍使用上述 20.x 工具链。
+
+HPACK 续字节回归使用饱和的表大小前缀 `0x3f`,确保进入整数续字节路径;
+同时覆盖跨 decode 调用的拒绝和第四字节终止的合法边界。原 `0x81` 输入
+会在随后遇到索引 0 时提前失败,无法验证移位越界修复。

@@ -3,20 +3,21 @@
 set -euo pipefail
 
 # Lint with clang-tidy using the repo .clang-tidy config. Mirrors format_code.sh
-# conventions: version probe highest-first, changed-files-by-default, -a for
+# conventions: changed-files-by-default, -a for
 # everything, third-party excludes. Requires a build tree with
 # compile_commands.json (every tree configured since CMAKE_EXPORT_COMPILE_COMMANDS
 # has one; plain `cmake -S . -B build` provides it).
 #
 # Only translation units (.cpp/.cc/.cxx) are passed to clang-tidy — with -p a
 # header argument cannot be resolved to a compile command. Headers are checked
-# via the TUs that include them; changed headers are mapped to including TUs by
-# basename. Positional args allow scoped runs (e.g. `./run_tidy.sh src/http`).
+# via TUs. Without a complete dependency graph, selecting any header checks
+# all project TUs in the selected database, including indirect consumers.
 
 CLANG_TIDY=""
 RUNNER=""
 APPLY=""
 CHECK_ALL=0
+HEADER_SELECTED=0
 FORMAT_AND_FIX=0
 BUILD_DIR="build"
 JOBS="$(nproc)"
@@ -55,8 +56,9 @@ usage() {
 Usage: ./run_tidy.sh [-a] [-f] [-p build-dir] [-j jobs] [file or dir ...]
 
 Checks changed project translation units with clang-tidy (mirrors format_code.sh).
-Headers cannot be checked directly; changed headers fan out to the .cpp files
-that include them. Positional files/dirs replace the changed-file selection.
+Positional files/dirs replace the changed-file selection. Selecting any header
+(changed, untracked, deleted, or explicit, including within a directory) checks
+all project translation units available in the selected compile database.
 
 Options:
   -a         Check all tracked project translation units (src, apps, tests,
@@ -66,7 +68,7 @@ Options:
   -p DIR     Build directory containing compile_commands.json (default: build).
   -j N       Parallel jobs (default: min(nproc, 12)).
 
-Requires clang-tidy >= 17 and a build tree configured with Clang
+Requires clang-tidy 20.x (the validated check-set baseline) and a Clang build tree
 (SelectToolchain.cmake picks clang automatically).
 
 Exit codes: 0 = clean, 1 = findings remain, 2 = environment/config error.
@@ -91,6 +93,10 @@ while getopts ":afp:j:h" opt; do
             usage
             exit 0
             ;;
+        :)
+            echo "run_tidy.sh: option -${OPTARG} requires an argument" >&2
+            exit 2
+            ;;
         \?)
             echo "run_tidy.sh: unknown option: -${OPTARG}" >&2
             usage >&2
@@ -100,49 +106,40 @@ while getopts ":afp:j:h" opt; do
 done
 shift $((OPTIND - 1))
 
-for version in 20 19 18 17; do
-    if command -v "clang-tidy-${version}" >/dev/null 2>&1; then
-        CLANG_TIDY="clang-tidy-${version}"
-        break
-    fi
-done
+if command -v clang-tidy-20 >/dev/null 2>&1; then
+    CLANG_TIDY="clang-tidy-20"
+fi
 
 if [[ -z "${CLANG_TIDY}" ]]; then
     if command -v clang-tidy >/dev/null 2>&1; then
         CLANG_TIDY="clang-tidy"
     else
-        echo "run_tidy.sh: no clang-tidy binary found on PATH (need >= 17)" >&2
+        echo "run_tidy.sh: no clang-tidy binary found on PATH (need 20.x)" >&2
         exit 2
     fi
 fi
 
-# A bare clang-tidy may resolve to an LLVM too old to parse the C++23 compile
-# db (this repo's toolchain floor is Clang 17); enforce it for every probe.
+# Pin the lint baseline independently of the compiler floor. In particular,
+# ExcludeHeaderFilterRegex is not understood by clang-tidy 17/18, and wildcard
+# check sets change across major versions.
 TIDY_MAJOR="$( ("${CLANG_TIDY}" --version 2>/dev/null || true) | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f1 || true)"
-if [[ -z "${TIDY_MAJOR}" ]] || (( TIDY_MAJOR < 17 )); then
-    echo "run_tidy.sh: ${CLANG_TIDY} is older than 17 and cannot analyze the C++23 compile db" >&2
+if [[ -z "${TIDY_MAJOR}" ]] || (( TIDY_MAJOR != 20 )); then
+    echo "run_tidy.sh: ${CLANG_TIDY} must be version 20.x for the validated .clang-tidy configuration" >&2
     exit 2
 fi
 
-for version in 20 19 18 17; do
-    if command -v "run-clang-tidy-${version}" >/dev/null 2>&1; then
-        RUNNER="run-clang-tidy-${version}"
-        break
-    fi
-done
-if [[ -z "${RUNNER}" ]] && command -v run-clang-tidy >/dev/null 2>&1; then
-    RUNNER="run-clang-tidy"
+if command -v run-clang-tidy-20 >/dev/null 2>&1; then
+    RUNNER="run-clang-tidy-20"
 fi
 # Preferred: run-clang-tidy dedups conflicting fixes to the same header across
 # TUs (src shares headers heavily). Without it, -f falls back to sequential
 # per-file fixing, which is safe but cannot merge header fixes.
 if (( FORMAT_AND_FIX == 1 )); then
-    for version in 20 19 18 17; do
-        if command -v "clang-apply-replacements-${version}" >/dev/null 2>&1; then
-            APPLY="clang-apply-replacements-${version}"
-            break
-        fi
-    done
+    if command -v clang-apply-replacements-20 >/dev/null 2>&1; then
+        APPLY="clang-apply-replacements-20"
+    else
+        RUNNER=""
+    fi
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -170,28 +167,22 @@ is_third_party() {
 }
 
 add_tu() {
-    local path="$1"
+    local path
+    path="$(realpath -m "$1")"
     if [[ -f "${path}" ]] && is_tu "${path}" && ! is_third_party "${path}" && [[ -z "${seen[${path}]+x}" ]]; then
         seen["${path}"]=1
         files+=("${path}")
     fi
 }
 
-# A changed header is checked via every TU that includes it. Includes are
-# relative paths like "../event/EventLoop.h", so basename matching is the
-# reliable key. Warn (but proceed) when one header fans out very widely.
-add_header_fanout() {
-    local header="$1"
-    local base count tu
-    base="$(basename "${header}")"
-    count=0
-    while IFS= read -r -d '' tu; do
-        add_tu "${tu}"
-        count=$((count + 1))
-    done < <(grep -rlFZ --include='*.cpp' --include='*.cc' --include='*.cxx' -- "${base}" src apps tests example fuzz 2>/dev/null || true)
-    if (( count > 50 )); then
-        echo "run_tidy.sh: note: ${header} fans out to ${count} TU(s)" >&2
+select_file() {
+    if is_third_party "$1"; then
+        return
     fi
+    case "$1" in
+        *.h|*.hh|*.hpp|*.hxx) HEADER_SELECTED=1 ;;
+        *) add_tu "$1" ;;
+    esac
 }
 
 if (( $# > 0 )); then
@@ -203,18 +194,19 @@ if (( $# > 0 )); then
         fi
         local_path="$(realpath -m "${local_path}")"
         if [[ -d "${local_path}" ]]; then
-            while IFS= read -r -d '' tu; do
-                add_tu "${tu}"
-            done < <(find "${local_path}" -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) -print0)
+            while IFS= read -r -d '' path; do
+                select_file "${path}"
+            done < <(find "${local_path}" -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \
+                -o -name '*.h' -o -name '*.hh' -o -name '*.hpp' -o -name '*.hxx' \) -print0)
         else
-            add_tu "${local_path}"
+            if [[ ! -f "${local_path}" ]]; then
+                echo "run_tidy.sh: requested file does not exist: ${arg}" >&2
+                exit 2
+            fi
+            select_file "${local_path}"
         fi
     done
-elif (( CHECK_ALL == 1 )); then
-    while IFS= read -r -d '' path; do
-        add_tu "${REPO_ROOT}/${path}"
-    done < <(git ls-files -z -- "${TU_PATHS[@]}")
-else
+elif (( CHECK_ALL == 0 )); then
     while IFS= read -r -d '' path; do
         add_tu "${REPO_ROOT}/${path}"
     done < <(git diff --name-only -z --diff-filter=ACMRT HEAD -- "${TU_PATHS[@]}")
@@ -226,8 +218,22 @@ fi
 # Untracked files need the same treatment as diffed ones in the default mode.
 if (( $# == 0 && CHECK_ALL == 0 )); then
     while IFS= read -r -d '' path; do
-        add_header_fanout "${REPO_ROOT}/${path}"
-    done < <( { git diff --name-only -z --diff-filter=ACMRT HEAD -- "${HDR_PATHS[@]}"; git ls-files --others --exclude-standard -z -- "${HDR_PATHS[@]}"; } )
+        select_file "${REPO_ROOT}/${path}"
+    done < <( { git diff --name-only -z --diff-filter=ACDMRT HEAD -- "${HDR_PATHS[@]}"; git ls-files --others --exclude-standard -z -- "${HDR_PATHS[@]}"; } )
+fi
+
+if (( HEADER_SELECTED == 1 || (CHECK_ALL == 1 && $# == 0) )); then
+    if (( HEADER_SELECTED == 1 )); then
+        echo "run_tidy.sh: header selected — checking all project translation units in the selected compile db (including indirect consumers)" >&2
+    fi
+    while IFS= read -r -d '' path; do
+        add_tu "${REPO_ROOT}/${path}"
+    done < <(git ls-files -z -- "${TU_PATHS[@]}")
+    if (( HEADER_SELECTED == 1 )); then
+        while IFS= read -r -d '' path; do
+            add_tu "${REPO_ROOT}/${path}"
+        done < <(git ls-files --others --exclude-standard -z -- "${TU_PATHS[@]}")
+    fi
 fi
 
 if (( ${#files[@]} == 0 )); then
@@ -242,9 +248,14 @@ fi
 # Locate the compile database. A relative -p is resolved against the caller's
 # cwd first, then the repo root.
 DB=""
-for candidate in "${ORIG_DIR}/${BUILD_DIR}" "${REPO_ROOT}/${BUILD_DIR}"; do
+if [[ "${BUILD_DIR}" == /* ]]; then
+    db_candidates=("${BUILD_DIR}")
+else
+    db_candidates=("${ORIG_DIR}/${BUILD_DIR}" "${REPO_ROOT}/${BUILD_DIR}")
+fi
+for candidate in "${db_candidates[@]}"; do
     if [[ -f "${candidate}/compile_commands.json" ]]; then
-        DB="${candidate}/compile_commands.json"
+        DB="$(realpath "${candidate}/compile_commands.json")"
         break
     fi
 done

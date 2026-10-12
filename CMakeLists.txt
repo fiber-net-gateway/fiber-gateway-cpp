@@ -219,6 +219,11 @@ if(FIBER_BUILD_TESTS)
         endif()
 
         enable_testing()
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if (Python3_Interpreter_FOUND)
+            add_test(NAME fiber_run_tidy_check COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/tests/RunTidyTest.py")
+        endif()
         file(GLOB FIBER_TEST_SOURCES CONFIGURE_DEPENDS
             "${CMAKE_CURRENT_LIST_DIR}/tests/*Test.cpp")
         list(SORT FIBER_TEST_SOURCES)

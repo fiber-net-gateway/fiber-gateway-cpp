@@ -1,5 +1,6 @@
 # clang-tidy configuration for fiber-gateway-cpp.
 # Run via ./run_tidy.sh (see that script for build-tree requirements).
+# Tool baseline: clang-tidy 20.x; wildcard check sets are version-dependent.
 # Check-set rationale and baseline counts for every disable live in
 # feature/clang-tidy-rollout.md; do not remove a disable without re-running
 # the baseline documented there.
@@ -32,11 +33,9 @@
 #     '__ptr_' internals (analyzer mis-modeling), not real leaks
 #   clang-analyzer-security.PointerSub — intrusive-entry handle_offset idiom
 #     ((char*)&entry - (char*)&handle) is deliberate container_of-style offset math
-# Every tier-1 module (src/*, include/*, example/*) has been brought to zero
+# Every project module (src/, include/, example/, apps/, tests/, fuzz/) has been brought to zero
 # warnings (commit series in feature/clang-tidy-rollout.md); this holds them
-# there. Batch-2/3 directories (apps/, tests/, fuzz/) are not yet at zero and
-# carry local .clang-tidy overrides that keep their warnings non-fatal until
-# their batch lands.
+# there. Fuzz translation units require a separate FIBER_BUILD_FUZZERS tree.
 WarningsAsErrors: '*'
 
 Checks: >
