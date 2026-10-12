@@ -4,13 +4,13 @@
 >
 > 核验事实：Initial key 派生（salt `0x38762cf7…` + DCID）、AEAD nonce（IV XOR PN）、header protection（AES-ECB/ChaCha20 双路径）、Retry integrity tag、stateless reset（HMAC-SHA256 + 常时比较）、CID 用 `RAND_bytes` CSPRNG + 重试去重均符合 RFC 9001；anti-amplification（3×）按 path `received*3` 正确封顶（`QuicPathManager.cpp:244-260`）；ECN `IP_RECVTOS`/`IP_TOS`/`IPV6_TCLASS` 设置与解析齐全；稳态 recv 零堆分配（`read_buffer_`/`plaintext_buffer_` 复用）；endpoint 单线程 per-socket，`dcid_tree_` 无锁；全 `src/quic/` `std::string/vector/function/shared_ptr` 仅 4 处（全在 `QuicUdpEndpoint.cpp`），性能纪律真执行。
 >
-> 测试覆盖：约 10,600 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，CUBIC 避免期曲线（`cubic_window`/`cubic_time`/`on_ack` 三分支）已有 RFC 9438 KAT（2026-10-12，`tests/quic_kat/gen_cubic_kat.py` 生成向量 + 闭式交叉验证）；`QuicSendScheduler`/`QuicPathManager` 的专项覆盖仍然薄弱；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
+> 测试覆盖：约 11,400 行 QUIC 测试；`QuicPacer` 已有确定性算法单测及 scheduler/endpoint 集成回归，CUBIC 避免期曲线（`cubic_window`/`cubic_time`/`on_ack` 三分支）已有 RFC 9438 KAT（2026-10-12，`tests/quic_kat/gen_cubic_kat.py` 生成向量 + 闭式交叉验证）；可靠性拥塞域五个覆盖洞已于 2026-10-12 全部补齐（见 MEDIUM 域导语）：`on_idle` epoch 平移/app-limited、`reset_for_path` 字段级复位、PTO 指数 backoff 与饱和钳制、`QuicSendScheduler` 专项（`tests/QuicSendSchedulerTest.cpp`，init 校验矩阵/预算/轮转/close 语义）、`QuicPathManager` 专项（`tests/QuicPathManagerTest.cpp`，验证重试阶梯与 failover/NoViablePath/probe 无副作用/set_active 降级/槽位上限/CID 槽绑定/迁移 rebind 再验证），五个关键行为均经突变验证（去倍增/去轮转/去平移/去 init 各自红）；全 `src/quic/` 0 个 `TODO/FIXME` 标记。
 >
 > 状态：部分动工。#2 PTO 忙循环、#3 re-entrancy、#4 create-before-auth（SSL_new 延后，方案 A）、#5 无状态响应限速、#6 owner EventLoop 计时器已修复（2026-07-14，见下）；#7 UAF 于 2026-07-15 复核为正常生命周期不可达，并已加入 detach-before-destroy 不变量断言与回归测试，不再列为 P0；#8 接收复制于 2026-07-15 复核为当前 endpoint 复用明文缓冲架构下保证数据生命周期所必需，降为后续架构性能优化；#11 于 2026-07-15 复核为 RFC 9438 允许的 `flight_size` 减窗行为，不构成协议错误，保留为 application-limited 场景的后续性能优化；#12 pacing、#13 ACK range 扫描、#15 ACK-of-ACK 阈值已于 2026-07-15 修复；#14 于 2026-07-15 复核为方向误判不存在，并已补齐三类区间回归测试；#16 于 2026-07-15 复核为 RFC 要求的 clamp 行为，并修复相邻的 RTT 扣减等号边界；#17 于 2026-07-15 复核为调用链误判，idle ACK 在进入 CUBIC window 前已返回，路径重置也已显式重置拥塞状态；#18 强保护包双解析已于 2026-07-15 消除，Initial 为无副作用静默丢弃而有意保留预校验；#19 当前定义的重复 transport parameter 已于 2026-07-15 拒绝；#20 PADDING 扫描及 #21 Frame Type、NEW_CONNECTION_ID、TP 边界已于 2026-07-15 修复，#21 通用 varint 长编码经复核为 RFC 允许而保留。待修 P0：#1 key-update、#9 GSO，其余排期。
 
 ## 总体评价
 
-codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝视图（`QuicSlice`）、`write_or_count_*` 模式、crypto 核心、anti-amplification、ECN、稳态零分配均正确。原审计列出 **9 个高危**；其中 #7 经生命周期调用链复核，不构成正常路径可达的独立 UAF，改列为不变量防御项；#8 经缓冲区所有权与异步消费路径复核，确认是当前架构下必要的生命周期复制，降为后续架构性能优化，不再列为 P0/HIGH。其余问题包括 key 用量越界、PTO 忙循环、re-entrancy、DoS 向量、缺 GSO，以及若干中危的可靠性与性能问题。可靠性与拥塞控制域问题最集中且专项覆盖仍然薄弱，风险最高。按严重度排列如下，均给出 `file:line` 与触发场景。
+codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝视图（`QuicSlice`）、`write_or_count_*` 模式、crypto 核心、anti-amplification、ECN、稳态零分配均正确。原审计列出 **9 个高危**；其中 #7 经生命周期调用链复核，不构成正常路径可达的独立 UAF，改列为不变量防御项；#8 经缓冲区所有权与异步消费路径复核，确认是当前架构下必要的生命周期复制，降为后续架构性能优化，不再列为 P0/HIGH。其余问题包括 key 用量越界、PTO 忙循环、re-entrancy、DoS 向量、缺 GSO，以及若干中危的可靠性与性能问题。可靠性与拥塞控制域曾为覆盖最薄弱域，其五个覆盖洞已于 2026-10-12 全部补齐（见 MEDIUM 域导语）。按严重度排列如下，均给出 `file:line` 与触发场景。
 
 ---
 
@@ -150,7 +150,9 @@ codec 边界检查严密（`QuicCursor` 每读必 `remaining()`）、零拷贝�
 
 ---
 
-## 🟠 MEDIUM — 可靠性与拥塞控制（专项覆盖仍薄弱）
+## 🟠 MEDIUM — 可靠性与拥塞控制
+
+> 覆盖状态（2026-10-12）：本域专项单测已齐——`QuicCongestionTest`（17 例，含 CUBIC KAT 7 例、idle epoch 3 例、`reset_for_path` 1 例）、`QuicLossRecoveryTest`（9 例，含 PTO backoff 2 例）、`QuicPacerTest`（8 例）、`QuicSendSchedulerTest`（6 例）、`QuicPathManagerTest`（7 例）。待修项仅剩下述 #9 GSO 与 #1 key-update 等工程问题，无覆盖洞。
 
 ### 10. ✅ PTO 基于 non-ack-eliciting 包（复核为误报）
 `QuicLossRecovery.cpp:213-238`
@@ -577,7 +579,7 @@ deadline 检查、单写者 `Busy`、`post_at` 计时器、`post` resume、`comp
 | P0 | #2 PTO 忙循环✅、#3 re-entrancy✅、#4 create-before-auth✅(方案A)、#5 DoS 向量、#1 key-update | 中 |
 | P0 | #9 GSO/sendmmsg、#8 接收零拷贝 | 大 |
 | P1 | #11 loss 减窗基准、#22 `reset()` FIN'd 流、#23 `write()` 短写丢 FIN、#19 重复 TP 拒绝✅、#27 HKDF 溢出、#16 ack_delay skip | 小（多为一行） |
-| P1 | #13✅/#14⚪/#15✅；CUBIC 曲线 KAT✅（2026-10-12）；继续给 SendScheduler/PathManager 补单测 | 中 |
+| P1 | #13✅/#14⚪/#15✅；CUBIC 曲线 KAT✅（2026-10-12）；SendScheduler/PathManager 专项单测✅（2026-10-12，五洞全清） | 中 |
 | P2 | #7 detach-before-destroy 不变量断言✅；若要支持挂起 awaiter 下被动销毁，再做 awaiter self-retain | 小 / 中 |
 | P2 | #14 可选的严格跨空间 persistent-congestion 状态跟踪 | 中 |
 | P2 | #35 拆 QuicConnection god object、#31 拆 QuicUdpEndpoint、#25 去重 reassembly、#44 去重 awaiter | 大 |
