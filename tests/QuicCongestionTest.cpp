@@ -302,6 +302,126 @@ TEST(QuicCongestionTest, CongestionAvoidanceSaturatingVisitsTcpFriendlyRegion) {
     EXPECT_GT(cg.window, cg.w_max); // past K the window exceeds W_max
 }
 
+TEST(QuicCongestionTest, IdleShiftsCubicEpochAcrossTheIdleSpan) {
+    // App-limited epoch anchoring: while the connection idles in congestion
+    // avoidance, every cubic_window() evaluation (and the idle->active
+    // transition) advances k by the idle time elapsed, so the curve freezes at
+    // the value it had when the idle period began. Idle time never advances
+    // the CUBIC clock.
+    fiber::quic::QuicCongestionState cg{};
+    canonical_post_loss(cg); // window == ssthresh == 7560: avoidance
+    const fiber::quic::QuicTime epoch = cg.k;
+
+    fiber::quic::quic_congestion_on_idle(cg, true, fiber::quic::QuicTime{300});
+    EXPECT_TRUE(cg.idle);
+    EXPECT_EQ(cg.k, epoch); // entering idle shifts nothing by itself
+    EXPECT_EQ(cg.idle_start, fiber::quic::QuicTime{300});
+
+    const std::size_t frozen = fiber::quic::quic_congestion_cubic_window(cg, fiber::quic::QuicTime{500});
+    EXPECT_EQ(cg.k, epoch + fiber::quic::QuicTime{200}); // shifted by the idle chunk
+    // The frozen value is the mirror curve of a never-idle state at the
+    // moment the idle period began.
+    fiber::quic::QuicCongestionState mirror{};
+    canonical_post_loss(mirror);
+    EXPECT_EQ(frozen, fiber::quic::quic_congestion_cubic_window(mirror, fiber::quic::QuicTime{300}));
+
+    // Still idle: each evaluation re-anchors to its own idle_start.
+    EXPECT_EQ(fiber::quic::quic_congestion_cubic_window(cg, fiber::quic::QuicTime{800}), frozen);
+    EXPECT_EQ(cg.k, epoch + fiber::quic::QuicTime{500});
+
+    // Going active closes out the final idle chunk...
+    fiber::quic::quic_congestion_on_idle(cg, false, fiber::quic::QuicTime{1000});
+    EXPECT_EQ(cg.k, epoch + fiber::quic::QuicTime{700}); // the full 700 ms idle span
+    EXPECT_FALSE(cg.idle);
+    EXPECT_EQ(fiber::quic::quic_congestion_cubic_window(cg, fiber::quic::QuicTime{1000}), frozen);
+
+    // ...and active evaluations never shift again.
+    (void) fiber::quic::quic_congestion_cubic_window(cg, fiber::quic::QuicTime{2000});
+    EXPECT_EQ(cg.k, epoch + fiber::quic::QuicTime{700});
+}
+
+TEST(QuicCongestionTest, IdleDuringSlowStartDoesNotAnchorEpoch) {
+    // The epoch shift only applies in avoidance (window >= ssthresh): during
+    // slow start there is no CUBIC epoch to protect, so idle_start is not
+    // even tracked. enter_recovery() re-anchors it at the first loss.
+    fiber::quic::QuicCongestionState cg{};
+    fiber::quic::quic_congestion_init(cg, fiber::quic::QuicTime{0});
+
+    fiber::quic::quic_congestion_on_idle(cg, true, fiber::quic::QuicTime{500});
+    EXPECT_TRUE(cg.idle);
+    EXPECT_EQ(cg.idle_start, fiber::quic::QuicTime{0}); // guard: window < ssthresh
+    EXPECT_EQ(cg.k, fiber::quic::QuicTime{0});
+
+    (void) fiber::quic::quic_congestion_cubic_window(cg, fiber::quic::QuicTime{700});
+    EXPECT_EQ(cg.k, fiber::quic::QuicTime{0});
+    EXPECT_EQ(cg.idle_start, fiber::quic::QuicTime{0});
+}
+
+TEST(QuicCongestionTest, AckWhileIdleLeavesWindowUntouched) {
+    // quic_congestion_on_ack() early-outs while idle: the accounting still
+    // lands, but neither the slow-start nor the avoidance branch may grow the
+    // window from an ack observed during an idle period.
+    fiber::quic::QuicCongestionState cg{};
+    canonical_post_loss(cg);
+    fiber::quic::quic_congestion_on_packet_sent(cg, 1200, true, false);
+    fiber::quic::quic_congestion_on_idle(cg, true, fiber::quic::QuicTime{300});
+
+    (void) fiber::quic::quic_congestion_on_ack(
+            cg,
+            fiber::quic::QuicAckSample{.packet_len = 1200, .packet_number = 1, .send_time = fiber::quic::QuicTime{250}},
+            0, fiber::quic::QuicTime{400}, fiber::quic::QuicTime{250});
+
+    EXPECT_EQ(cg.in_flight, 10800U); // the ack still lands in the accounting
+    EXPECT_EQ(cg.window, 7560U); // but no branch grew the window
+    EXPECT_EQ(cg.w_est, 7560U);
+}
+
+TEST(QuicCongestionTest, ResetForPathRestoresInitialWindowAndRtt) {
+    // quic_congestion_reset_for_path (path migration / rebind): the whole
+    // CUBIC epoch, the negotiated MTU and the RTT estimate are dropped; the
+    // path starts over in slow start at the initial window. The connection
+    // wrapper re-counts in-flight bytes for packets above the reset threshold
+    // afterwards (pinned by PathResetKeepsOtherSpacesInFlightForTheirAcks).
+    fiber::quic::QuicCongestionState cg{};
+    fiber::quic::QuicRttState rtt{};
+    fiber::quic::quic_congestion_init(cg, fiber::quic::QuicTime{0});
+    fiber::quic::quic_rtt_sample(rtt, fiber::quic::QuicTime{100}, fiber::quic::QuicTime{20}, 0, 3,
+                                 fiber::quic::QuicTime{25}, false);
+    fiber::quic::quic_congestion_on_packet_sent(cg, 12000, true, false);
+    (void) fiber::quic::quic_congestion_on_loss(cg,
+                                                fiber::quic::QuicLossSample{.packet_len = 1200,
+                                                                            .packet_number = 0,
+                                                                            .send_time = fiber::quic::QuicTime{0},
+                                                                            .ignore_loss = false},
+                                                0, fiber::quic::QuicTime{100}, 1200);
+    // Leave avoidance-shaped state behind: negotiated MTU, in-flight bytes,
+    // idle epoch anchor.
+    cg.mtu = 1500;
+    cg.in_flight = 6000;
+    cg.idle = true;
+    cg.idle_start = fiber::quic::QuicTime{500};
+
+    fiber::quic::quic_congestion_reset_for_path(cg, rtt, fiber::quic::QuicTime{1000});
+
+    EXPECT_EQ(cg.window, 12000U); // initial_window(): back to slow start
+    EXPECT_EQ(cg.ssthresh, std::numeric_limits<std::size_t>::max());
+    EXPECT_EQ(cg.mtu, fiber::quic::kQuicCongestionMinInitialSize); // MTU is re-discovered per path
+    EXPECT_EQ(cg.in_flight, 0U);
+    EXPECT_EQ(cg.w_max, 0U);
+    EXPECT_EQ(cg.w_est, 0U);
+    EXPECT_EQ(cg.w_prior, 0U);
+    EXPECT_EQ(cg.k, fiber::quic::QuicTime{0});
+    EXPECT_EQ(cg.idle_start, fiber::quic::QuicTime{0});
+    EXPECT_FALSE(cg.idle);
+    EXPECT_EQ(cg.recovery_start, fiber::quic::QuicTime{999});
+
+    EXPECT_EQ(rtt.latest_rtt, fiber::quic::QuicTime{0});
+    EXPECT_EQ(rtt.avg_rtt, fiber::quic::QuicTime{fiber::quic::kQuicCongestionInitialRttMs});
+    EXPECT_EQ(rtt.min_rtt, fiber::quic::QuicTime::max());
+    EXPECT_EQ(rtt.rttvar, fiber::quic::QuicTime{fiber::quic::kQuicCongestionInitialRttMs / 2});
+    EXPECT_EQ(rtt.first_rtt, fiber::quic::QuicTime::max());
+}
+
 TEST(QuicOutputFrameListTest, MaintainsReverseLinksAcrossMutations) {
     fiber::quic::QuicOutputFrameList queue{};
     fiber::quic::QuicOutputFrameList prefix{};
@@ -783,4 +903,78 @@ TEST(QuicLossRecoveryTest, PtoQueuesTwoCongestionIgnoringPingProbes) {
     }
     EXPECT_EQ(ping_count, 2U);
     EXPECT_EQ(count, 3U);
+}
+
+namespace {
+
+// One unacknowledged Initial packet sent at t=0: the PTO arm of the loss
+// detection timer. With the default (sampled-never) RTT state the base PTO
+// duration is 333 + 4*166 = 997 ms (quic_pto).
+void arm_initial_pto(fiber::quic::QuicConnection &connection) {
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+
+    fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
+    ASSERT_NE(frame, nullptr);
+    frame->type = fiber::quic::QuicFrameType::Ping;
+    frame->packet_number = 0;
+    frame->send_time = fiber::quic::QuicTime{0};
+    frame->packet_ack_eliciting = true;
+    space.next_packet_number = 1;
+    space.sent_frames.push_back(*frame);
+}
+
+} // namespace
+
+TEST(QuicLossRecoveryTest, PtoDelayDoublesWithEachBackoffRound) {
+    // RFC 9002 6.2.1: each consecutive PTO doubles the timer. send_time = 0
+    // and now = 0 expose the raw backed-off duration as the timer delay.
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
+    arm_initial_pto(connection);
+
+    for (std::uint32_t count = 0; count <= 3; ++count) {
+        const auto timer = fiber::quic::quic_loss_detection_timer(connection, fiber::quic::QuicTime{0}, count);
+        EXPECT_EQ(timer.mode, fiber::quic::QuicLossTimerMode::Pto) << "pto_count " << count;
+        EXPECT_EQ(timer.delay, fiber::quic::QuicTime{997LL << count}) << "pto_count " << count;
+    }
+
+    // The doubling saturates at int64 max once the next round would overflow:
+    // 997 * 2^53 still fits, every round beyond clamps.
+    const auto last_exact = fiber::quic::quic_loss_detection_timer(connection, fiber::quic::QuicTime{0}, 53);
+    EXPECT_EQ(last_exact.mode, fiber::quic::QuicLossTimerMode::Pto);
+    EXPECT_EQ(last_exact.delay, fiber::quic::QuicTime{997LL << 53});
+    for (const std::uint32_t count: {54U, 100U, 1000U}) {
+        const auto clamped = fiber::quic::quic_loss_detection_timer(connection, fiber::quic::QuicTime{0}, count);
+        EXPECT_EQ(clamped.mode, fiber::quic::QuicLossTimerMode::Pto) << "pto_count " << count;
+        EXPECT_EQ(clamped.delay, fiber::quic::QuicTime::max()) << "pto_count " << count;
+    }
+}
+
+TEST(QuicLossRecoveryTest, PtoProbesWaitForBackedOffDeadline) {
+    // The probe path and the timer must agree on the backed-off deadline: one
+    // round of backoff moves it from 997 to 2*997 ms, and no probe frames may
+    // be queued a millisecond early (audit #2 regression domain).
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
+    arm_initial_pto(connection);
+    auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+
+    auto early = fiber::quic::quic_queue_pto_probe_frames(connection, fiber::quic::QuicTime{1993}, 1);
+    ASSERT_TRUE(early.has_value()) << static_cast<int>(early.error());
+    EXPECT_FALSE(*early);
+    EXPECT_TRUE(space.pending_frames.empty());
+    EXPECT_EQ(fiber::quic::quic_loss_detection_timer(connection, fiber::quic::QuicTime{1993}, 1).delay,
+              fiber::quic::QuicTime{1});
+
+    auto at_deadline = fiber::quic::quic_queue_pto_probe_frames(connection, fiber::quic::QuicTime{1994}, 1);
+    ASSERT_TRUE(at_deadline.has_value()) << static_cast<int>(at_deadline.error());
+    EXPECT_TRUE(*at_deadline);
+
+    std::size_t probes = 0;
+    for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
+         frame = space.pending_frames.next_of(*frame)) {
+        EXPECT_EQ(frame->type, fiber::quic::QuicFrameType::Ping);
+        EXPECT_TRUE(frame->ignore_congestion);
+        EXPECT_TRUE(frame->pto_probe);
+        ++probes;
+    }
+    EXPECT_EQ(probes, 2U);
 }
