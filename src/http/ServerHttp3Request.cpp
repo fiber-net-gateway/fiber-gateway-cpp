@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/http/HeaderMap.h>
 #include <fiber/http/Http3Codec.h>
@@ -1260,9 +1261,8 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
             }
             break;
         case OutgoingHeaderKind::Trailer:
-            if (!response_headers_sent_ || !header.end_stream) {
-                co_return std::unexpected(common::IoErr::Invalid);
-            }
+            FIBER_ASSERT(response_headers_sent_);
+            FIBER_ASSERT(!response_data_frame_active_);
             if (response_body_spec_.is_content_length() && response_body_sent_ != response_content_length_) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }

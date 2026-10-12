@@ -655,6 +655,139 @@ TEST(Http3ServerConnectionTest, ServerWriteReturnsWithUnsentPayloadTailAtStreamF
     });
 }
 
+namespace {
+struct Http3TrailerWriteOutcome {
+    std::size_t first_written = 0;
+    std::size_t remaining = 0;
+    bool trailer_ok = false;
+    bool completed = false;
+};
+
+Http3TrailerWriteOutcome run_http3_response_trailer(bool finish_body, bool use_chain) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    fiber::quic::QuicConnection::Options options{};
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    auto promise = std::make_shared<std::promise<Http3TrailerWriteOutcome>>();
+    auto future = promise->get_future();
+    fiber::quic::QuicConnection *quic = nullptr;
+    fiber::http::HttpHandler handler = [promise, &quic, finish_body,
+                                        use_chain](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        Http3TrailerWriteOutcome outcome;
+        auto header = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .body = fiber::http::HttpBodySpec::Auto(),
+        });
+        EXPECT_TRUE(header.has_value());
+        if (!header) {
+            promise->set_value(outcome);
+            co_return;
+        }
+
+        std::array<std::uint8_t, 2048> bytes{};
+        bytes.fill('x');
+        fiber::mem::IoBufChain chunk;
+        if (use_chain) {
+            auto body = fiber::mem::IoBuf::allocate(bytes.size());
+            if (!body) {
+                promise->set_value(outcome);
+                co_return;
+            }
+            std::memcpy(body.writable_data(), bytes.data(), bytes.size());
+            body.commit(bytes.size());
+            if (!chunk.append(std::move(body))) {
+                promise->set_value(outcome);
+                co_return;
+            }
+        }
+        auto first =
+                use_chain ? co_await exchange.write(chunk) : co_await exchange.write(bytes.data(), bytes.size(), false);
+        EXPECT_TRUE(first.has_value());
+        if (!first) {
+            promise->set_value(outcome);
+            co_return;
+        }
+        outcome.first_written = *first;
+        outcome.remaining = bytes.size() - *first;
+        EXPECT_GT(*first, 0U);
+        EXPECT_LT(*first, bytes.size());
+
+        if (finish_body) {
+            auto credit = quic->recv_max_stream_data_frame({.id = 0, .limit = 8192});
+            EXPECT_TRUE(credit.has_value());
+            auto rest = use_chain ? co_await exchange.write_all(std::move(chunk))
+                                  : co_await exchange.write_all(bytes.data() + *first, outcome.remaining, false);
+            EXPECT_TRUE(rest.has_value());
+            if (!rest) {
+                promise->set_value(outcome);
+                co_return;
+            }
+            EXPECT_EQ(*rest, outcome.remaining);
+            outcome.remaining -= *rest;
+        }
+        fiber::http::HttpHeaders trailers(exchange.pool());
+        trailers.set("digest", "xyz");
+        auto trailer = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Trailer,
+                .headers = &trailers,
+                .end_stream = true,
+        });
+        outcome.trailer_ok = trailer.has_value();
+        outcome.completed = exchange.response_stats().completed;
+        promise->set_value(outcome);
+    };
+    ServerFixture fixture(endpoint.get(), options, {}, std::move(handler));
+    auto &h3 = fixture.connection();
+    quic = &h3.quic();
+    const auto started = start_h3_on_loop(group.at(0), *quic, options, h3);
+    EXPECT_TRUE(started.ok);
+    const auto request = headers_frame(
+            {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.com"}, {":path", "/trailers"}});
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return feed_request_stream_then_wait(quic, &request, &feed_done); });
+    EXPECT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    Http3TrailerWriteOutcome outcome;
+    if (future.wait_for(2s) == std::future_status::ready) {
+        outcome = future.get();
+    } else {
+        ADD_FAILURE() << "HTTP/3 response trailer did not complete";
+    }
+    fixture.finish();
+    group.stop();
+    group.join();
+    return outcome;
+}
+} // namespace
+
+#if GTEST_HAS_DEATH_TEST
+TEST(Http3ServerConnectionDeathTest, TrailerDuringPartialChainDataFrameAsserts) {
+    EXPECT_DEATH(::fiber::test::run_in_loop(
+                         [&](::fiber::mem::IoBufNodePool &) { (void) run_http3_response_trailer(false, true); }),
+                 "!response_data_frame_active_");
+}
+
+TEST(Http3ServerConnectionDeathTest, TrailerDuringPartialByteDataFrameAsserts) {
+    EXPECT_DEATH(::fiber::test::run_in_loop(
+                         [&](::fiber::mem::IoBufNodePool &) { (void) run_http3_response_trailer(false, false); }),
+                 "!response_data_frame_active_");
+}
+#endif
+
+TEST(Http3ServerConnectionTest, TrailerAfterCompletingPartialDataFrameEndsResponse) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (bool use_chain: {false, true}) {
+            const auto outcome = run_http3_response_trailer(true, use_chain);
+            EXPECT_GT(outcome.first_written, 0U);
+            EXPECT_LT(outcome.first_written, 2048U);
+            EXPECT_EQ(outcome.remaining, 0U);
+            EXPECT_TRUE(outcome.trailer_ok);
+            EXPECT_TRUE(outcome.completed);
+        }
+    });
+}
+
 TEST(Http3ServerConnectionTest, ServerWriteTimeoutDuringDataHeaderAbortsStreamAndRejectsRetry) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         fiber::event::EventLoopGroup group(1);
