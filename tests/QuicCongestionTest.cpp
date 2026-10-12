@@ -10,7 +10,10 @@
 #include "quic/QuicAckHandler.h"
 #include "quic/QuicLossRecovery.h"
 
+#include "QuicCubicVectors.h"
 #include "QuicTestLoop.h"
+
+namespace cubickat = fiber::quic::cubickat;
 
 namespace {
 
@@ -50,6 +53,20 @@ void detect_loss_with_ack_interval(fiber::quic::QuicConnection &connection, fibe
     };
     auto lost = fiber::quic::quic_detect_lost(connection, fiber::quic::QuicTime{500}, &stat);
     ASSERT_TRUE(lost.has_value()) << static_cast<int>(lost.error());
+}
+
+// The canonical post-loss state shared by the CUBIC KAT vectors: init at t=0,
+// 12000 bytes in flight, one 1200-byte packet lost at t=100. Leaves
+// window = ssthresh = 7560, w_max = w_prior = 12000, cg.k = 100 + K.
+void canonical_post_loss(fiber::quic::QuicCongestionState &cg) {
+    fiber::quic::quic_congestion_init(cg, fiber::quic::QuicTime{0});
+    fiber::quic::quic_congestion_on_packet_sent(cg, 12000, true, false);
+    (void) fiber::quic::quic_congestion_on_loss(cg,
+                                                fiber::quic::QuicLossSample{.packet_len = 1200,
+                                                                            .packet_number = 0,
+                                                                            .send_time = fiber::quic::QuicTime{0},
+                                                                            .ignore_loss = false},
+                                                0, fiber::quic::QuicTime{100}, 1200);
 }
 
 } // namespace
@@ -141,6 +158,148 @@ TEST(QuicCongestionTest, RttSampleSubtractsAckDelayAtMinRttBoundary) {
     EXPECT_EQ(rtt.min_rtt, fiber::quic::QuicTime{40});
     EXPECT_EQ(rtt.avg_rtt, fiber::quic::QuicTime{40});
     EXPECT_EQ(rtt.rttvar, fiber::quic::QuicTime{15});
+}
+
+TEST(QuicCongestionTest, CubicWindowMatchesRfc9438Curve) {
+    // KAT against RFC 9438 4.1: W_cubic(t) = C*(t-K)^3 + W_max with C = 0.4 in
+    // byte units, t in ms. Vectors are generated and cross-checked against the
+    // closed form by tests/quic_kat/gen_cubic_kat.py before emission.
+    fiber::quic::QuicCongestionState cg{};
+    canonical_post_loss(cg);
+
+    EXPECT_EQ(cg.k.count(), 100 + cubickat::kCanonicalKMs);
+
+    for (const cubickat::CubicCurvePoint &point: cubickat::kCurveA) {
+        const std::size_t window =
+                fiber::quic::quic_congestion_cubic_window(cg, cg.k + fiber::quic::QuicTime{point.t_ms});
+        EXPECT_EQ(window, point.window) << "curve at t offset " << point.t_ms << " ms";
+    }
+}
+
+TEST(QuicCongestionTest, CubicWindowScalesWithMtuAndWmax) {
+    fiber::quic::QuicCongestionState cg{};
+    cg.mtu = 1500;
+    cg.w_max = 90000;
+    cg.ssthresh = 63000;
+    cg.window = 63000;
+    cg.k = fiber::quic::QuicTime{cubickat::kCurveBEpochMs};
+
+    for (const cubickat::CubicCurvePoint &point: cubickat::kCurveB) {
+        const std::size_t window =
+                fiber::quic::quic_congestion_cubic_window(cg, cg.k + fiber::quic::QuicTime{point.t_ms});
+        EXPECT_EQ(window, point.window) << "curve at t offset " << point.t_ms << " ms";
+    }
+}
+
+TEST(QuicCongestionTest, CubicTimeSolvesRfc9438K) {
+    // RFC 9438 4.2: K = cbrt(W_max*(1-beta)/C). Cases with w_max <= window
+    // (no epoch offset) solve to 0.
+    for (const cubickat::CubicKCase &kase: cubickat::kKSolves) {
+        fiber::quic::QuicCongestionState cg{};
+        cg.mtu = kase.mtu;
+        cg.w_max = kase.w_max;
+        cg.window = kase.window;
+        EXPECT_EQ(fiber::quic::quic_congestion_cubic_time(cg).count(), kase.k_ms)
+                << "K for w_max " << kase.w_max << " window " << kase.window;
+    }
+}
+
+TEST(QuicCongestionTest, CubicWindowFastRampCapsIncrementWhenCurveFarAhead) {
+    // A single ack long after the loss sees W_cubic >= 1.5 * window, so the
+    // avoidance increase is capped at mtu/2 instead of scaling with the gap.
+    fiber::quic::QuicCongestionState cg{};
+    canonical_post_loss(cg);
+
+    const fiber::quic::QuicTime now = cg.k + fiber::quic::QuicTime{cubickat::kFastRampOffsetMs};
+    fiber::quic::quic_congestion_on_packet_sent(cg, 1200, true, false);
+    (void) fiber::quic::quic_congestion_on_ack(cg,
+                                               fiber::quic::QuicAckSample{.packet_len = 1200,
+                                                                          .packet_number = 1,
+                                                                          .send_time = now - fiber::quic::QuicTime{50}},
+                                               0, now, now - fiber::quic::QuicTime{50});
+
+    EXPECT_EQ(cg.window, cubickat::kFastRampWindow); // 7560 + mtu/2
+    EXPECT_EQ(cg.w_est, cubickat::kFastRampWEst);
+}
+
+TEST(QuicCongestionTest, CubicWindowClampsOutsideTimeDomain) {
+    fiber::quic::QuicCongestionState cg{};
+    cg.mtu = 1200;
+    cg.w_max = 12000;
+    cg.ssthresh = 7560;
+    cg.window = 7560;
+
+    EXPECT_EQ(fiber::quic::quic_congestion_cubic_window(cg, fiber::quic::QuicTime{1000001}),
+              std::numeric_limits<std::size_t>::max());
+    EXPECT_EQ(fiber::quic::quic_congestion_cubic_window(cg, fiber::quic::QuicTime{-1000001}), 0U);
+}
+
+TEST(QuicCongestionTest, CongestionAvoidanceTrickleRidesCubicChaseAndRampCap) {
+    // One 1200 B packet acked per 50 ms, in_flight never refilled: the Reno
+    // estimate stays behind the curve, so the window rides the cubic chase
+    // branch and finally the mtu/2 fast-ramp cap.
+    fiber::quic::QuicCongestionState cg{};
+    canonical_post_loss(cg);
+    const fiber::quic::QuicTime epoch_start = cg.k;
+
+    std::size_t checkpoint = 0;
+    for (std::uint32_t acks = 1; acks <= cubickat::kTrickleAcks; ++acks) {
+        const fiber::quic::QuicTime now{cubickat::kTrickleFirstNowMs + (cubickat::kTrickleCadenceMs * (acks - 1))};
+        fiber::quic::quic_congestion_on_packet_sent(cg, 1200, true, false);
+        (void) fiber::quic::quic_congestion_on_ack(
+                cg,
+                fiber::quic::QuicAckSample{
+                        .packet_len = 1200, .packet_number = acks, .send_time = now - fiber::quic::QuicTime{50}},
+                0, now, now - fiber::quic::QuicTime{50});
+        if (acks % 10 != 0) {
+            continue;
+        }
+        ASSERT_LT(checkpoint, cubickat::kTrickleRun.size());
+        const cubickat::CubicAvoidCheckpoint &cp = cubickat::kTrickleRun[checkpoint++];
+        EXPECT_EQ(cg.window, cp.window) << "window after " << acks << " acks";
+        EXPECT_EQ(cg.w_est, cp.w_est) << "w_est after " << acks << " acks";
+        EXPECT_EQ(cg.window == cg.w_est, cp.window_is_w_est) << "region after " << acks << " acks";
+    }
+    EXPECT_EQ(checkpoint, cubickat::kTrickleRun.size());
+    EXPECT_EQ(cg.k, epoch_start); // idle == false must never shift the epoch
+    EXPECT_GT(cg.window, cg.w_max); // past K the window exceeds W_max
+}
+
+TEST(QuicCongestionTest, CongestionAvoidanceSaturatingVisitsTcpFriendlyRegion) {
+    // in_flight refilled to the window before each 10 ms ack: the Reno slope
+    // now exceeds the curve slope around t=0, so the run enters the
+    // TCP-friendly region (window == w_est, RFC 9438 4.1.2) and crosses back
+    // onto the cubic curve past K.
+    fiber::quic::QuicCongestionState cg{};
+    canonical_post_loss(cg);
+    const fiber::quic::QuicTime epoch_start = cg.k;
+
+    std::size_t checkpoint = 0;
+    for (std::uint32_t acks = 1; acks <= cubickat::kSaturatingAcks; ++acks) {
+        const fiber::quic::QuicTime now{cubickat::kSaturatingFirstNowMs +
+                                        (cubickat::kSaturatingCadenceMs * (acks - 1))};
+        while (cg.in_flight + 1200 <= cg.window) {
+            fiber::quic::quic_congestion_on_packet_sent(cg, 1200, true, false);
+        }
+        (void) fiber::quic::quic_congestion_on_ack(
+                cg,
+                fiber::quic::QuicAckSample{
+                        .packet_len = 1200, .packet_number = acks, .send_time = now - fiber::quic::QuicTime{50}},
+                0, now, now - fiber::quic::QuicTime{50});
+        if (acks % 50 != 0) {
+            continue;
+        }
+        ASSERT_LT(checkpoint, cubickat::kSaturatingRun.size());
+        const cubickat::CubicAvoidCheckpoint &cp = cubickat::kSaturatingRun[checkpoint++];
+        EXPECT_EQ(cg.window, cp.window) << "window after " << acks << " acks";
+        EXPECT_EQ(cg.w_est, cp.w_est) << "w_est after " << acks << " acks";
+        EXPECT_EQ(cg.window == cg.w_est, cp.window_is_w_est) << "region after " << acks << " acks";
+    }
+    EXPECT_EQ(checkpoint, cubickat::kSaturatingRun.size());
+    EXPECT_EQ(cg.k, epoch_start); // idle == false must never shift the epoch
+    EXPECT_EQ(cg.w_max, 12000U);
+    EXPECT_EQ(cg.w_prior, 12000U);
+    EXPECT_GT(cg.window, cg.w_max); // past K the window exceeds W_max
 }
 
 TEST(QuicOutputFrameListTest, MaintainsReverseLinksAcrossMutations) {
