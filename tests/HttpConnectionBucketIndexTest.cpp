@@ -27,6 +27,7 @@ using fiber::http::HttpConnectionPoolBucketBase;
 HttpConnectionGroupKey make_key(std::uint8_t last_octet, std::uint16_t port = 80,
                                 HttpConnectionGroupKey::Scheme scheme = HttpConnectionGroupKey::Scheme::Http) {
     const std::string host = "peer" + std::to_string(last_octet) + ".test";
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     return *HttpConnectionGroupKey::make(host, port, scheme, fiber::net::IpAddress::v4({127, 0, 0, last_octet}));
 }
 
@@ -56,7 +57,7 @@ TEST(HttpConnectionBucketIndexTest, InitializesRequestedCapacityAsPowerOfTwo) {
     HttpConnectionBucketIndex index;
 
     ASSERT_TRUE(index.init(3));
-    EXPECT_EQ(index.slot_capacity(), 8u);
+    EXPECT_EQ(index.slot_capacity(), 8U);
     EXPECT_TRUE(index.empty());
 }
 
@@ -116,14 +117,14 @@ TEST(HttpConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdates
     EXPECT_EQ(entry_c.slot_index, bucket_c.slot_index());
     EXPECT_LT(bucket_b.slot_index(), index.slot_capacity());
     EXPECT_LT(bucket_c.slot_index(), index.slot_capacity());
-    EXPECT_EQ(index.size(), 2u);
+    EXPECT_EQ(index.size(), 2U);
 }
 
 TEST(HttpConnectionBucketIndexTest, GrowsAndRewritesBucketSlotIndices) {
     std::array<HttpConnectionPoolBucketBase, 5> buckets{};
     HttpConnectionBucketIndex index;
     ASSERT_TRUE(index.init(0));
-    EXPECT_EQ(index.slot_capacity(), 0u);
+    EXPECT_EQ(index.slot_capacity(), 0U);
 
     const auto key1 = make_key(1);
     const auto key2 = make_key(2);
@@ -135,11 +136,11 @@ TEST(HttpConnectionBucketIndexTest, GrowsAndRewritesBucketSlotIndices) {
     ASSERT_EQ(index.insert(key2, buckets[1]), IoErr::None);
     ASSERT_EQ(index.insert(key3, buckets[2]), IoErr::None);
     ASSERT_EQ(index.insert(key4, buckets[3]), IoErr::None);
-    EXPECT_EQ(index.slot_capacity(), 8u);
+    EXPECT_EQ(index.slot_capacity(), 8U);
 
     ASSERT_EQ(index.insert(key5, buckets[4]), IoErr::None);
-    EXPECT_EQ(index.slot_capacity(), 16u);
-    EXPECT_EQ(index.size(), 5u);
+    EXPECT_EQ(index.slot_capacity(), 16U);
+    EXPECT_EQ(index.size(), 5U);
 
     const std::array<HttpConnectionGroupKey, 5> keys = {key1, key2, key3, key4, key5};
     for (std::size_t i = 0; i < keys.size(); ++i) {

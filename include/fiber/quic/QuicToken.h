@@ -36,7 +36,7 @@ struct QuicAddressToken {
     std::array<std::uint8_t, kQuicAddressTokenMaxLength> bytes{};
     std::size_t len = 0;
 
-    [[nodiscard]] QuicSlice slice() const noexcept { return {bytes.data(), len}; }
+    [[nodiscard]] QuicSlice slice() const noexcept { return {.data = bytes.data(), .len = len}; }
 };
 
 struct QuicAddressTokenValidation {

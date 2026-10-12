@@ -198,6 +198,11 @@ common::IoResult<std::size_t> QuicDataReassembler::insert(std::uint64_t offset, 
 
         const std::size_t source_offset = static_cast<std::size_t>(cursor - base_offset);
         const std::size_t hole_len = static_cast<std::size_t>(hole_end - cursor);
+        // The whole-buffer moves are confined to cost->extents == 1, which
+        // makes this the loop's single (terminal) iteration; the retain_slice
+        // arms only run in multi-extent flows where the source was never
+        // moved from.
+        // NOLINTBEGIN(bugprone-use-after-move)
         if (use_compacted && cost->extents == 1) {
             new_ext->buf = std::move(compacted);
         } else if (use_compacted) {
@@ -208,6 +213,7 @@ common::IoResult<std::size_t> QuicDataReassembler::insert(std::uint64_t offset, 
         } else {
             new_ext->buf = data.retain_slice(source_offset, hole_len);
         }
+        // NOLINTEND(bugprone-use-after-move)
 
         insert_after(prev, *new_ext);
         ++active_extent_count_;

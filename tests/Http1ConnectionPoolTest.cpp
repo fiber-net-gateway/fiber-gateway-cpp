@@ -41,9 +41,7 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
-fiber::net::SocketAddress loopback_peer(std::uint16_t port) {
-    return fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-}
+fiber::net::SocketAddress loopback_peer(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
 struct HoldServerState {
     std::atomic_bool stop{false};
@@ -174,6 +172,7 @@ DetachedTask run_lifo_scenario(fiber::event::EventLoop *loop, std::uint16_t port
         co_return;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto key = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", port,
                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
@@ -236,6 +235,7 @@ DetachedTask run_per_group_eviction_scenario(fiber::event::EventLoop *loop, std:
         co_return;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto key = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", port,
                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
@@ -292,8 +292,10 @@ DetachedTask run_global_eviction_scenario(fiber::event::EventLoop *loop, std::ui
         co_return;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto key1 = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", port1,
                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto key2 = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", port2,
                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
@@ -360,6 +362,7 @@ DetachedTask run_expire_scenario(fiber::event::EventLoop *loop, std::uint16_t po
         co_return;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto key = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", port,
                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http);
     auto lease = pool.acquire(key);
@@ -402,6 +405,7 @@ DetachedTask run_closed_scenario(fiber::event::EventLoop *loop, std::uint16_t po
         co_return;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto key = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", port,
                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http);
     auto lease = pool.acquire(key);
@@ -446,6 +450,7 @@ DetachedTask run_peer_closed_scenario(fiber::event::EventLoop *loop, std::uint16
         co_return;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto key = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", port,
                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http);
     auto lease = pool.acquire(key);
@@ -526,8 +531,10 @@ DetachedTask run_identity_scenario(fiber::event::EventLoop *loop, std::uint16_t 
         co_return;
     }
 
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto first_key = *fiber::http::HttpConnectionGroupKey::make(
             "127.0.0.1", port, fiber::http::HttpConnectionGroupKey::Scheme::Http);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto second_key = *fiber::http::HttpConnectionGroupKey::make(
             "backend.test", port, fiber::http::HttpConnectionGroupKey::Scheme::Http,
             fiber::net::IpAddress::loopback_v4());
@@ -581,10 +588,10 @@ TEST(Http1ConnectionPoolTest, LeaseCanBuildNewConnectionAndReuseGroupInLifoOrder
     EXPECT_TRUE(result.first_hit_newest);
     EXPECT_TRUE(result.second_hit_oldest);
     EXPECT_TRUE(result.third_is_miss);
-    EXPECT_EQ(result.idle_after_release, 2u);
-    EXPECT_EQ(result.groups_after_release, 1u);
-    EXPECT_EQ(result.idle_while_leased, 0u);
-    EXPECT_EQ(result.groups_while_leased, 0u);
+    EXPECT_EQ(result.idle_after_release, 2U);
+    EXPECT_EQ(result.groups_after_release, 1U);
+    EXPECT_EQ(result.idle_while_leased, 0U);
+    EXPECT_EQ(result.groups_while_leased, 0U);
 
     state->stop.store(true, std::memory_order_release);
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
@@ -648,8 +655,8 @@ TEST(Http1ConnectionPoolTest, PerGroupLimitEvictsOldestIdleConnection) {
     EXPECT_EQ(result.err, fiber::common::IoErr::None);
     EXPECT_TRUE(result.kept_newest);
     EXPECT_TRUE(result.oldest_evicted);
-    EXPECT_EQ(result.idle_after_release, 1u);
-    EXPECT_EQ(result.groups_after_release, 1u);
+    EXPECT_EQ(result.idle_after_release, 1U);
+    EXPECT_EQ(result.groups_after_release, 1U);
 
     state->stop.store(true, std::memory_order_release);
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
@@ -694,8 +701,8 @@ TEST(Http1ConnectionPoolTest, GlobalLimitEvictsOldestIdleConnectionAcrossGroups)
     EXPECT_TRUE(result.group1_kept_newest);
     EXPECT_TRUE(result.group1_oldest_evicted);
     EXPECT_TRUE(result.group2_preserved);
-    EXPECT_EQ(result.idle_after_release, 2u);
-    EXPECT_EQ(result.groups_after_release, 2u);
+    EXPECT_EQ(result.idle_after_release, 2U);
+    EXPECT_EQ(result.groups_after_release, 2U);
 
     state1->stop.store(true, std::memory_order_release);
     state2->stop.store(true, std::memory_order_release);
@@ -728,8 +735,8 @@ TEST(Http1ConnectionPoolTest, IdleExpiryTimerRemovesIdleConnectionsAndBuckets) {
     const ExpireScenarioResult result = result_future.get();
     EXPECT_EQ(result.err, fiber::common::IoErr::None);
     EXPECT_TRUE(result.expired);
-    EXPECT_EQ(result.idle_after_sweep, 0u);
-    EXPECT_EQ(result.groups_after_sweep, 0u);
+    EXPECT_EQ(result.idle_after_sweep, 0U);
+    EXPECT_EQ(result.groups_after_sweep, 0U);
 
     state->stop.store(true, std::memory_order_release);
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
@@ -761,10 +768,10 @@ TEST(Http1ConnectionPoolTest, PeerClosedIdleConnectionIsDroppedOnAcquire) {
 
     const PeerClosedScenarioResult result = result_future.get();
     EXPECT_EQ(result.err, fiber::common::IoErr::None);
-    EXPECT_EQ(result.idle_after_park, 1u);
+    EXPECT_EQ(result.idle_after_park, 1U);
     EXPECT_TRUE(result.peer_closed_seen);
     EXPECT_TRUE(result.dropped);
-    EXPECT_EQ(result.idle_after_acquire, 0u);
+    EXPECT_EQ(result.idle_after_acquire, 0U);
 
     state->stop.store(true, std::memory_order_release);
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
@@ -795,8 +802,8 @@ TEST(Http1ConnectionPoolTest, ClosedConnectionIsNotReturnedToPoolOnLeaseReset) {
     const ClosedScenarioResult result = result_future.get();
     EXPECT_EQ(result.err, fiber::common::IoErr::None);
     EXPECT_TRUE(result.dropped);
-    EXPECT_EQ(result.idle_after_release, 0u);
-    EXPECT_EQ(result.groups_after_release, 0u);
+    EXPECT_EQ(result.idle_after_release, 0U);
+    EXPECT_EQ(result.groups_after_release, 0U);
 
     state->stop.store(true, std::memory_order_release);
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);

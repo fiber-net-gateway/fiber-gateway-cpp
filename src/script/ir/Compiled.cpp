@@ -30,7 +30,7 @@ std::size_t align_up(std::size_t value, std::size_t align) noexcept {
 }
 
 CompileError make_compile_error(CompileErrorReason reason, const char *message) noexcept {
-    return CompileError{reason, -1, message};
+    return CompileError{.reason = reason, .position = -1, .message = message};
 }
 
 bool checked_add(std::size_t lhs, std::size_t rhs, std::size_t &out) noexcept {
@@ -211,7 +211,7 @@ std::uint32_t Compiled::find_position(std::uint32_t pc) const noexcept {
 
 bool Compiled::contains_async() const noexcept {
     for (std::uint32_t i = 0; i < code_count_; ++i) {
-        switch (static_cast<std::uint32_t>(codes_[i]) & 0xFFu) {
+        switch (static_cast<std::uint32_t>(codes_[i]) & 0xFFU) {
             case Code::CALL_ASYNC_CONST:
             case Code::CALL_ASYNC_FUNC:
             case Code::CALL_ASYNC_FUNC_SPREAD:
@@ -315,9 +315,8 @@ CompileResult<Compiled> Compiled::build(std::size_t stack_size, std::size_t var_
         if (constants[i].payload_offset != kNoPayload) {
             FIBER_ASSERT(constants[i].payload_offset <= result.payload_size_);
             const char *data = reinterpret_cast<const char *>(result.payload_ + constants[i].payload_offset);
-            if (fiber::script::js_value_is_borrowed_string(value)) {
-                value.payload = reinterpret_cast<std::uint64_t>(data);
-            } else if (fiber::script::js_value_is_borrowed_binary(value)) {
+            if (fiber::script::js_value_is_borrowed_string(value) ||
+                fiber::script::js_value_is_borrowed_binary(value)) {
                 value.payload = reinterpret_cast<std::uint64_t>(data);
             }
         }

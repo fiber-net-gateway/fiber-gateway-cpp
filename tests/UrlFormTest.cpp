@@ -50,7 +50,7 @@ struct VecSource {
 
 std::string build_query(const std::vector<QueryPair> &pairs) {
     std::string out;
-    VecSource src{pairs, 0};
+    VecSource src{.pairs = pairs, .i = 0};
     form_build_query(out, src);
     return out;
 }
@@ -112,7 +112,7 @@ TEST(UrlFormTest, DecodeIntoReturnsFalseOnMalformed) {
 
 TEST(UrlFormTest, ParseQueryRepeatedKeyAggregatesInOrder) {
     auto pairs = decode_query("a=1&a=2&b=x");
-    ASSERT_EQ(pairs.size(), 3u);
+    ASSERT_EQ(pairs.size(), 3U);
     EXPECT_EQ(pairs[0], (QueryPair{"a", "1"}));
     EXPECT_EQ(pairs[1], (QueryPair{"a", "2"}));
     EXPECT_EQ(pairs[2], (QueryPair{"b", "x"}));
@@ -121,37 +121,37 @@ TEST(UrlFormTest, ParseQueryRepeatedKeyAggregatesInOrder) {
 TEST(UrlFormTest, ParseQueryEdgeSegments) {
     EXPECT_TRUE(decode_query("").empty());
     auto noEq = decode_query("a");
-    ASSERT_EQ(noEq.size(), 1u);
+    ASSERT_EQ(noEq.size(), 1U);
     EXPECT_EQ(noEq[0], (QueryPair{"a", ""}));
     auto trailingEq = decode_query("a=");
-    ASSERT_EQ(trailingEq.size(), 1u);
+    ASSERT_EQ(trailingEq.size(), 1U);
     EXPECT_EQ(trailingEq[0], (QueryPair{"a", ""}));
     auto leadingEq = decode_query("=x");
-    ASSERT_EQ(leadingEq.size(), 1u);
+    ASSERT_EQ(leadingEq.size(), 1U);
     EXPECT_EQ(leadingEq[0], (QueryPair{"", "x"}));
     // '=' after the first is part of the value.
     auto eqInValue = decode_query("a=b=c");
-    ASSERT_EQ(eqInValue.size(), 1u);
+    ASSERT_EQ(eqInValue.size(), 1U);
     EXPECT_EQ(eqInValue[0], (QueryPair{"a", "b=c"}));
     // Empty segments are skipped.
     auto emptySegs = decode_query("a=1&&b=2");
-    ASSERT_EQ(emptySegs.size(), 2u);
+    ASSERT_EQ(emptySegs.size(), 2U);
     EXPECT_EQ(emptySegs[0], (QueryPair{"a", "1"}));
     EXPECT_EQ(emptySegs[1], (QueryPair{"b", "2"}));
 }
 
 TEST(UrlFormTest, ParseQueryDecodesKeysAndValues) {
     auto pairs = decode_query("%C3%A9=x&k=a+b");
-    ASSERT_EQ(pairs.size(), 2u);
+    ASSERT_EQ(pairs.size(), 2U);
     EXPECT_EQ(pairs[0], (QueryPair{"\xc3\xa9", "x"}));
     EXPECT_EQ(pairs[1], (QueryPair{"k", "a b"}));
     // Malformed UTF-8 in a value is replaced.
     auto repaired = decode_query("a=%FF");
-    ASSERT_EQ(repaired.size(), 1u);
+    ASSERT_EQ(repaired.size(), 1U);
     EXPECT_EQ(repaired[0], (QueryPair{"a", "\xef\xbf\xbd"}));
     // A lone '+' decodes to a space key with empty value.
     auto plus = decode_query("+");
-    ASSERT_EQ(plus.size(), 1u);
+    ASSERT_EQ(plus.size(), 1U);
     EXPECT_EQ(plus[0], (QueryPair{" ", ""}));
 }
 
@@ -173,7 +173,7 @@ TEST(UrlFormTest, ParseQuerySinkAbortStopsEarly) {
         return pairs.size() < 2; // stop after two pairs
     });
     EXPECT_FALSE(io.has_value());
-    EXPECT_EQ(pairs.size(), 2u);
+    EXPECT_EQ(pairs.size(), 2U);
 }
 
 // ---- form_build_query ----

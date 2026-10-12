@@ -14,9 +14,11 @@ public:
         void (*on_closed)(void *, Http3ServerConnection &) noexcept = nullptr;
     };
     // The endpoint, Options and Ops outlive the connection. The handler is shared.
-    static Http3ServerConnection *create(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &,
-                                         std::shared_ptr<const HttpHandler>, const Http3ServerOptions &, void *,
-                                         const Ops &) noexcept;
+    static Http3ServerConnection *create(quic::QuicUdpEndpoint & /*endpoint*/,
+                                         const quic::QuicConnection::Options & /*quic_options*/,
+                                         std::shared_ptr<const HttpHandler> /*handler*/,
+                                         const Http3ServerOptions & /*options*/, void * /*owner*/,
+                                         const Ops & /*ops*/) noexcept;
     quic::QuicConnection &quic() noexcept { return quic_; }
     const Http3Settings &local_settings() const noexcept { return control_.local_settings(); }
     Http3ConnectionState state() const noexcept { return state_; }
@@ -39,19 +41,20 @@ public:
     async::Task<void> wait_started() noexcept;
 
 private:
-    Http3ServerConnection(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &,
-                          std::shared_ptr<const HttpHandler>, const Http3ServerOptions &, void *, const Ops &) noexcept;
+    Http3ServerConnection(quic::QuicUdpEndpoint & /*endpoint*/, const quic::QuicConnection::Options & /*quic_options*/,
+                          std::shared_ptr<const HttpHandler> /*handler*/, const Http3ServerOptions & /*options*/,
+                          void * /*owner*/, const Ops & /*ops*/) noexcept;
     ~Http3ServerConnection();
-    static quic::QuicConnection::Options make_quic_options(const quic::QuicConnection::Options &,
-                                                           Http3ServerConnection *) noexcept;
-    static Http3Settings make_settings(const Http3ServerOptions &) noexcept;
+    static quic::QuicConnection::Options make_quic_options(const quic::QuicConnection::Options & /*base*/,
+                                                           Http3ServerConnection * /*owner*/) noexcept;
+    static Http3Settings make_settings(const Http3ServerOptions & /*options*/) noexcept;
     static const Http3ControlStreams::Ops &control_ops() noexcept;
-    static quic::QuicStream::Lease create_peer_stream(void *, std::uint64_t) noexcept;
-    static void on_peer_stream_attached(void *, quic::QuicStream &) noexcept;
-    static void on_quic_state_change(void *, quic::QuicConnection &) noexcept;
-    static void on_quic_capacity_change(void *, quic::QuicConnection &) noexcept;
-    static void destroy_connection(void *, quic::QuicConnection &) noexcept;
-    static void on_idle_timeout(Http3ServerConnection *) noexcept;
+    static quic::QuicStream::Lease create_peer_stream(void * /*owner*/, std::uint64_t /*id*/) noexcept;
+    static void on_peer_stream_attached(void * /*owner*/, quic::QuicStream & /*stream*/) noexcept;
+    static void on_quic_state_change(void * /*owner*/, quic::QuicConnection & /*quic*/) noexcept;
+    static void on_quic_capacity_change(void * /*owner*/, quic::QuicConnection & /*unused*/) noexcept;
+    static void destroy_connection(void * /*owner*/, quic::QuicConnection & /*quic*/) noexcept;
+    static void on_idle_timeout(Http3ServerConnection * /*connection*/) noexcept;
     void update_idle_timer() noexcept;
     void cancel_idle_timer() noexcept;
     async::DetachedTask run_start() noexcept;

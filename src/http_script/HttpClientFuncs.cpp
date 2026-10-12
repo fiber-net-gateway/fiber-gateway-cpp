@@ -166,7 +166,7 @@ fiber::http::HttpMethod resolve_http_method(std::string_view name, fiber::http::
 
 // Appends "k=v&..." for an Object's fields (arrays expand to repeated keys), mirroring Java's
 // UrlEncoded.encodeInto query/form construction.
-void object_pairs_to_form(GcHeap &heap, const JsValue &obj, std::string &out) noexcept {
+void object_pairs_to_form(const JsValue &obj, std::string &out) noexcept {
     if (js_value_type(obj) != JsNodeType::Object) {
         return;
     }
@@ -222,7 +222,7 @@ std::string build_request_target(GcHeap &heap, const JsValue &options, std::stri
         path.append(qsv);
     } else if (js_value_type(qv) == JsNodeType::Object) {
         std::string qs;
-        object_pairs_to_form(heap, qv, qs);
+        object_pairs_to_form(qv, qs);
         if (!qs.empty()) {
             path.push_back('?');
             path.append(qs);
@@ -289,7 +289,7 @@ void apply_options_response_headers(GcHeap &heap, const JsValue &options, fiber:
 }
 
 // Serializes a JsValue body to JSON bytes.
-bool json_encode_value(GcHeap &heap, const JsValue &body, std::string &out) noexcept {
+bool json_encode_value(const JsValue &body, std::string &out) noexcept {
     struct StringSink final : public fiber::json::OutputSink {
         explicit StringSink(std::string &o) noexcept : out(o) {}
         bool write(const char *data, std::size_t len) noexcept override {
@@ -342,7 +342,7 @@ fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &option
     } else if (bt == JsNodeType::Object) {
         const std::string_view ct = headers.get("content-type", kContentTypeHash);
         if (ct.find("application/x-www-form-urlencoded") != std::string_view::npos) {
-            object_pairs_to_form(heap, body, body_bytes);
+            object_pairs_to_form(body, body_bytes);
             if (!has_ct) {
                 headers.set("Content-Type", "application/x-www-form-urlencoded");
             }
@@ -350,7 +350,7 @@ fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &option
                 return fiber::http::HttpBodySpec::None();
             }
         } else {
-            if (!json_encode_value(heap, body, body_bytes)) {
+            if (!json_encode_value(body, body_bytes)) {
                 return fiber::http::HttpBodySpec::None();
             }
             if (!has_ct) {
@@ -359,7 +359,7 @@ fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &option
         }
     } else {
         // number / boolean / array -> JSON
-        if (!json_encode_value(heap, body, body_bytes)) {
+        if (!json_encode_value(body, body_bytes)) {
             return fiber::http::HttpBodySpec::None();
         }
         if (!has_ct) {
@@ -672,10 +672,12 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         resolve_http_method(method_str, fiber::http::HttpMethod::Unknown) != fiber::http::HttpMethod::Get) {
         co_return error_exn(*heap, "http.proxyPass: websocket method must be GET");
     }
-    const fiber::http::HttpMethod method =
-            websocket.active()
-                    ? fiber::http::HttpMethod::Get
-                    : (method_str.empty() ? exchange.method() : resolve_http_method(method_str, exchange.method()));
+    fiber::http::HttpMethod method = exchange.method();
+    if (websocket.active()) {
+        method = fiber::http::HttpMethod::Get;
+    } else if (!method_str.empty()) {
+        method = resolve_http_method(method_str, exchange.method());
+    }
 
     std::string target;
     {
@@ -696,7 +698,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
                 target.append(qsv);
             } else if (js_value_type(qv) == JsNodeType::Object) {
                 std::string qs;
-                object_pairs_to_form(*heap, qv, qs);
+                object_pairs_to_form(qv, qs);
                 if (!qs.empty()) {
                     target.push_back('?');
                     target.append(qs);
@@ -811,10 +813,12 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     const bool has_content_length =
             !no_body &&
             parse_decimal(resp_head->headers.get("content-length", kContentLengthHash), response_content_length);
-    const fiber::http::HttpBodySpec response_body =
-            no_body ? fiber::http::HttpBodySpec::None()
-                    : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)
-                                          : fiber::http::HttpBodySpec::Auto());
+    fiber::http::HttpBodySpec response_body = fiber::http::HttpBodySpec::Auto();
+    if (no_body) {
+        response_body = fiber::http::HttpBodySpec::None();
+    } else if (has_content_length) {
+        response_body = fiber::http::HttpBodySpec::ContentLength(response_content_length);
+    }
 
     const bool flush = field_bool(*heap, options, "flush", 5, false);
 

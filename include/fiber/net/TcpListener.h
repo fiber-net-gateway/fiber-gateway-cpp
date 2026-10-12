@@ -24,11 +24,11 @@ struct ListenOptions {
 
 struct AcceptResult {
     AcceptResult() = default;
-    AcceptResult(int fd, SocketAddress peer) : fd_(fd), peer_(std::move(peer)) {}
+    AcceptResult(int fd, SocketAddress peer) : fd_(fd), peer_(peer) {}
     AcceptResult(const AcceptResult &) = delete;
     AcceptResult &operator=(const AcceptResult &) = delete;
 
-    AcceptResult(AcceptResult &&other) noexcept : fd_(other.fd_), peer_(std::move(other.peer_)) { other.fd_ = -1; }
+    AcceptResult(AcceptResult &&other) noexcept : fd_(other.fd_), peer_(other.peer_) { other.fd_ = -1; }
 
     AcceptResult &operator=(AcceptResult &&other) noexcept {
         if (this == &other) {
@@ -36,7 +36,7 @@ struct AcceptResult {
         }
         close_fd();
         fd_ = other.fd_;
-        peer_ = std::move(other.peer_);
+        peer_ = other.peer_;
         other.fd_ = -1;
         return *this;
     }
@@ -51,7 +51,7 @@ struct AcceptResult {
         return fd;
     }
     [[nodiscard]] const SocketAddress &peer() const noexcept { return peer_; }
-    SocketAddress take_peer() { return std::move(peer_); }
+    SocketAddress take_peer() const { return peer_; }
 
 private:
     void close_fd() noexcept {

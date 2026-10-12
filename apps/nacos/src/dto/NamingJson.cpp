@@ -28,6 +28,7 @@ EncodeResult encode_instance(json::Generator &generator, const NamingInstance &v
     }
     for (const auto &[key, field]: {std::pair{"healthy", &value.healthy}, std::pair{"enabled", &value.enabled},
                                     std::pair{"ephemeral", &value.ephemeral}}) {
+        // NOLINTNEXTLINE(clang-analyzer-core.NullDereference) field binds &value members from the pair list
         result = detail::encode_field(generator, key, [&]() noexcept { return generator.bool_value(*field); });
         if (result != EncodeResult::OK) {
             return result;
@@ -163,8 +164,9 @@ json::Generator::Result encode_json(json::Generator &generator, const req::Servi
     if (result != EncodeResult::OK) {
         return result;
     }
-    result = detail::encode_field(generator, "module",
-                                  [&]() noexcept { return detail::encode_text(generator, value.kModule); });
+    result = detail::encode_field(generator, "module", [&]() noexcept {
+        return detail::encode_text(generator, fiber::nacos::dto::req::ServiceQueryRequest::kModule);
+    });
     if (result != EncodeResult::OK) {
         return result;
     }
@@ -189,8 +191,9 @@ json::Generator::Result encode_json(json::Generator &generator, const req::Subsc
     if (result != EncodeResult::OK) {
         return result;
     }
-    result = detail::encode_field(generator, "module",
-                                  [&]() noexcept { return detail::encode_text(generator, value.kModule); });
+    result = detail::encode_field(generator, "module", [&]() noexcept {
+        return detail::encode_text(generator, fiber::nacos::dto::req::SubscribeServiceRequest::kModule);
+    });
     if (result != EncodeResult::OK) {
         return result;
     }
@@ -219,8 +222,9 @@ json::Generator::Result encode_json(json::Generator &generator, const req::Insta
             return result;
         }
     }
-    result = detail::encode_field(generator, "module",
-                                  [&]() noexcept { return detail::encode_text(generator, value.kModule); });
+    result = detail::encode_field(generator, "module", [&]() noexcept {
+        return detail::encode_text(generator, fiber::nacos::dto::req::InstanceRequest::kModule);
+    });
     if (result != EncodeResult::OK) {
         return result;
     }
@@ -253,8 +257,9 @@ json::Generator::Result encode_json(json::Generator &generator, const req::Notif
             return result;
         }
     }
-    result = detail::encode_field(generator, "module",
-                                  [&]() noexcept { return detail::encode_text(generator, value.kModule); });
+    result = detail::encode_field(generator, "module", [&]() noexcept {
+        return detail::encode_text(generator, fiber::nacos::dto::req::NotifySubscriberRequest::kModule);
+    });
     if (result != EncodeResult::OK) {
         return result;
     }

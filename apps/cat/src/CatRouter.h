@@ -26,7 +26,7 @@ struct RouterSnapshot {
 };
 
 [[nodiscard]] std::expected<RouterSnapshot, RouterParseError>
-parse_router_response(std::string_view json, std::size_t max_collectors) noexcept;
+parse_router_response(std::string_view input, std::size_t max_collectors) noexcept;
 
 } // namespace fiber::cat::detail
 

@@ -27,7 +27,7 @@ public:
         std::size_t first = 0;
         std::size_t last = bucket_count_;
         while (first < last) {
-            const std::size_t middle = first + (last - first) / 2;
+            const std::size_t middle = first + ((last - first) / 2);
             if (value <= upper_bounds_[middle]) {
                 last = middle;
             } else {

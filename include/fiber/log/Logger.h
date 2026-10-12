@@ -40,7 +40,7 @@ private:
     std::string_view name_;
     std::array<LevelTargets, kLogLevelCount> levels_{};
     unsigned verbosity_ = 0;
-    inline static constexpr LevelTargets empty_targets_{};
+    static constexpr LevelTargets empty_targets_{};
 };
 
 class LoggerHandle {

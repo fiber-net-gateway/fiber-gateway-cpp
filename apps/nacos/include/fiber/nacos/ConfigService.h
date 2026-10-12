@@ -28,7 +28,7 @@ class NacosClient;
 struct ConfigServiceOptions {
     NacosRpcOptions rpc;
     std::chrono::milliseconds subscription_redo_interval{180000};
-    std::size_t max_content_bytes = 10 * 1024 * 1024;
+    std::size_t max_content_bytes = static_cast<std::size_t>(10 * 1024 * 1024);
     std::size_t max_data_id_bytes = 1024;
     std::size_t max_group_bytes = 1024;
     std::size_t max_listen_contexts_per_request = 100;

@@ -136,7 +136,8 @@ IoErr write_histogram_number(Writer &writer, std::uint64_t value, HistogramUnit 
     if (error != IoErr::None || value % divisor == 0) {
         return error;
     }
-    if ((error = writer.write(".")) != IoErr::None) {
+    error = writer.write(".");
+    if (error != IoErr::None) {
         return error;
     }
 
@@ -144,7 +145,7 @@ IoErr write_histogram_number(Writer &writer, std::uint64_t value, HistogramUnit 
     std::uint64_t remainder = value % divisor;
     const std::size_t places = decimal_places(unit);
     for (std::size_t index = places; index > 0; --index) {
-        fraction[index - 1] = static_cast<char>('0' + remainder % 10);
+        fraction[index - 1] = static_cast<char>('0' + (remainder % 10));
         remainder /= 10;
     }
     std::size_t length = places;
@@ -165,7 +166,8 @@ IoErr write_help(Writer &writer, std::string_view help) noexcept {
         if (error != IoErr::None) {
             return error;
         }
-        if ((error = writer.write(help[index] == '\\' ? "\\\\" : "\\n")) != IoErr::None) {
+        error = writer.write(help[index] == '\\' ? "\\\\" : "\\n");
+        if (error != IoErr::None) {
             return error;
         }
         start = index + 1;
@@ -185,8 +187,16 @@ IoErr write_label_value(Writer &writer, std::string_view value) noexcept {
         if (error != IoErr::None) {
             return error;
         }
-        const std::string_view escaped = ch == '\\' ? "\\\\" : (ch == '"' ? "\\\"" : "\\n");
-        if ((error = writer.write(escaped)) != IoErr::None) {
+        std::string_view escaped;
+        if (ch == '\\') {
+            escaped = "\\\\";
+        } else if (ch == '"') {
+            escaped = "\\\"";
+        } else {
+            escaped = "\\n";
+        }
+        error = writer.write(escaped);
+        if (error != IoErr::None) {
             return error;
         }
         start = index + 1;

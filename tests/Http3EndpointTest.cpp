@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -116,7 +117,7 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
     fiber::http::Http3Client::Options client_options{};
     client_options.tls.trust_store = trust_store->get();
     client_options.tls.verify_peer = true;
-    fiber::http::Http3Client client(endpoint, std::move(client_options));
+    fiber::http::Http3Client client(endpoint, client_options);
 
     auto started = endpoint.start();
     if (!started) {
@@ -164,7 +165,7 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
                 result.status = (*head)->status_code;
                 bool complete = false;
                 while (result.error == fiber::common::IoErr::None && !complete) {
-                    auto chunk = co_await exchange.read_body(64 * 1024, 5s);
+                    auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 5s);
                     if (!chunk) {
                         result.error = chunk.error();
                         break;
@@ -228,7 +229,7 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
     fiber::http::Http3Client::Options client_options{};
     client_options.tls.trust_store = trust_store->get();
     client_options.tls.verify_peer = true;
-    fiber::http::Http3Client client(endpoint, std::move(client_options));
+    fiber::http::Http3Client client(endpoint, client_options);
 
     auto started = endpoint.start();
     if (!started) {
@@ -273,7 +274,7 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
                 result.status = (*head)->status_code;
                 bool complete = false;
                 while (result.error == fiber::common::IoErr::None && !complete) {
-                    auto chunk = co_await exchange.read_body(64 * 1024, 5s);
+                    auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 5s);
                     if (!chunk) {
                         result.error = chunk.error();
                         break;
@@ -347,7 +348,7 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
     fiber::http::Http3Client::Options client_options{};
     client_options.tls.trust_store = trust_store->get();
     client_options.tls.verify_peer = true;
-    fiber::http::Http3Client client(endpoint, std::move(client_options));
+    fiber::http::Http3Client client(endpoint, client_options);
 
     auto started = endpoint.start();
     if (!started) {
@@ -833,7 +834,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyViaChainWriteCompletes) {
     ClientResult result = future.get();
     EXPECT_EQ(result.error, fiber::common::IoErr::None);
     EXPECT_EQ(result.status, 200);
-    EXPECT_EQ(result.body.size(), 136u);
+    EXPECT_EQ(result.body.size(), 136U);
 
     EXPECT_EQ(header_error.load(), fiber::common::IoErr::None);
     EXPECT_TRUE(write_ok.load());
@@ -892,7 +893,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyWithTinyRequestStreamWindow) {
                     fiber::common::IoErr abort_error{fiber::common::IoErr::None};
 
                     fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
-                    read_body(std::size_t max_bytes, std::chrono::milliseconds) noexcept {
+                    read_body(std::size_t max_bytes, std::chrono::milliseconds /*unused*/) noexcept {
                         if (served >= 2) {
                             co_return std::unexpected(fiber::common::IoErr::Invalid);
                         }
@@ -906,7 +907,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyWithTinyRequestStreamWindow) {
                         return {};
                     }
                 };
-                FixedSource source{fiber::mem::IoBufChain{}, fiber::mem::IoBufChain{}};
+                FixedSource source{};
                 fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(136);
                 body.commit(136);
                 source.reads[0].append(std::move(body));
@@ -914,8 +915,9 @@ TEST(Http3EndpointTest, StreamedAutoBodyWithTinyRequestStreamWindow) {
 
                 fiber::http::HttpResponseWriter writer = fiber::http::make_http_response_writer(exchange);
                 const fiber::http::HttpBodyPipeOptions pipe_options{
-                        .buffer_size = 64 * 1024,
-                        .low_water = std::min<std::size_t>(64 * 1024, fiber::http::kDefaultBodyPipeLowWater),
+                        .buffer_size = static_cast<std::size_t>(64 * 1024),
+                        .low_water = std::min<std::size_t>(static_cast<const unsigned long>(64 * 1024),
+                                                           fiber::http::kDefaultBodyPipeLowWater),
                         .read_timeout = std::chrono::milliseconds::max(),
                         .write_timeout = 2s,
                 };
@@ -947,7 +949,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyWithTinyRequestStreamWindow) {
     ClientResult result = future.get();
     EXPECT_EQ(result.error, fiber::common::IoErr::None);
     EXPECT_EQ(result.status, 200);
-    EXPECT_EQ(result.body.size(), 136u);
+    EXPECT_EQ(result.body.size(), 136U);
 
     EXPECT_TRUE(pipe_ok.load());
     EXPECT_EQ(pipe_error.load(), fiber::common::IoErr::None);
@@ -1006,10 +1008,10 @@ TEST(Http3EndpointTest, DestroyedSuspendedBodyWriterKeepsLoopIntact) {
                 auto write_body = [](fiber::http::HttpExchange &exchange,
                                      std::atomic<bool> *finished) -> fiber::async::Task<void> {
                     struct EndlessSource {
-                        std::size_t remaining = 600 * 1024;
-                        fiber::common::IoResult<void> abort(fiber::common::IoErr) noexcept { return {}; }
+                        std::size_t remaining = static_cast<std::size_t>(600 * 1024);
+                        fiber::common::IoResult<void> abort(fiber::common::IoErr /*unused*/) noexcept { return {}; }
                         fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
-                        read_body(std::size_t max_bytes, std::chrono::milliseconds) noexcept {
+                        read_body(std::size_t max_bytes, std::chrono::milliseconds /*unused*/) noexcept {
                             fiber::mem::IoBufChain chunk;
                             if (remaining == 0) {
                                 chunk.mark_complete();
@@ -1027,11 +1029,11 @@ TEST(Http3EndpointTest, DestroyedSuspendedBodyWriterKeepsLoopIntact) {
                     // (consumed + 64 KiB stream recv buffer), so the
                     // writer genuinely suspends inside QuicStream::write
                     // before the client aborts.
-                    EndlessSource source{600 * 1024};
+                    EndlessSource source{static_cast<std::size_t>(600 * 1024)};
 
                     fiber::http::HttpResponseWriter writer = fiber::http::make_http_response_writer(exchange);
                     const fiber::http::HttpBodyPipeOptions pipe_options{
-                            .buffer_size = 64 * 1024,
+                            .buffer_size = static_cast<std::size_t>(64 * 1024),
                             .low_water = fiber::http::kUnbufferedBodyPipeLowWater,
                             .read_timeout = std::chrono::milliseconds::max(),
                             .write_timeout = 5s,
@@ -1247,7 +1249,7 @@ TEST(Http3EndpointTest, OneShardPerWorkerLoop) {
     spawn_serve(running, group.at(0));
 
     // Three SO_REUSEPORT shards behind one port.
-    EXPECT_EQ(running.endpoint->shard_count(), 3u);
+    EXPECT_EQ(running.endpoint->shard_count(), 3U);
     EXPECT_NE(running.endpoint->local_addr().port(), 0);
 
     running.stop_and_join();

@@ -24,8 +24,8 @@ struct SnapshotRequest;
 } // namespace detail
 
 struct CollectOptions {
-    std::size_t chunk_size = 4 * 1024;
-    std::size_t max_output_bytes = 16 * 1024 * 1024;
+    std::size_t chunk_size = std::size_t{4} * 1024;
+    std::size_t max_output_bytes = std::size_t{16} * 1024 * 1024;
 };
 
 class MetricsRegistry {
@@ -50,7 +50,7 @@ public:
                        HistogramUnit unit = HistogramUnit::Raw, std::span<const std::string_view> label_names = {});
 
     [[nodiscard]] fiber::common::IoResult<SeriesId>
-    register_series(FamilyId family, std::span<const std::string_view> label_values = {});
+    register_series(FamilyId id, std::span<const std::string_view> label_values = {});
 
     [[nodiscard]] fiber::common::IoResult<ShardId> add_shard(fiber::event::EventLoop &owner);
     [[nodiscard]] fiber::common::IoResult<void> freeze();

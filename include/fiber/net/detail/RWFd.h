@@ -90,7 +90,7 @@ public:
     using WaitWritableAwaiter = WaitAwaiter<fiber::event::IoEvent::Write>;
 
     explicit RWFd(fiber::event::EventLoop &owner_loop, Kind kind = Kind::Raw);
-    RWFd(fiber::event::EventLoop &owner_loop, int fd, Kind kind = Kind::Raw);
+    RWFd(fiber::event::EventLoop &owner_loop, int socket, Kind kind = Kind::Raw);
     ~RWFd();
 
     // ------------------------------------------------------------------
@@ -139,7 +139,7 @@ public:
     // True while the fd is registered with the current loop's poller.
     [[nodiscard]] bool registered() const noexcept { return efd_.registered(); }
 
-    fiber::common::IoErr attach(int fd) noexcept;
+    fiber::common::IoErr attach(int socket) noexcept;
     int release_fd() noexcept;
     void close();
     // close() split in two so an adapter layer can run its own terminal
@@ -218,7 +218,7 @@ private:
     void cancel_wait(RWFdWaiterBase *waiter) noexcept;
     [[nodiscard]] bool has_callbacks() const noexcept;
 
-    static void on_efd_events(void *sink, fiber::event::IoEvent events);
+    static void on_efd_events(void *owner, fiber::event::IoEvent events);
     void handle_events(fiber::event::IoEvent events);
 
     Event read_event_{};

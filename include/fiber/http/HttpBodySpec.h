@@ -18,13 +18,13 @@ public:
 
     constexpr HttpBodySpec() noexcept = default;
 
-    [[nodiscard]] static constexpr HttpBodySpec Auto() noexcept { return HttpBodySpec(Kind::Auto, 0); }
-    [[nodiscard]] static constexpr HttpBodySpec None() noexcept { return HttpBodySpec(Kind::None, 0); }
+    [[nodiscard]] static constexpr HttpBodySpec Auto() noexcept { return {Kind::Auto, 0}; }
+    [[nodiscard]] static constexpr HttpBodySpec None() noexcept { return {Kind::None, 0}; }
     [[nodiscard]] static constexpr HttpBodySpec ContentLength(std::size_t length) noexcept {
-        return HttpBodySpec(Kind::ContentLength, length);
+        return {Kind::ContentLength, length};
     }
-    [[nodiscard]] static constexpr HttpBodySpec Chunked() noexcept { return HttpBodySpec(Kind::Chunked, 0); }
-    [[nodiscard]] static constexpr HttpBodySpec Stream() noexcept { return HttpBodySpec(Kind::Stream, 0); }
+    [[nodiscard]] static constexpr HttpBodySpec Chunked() noexcept { return {Kind::Chunked, 0}; }
+    [[nodiscard]] static constexpr HttpBodySpec Stream() noexcept { return {Kind::Stream, 0}; }
 
     [[nodiscard]] constexpr Kind kind() const noexcept { return kind_; }
     [[nodiscard]] constexpr bool is_auto() const noexcept { return kind_ == Kind::Auto; }

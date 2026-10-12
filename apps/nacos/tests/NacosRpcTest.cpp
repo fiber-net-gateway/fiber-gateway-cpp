@@ -3,6 +3,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <future>
 #include <memory>
@@ -82,7 +83,7 @@ read_payload(fiber::http::HttpExchange &exchange, fiber::nacos::detail::grpc::Gr
             }
             co_return payload;
         }
-        auto chunk = co_await exchange.read_body(64 * 1024, 2s);
+        auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 2s);
         if (!chunk) {
             co_return std::unexpected(chunk.error());
         }
@@ -210,18 +211,18 @@ private:
 
     template<typename Response>
     bool decode_response(const proto::Payload &payload, Response &response, fiber::mem::BufPool &pool) {
-        auto view = nacos_detail::validate_payload(payload, 1024 * 1024);
+        auto view = nacos_detail::validate_payload(payload, static_cast<std::size_t>(1024 * 1024));
         return view && view->type == Response::kTypeName &&
                nacos_detail::parse_payload_json(*view, pool, response).has_value();
     }
 
     fiber::async::Task<void> handle_unary(fiber::http::HttpExchange &exchange) {
-        fiber::nacos::detail::grpc::GrpcFrameReader reader(1024 * 1024);
+        fiber::nacos::detail::grpc::GrpcFrameReader reader(static_cast<std::size_t>(1024 * 1024));
         auto request = co_await read_payload(exchange, reader);
         if (!request) {
             co_return;
         }
-        auto view = nacos_detail::validate_payload(*request, 1024 * 1024);
+        auto view = nacos_detail::validate_payload(*request, static_cast<std::size_t>(1024 * 1024));
         if (!view || !(co_await send_response_header(exchange))) {
             co_return;
         }
@@ -230,7 +231,8 @@ private:
             dto::resp::ServerCheckResponse response;
             response.connection_id.set_present("rpc-connection-1");
             response.support_ability_negotiation = support_ability_negotiation_;
-            auto payload = nacos_detail::encode_payload(response, server_metadata(), 1024 * 1024);
+            auto payload =
+                    nacos_detail::encode_payload(response, server_metadata(), static_cast<std::size_t>(1024 * 1024));
             if (!payload || !(co_await send_payload(exchange, *payload))) {
                 co_return;
             }
@@ -243,13 +245,14 @@ private:
             dto::resp::ConfigQueryResponse response;
             response.content.set_present("value");
             response.md5.set_present("md5");
-            auto payload = nacos_detail::encode_payload(response, server_metadata(), 1024 * 1024);
+            auto payload =
+                    nacos_detail::encode_payload(response, server_metadata(), static_cast<std::size_t>(1024 * 1024));
             if (!payload || !(co_await send_payload(exchange, *payload))) {
                 co_return;
             }
         } else if (view->type == dto::req::HealthCheckRequest::kTypeName) {
-            auto payload =
-                    nacos_detail::encode_payload(dto::resp::HealthCheckResponse{}, server_metadata(), 1024 * 1024);
+            auto payload = nacos_detail::encode_payload(dto::resp::HealthCheckResponse{}, server_metadata(),
+                                                        static_cast<std::size_t>(1024 * 1024));
             if (!payload || !(co_await send_payload(exchange, *payload))) {
                 co_return;
             }
@@ -265,7 +268,8 @@ private:
         notify.data_id.set_present("data");
         notify.group.set_present("group");
         notify.tenant.set_present("tenant");
-        auto notify_payload = nacos_detail::encode_payload(notify, server_metadata(), 1024 * 1024);
+        auto notify_payload =
+                nacos_detail::encode_payload(notify, server_metadata(), static_cast<std::size_t>(1024 * 1024));
         if (!notify_payload) {
             co_return;
         }
@@ -279,20 +283,23 @@ private:
         failed.data_id.set_present("fail");
         failed.group.set_present("group");
         failed.tenant.set_present("tenant");
-        auto failed_payload = nacos_detail::encode_payload(failed, server_metadata(), 1024 * 1024);
+        auto failed_payload =
+                nacos_detail::encode_payload(failed, server_metadata(), static_cast<std::size_t>(1024 * 1024));
         if (!failed_payload || !(co_await send_payload(exchange, *failed_payload))) {
             co_return;
         }
 
         dto::req::ClientDetectionRequest detection;
         detection.request_id.set_present("detect-1");
-        auto detection_payload = nacos_detail::encode_payload(detection, server_metadata(), 1024 * 1024);
+        auto detection_payload =
+                nacos_detail::encode_payload(detection, server_metadata(), static_cast<std::size_t>(1024 * 1024));
         if (!detection_payload || !(co_await send_payload(exchange, *detection_payload))) {
             co_return;
         }
 
-        auto unknown = nacos_detail::encode_payload_json(
-                "FutureRequest", R"({"requestId":"future-1","module":"future"})", server_metadata(), 1024 * 1024);
+        auto unknown =
+                nacos_detail::encode_payload_json("FutureRequest", R"({"requestId":"future-1","module":"future"})",
+                                                  server_metadata(), static_cast<std::size_t>(1024 * 1024));
         if (!unknown || !(co_await send_payload(exchange, *unknown))) {
             co_return;
         }
@@ -309,7 +316,8 @@ private:
             // dangles and the encoded JSON contains garbage (use-after-free).
             std::string server_port_text = std::to_string(port_);
             reset.server_port.set_present(server_port_text);
-            auto reset_payload = nacos_detail::encode_payload(reset, server_metadata(), 1024 * 1024);
+            auto reset_payload =
+                    nacos_detail::encode_payload(reset, server_metadata(), static_cast<std::size_t>(1024 * 1024));
             if (!reset_payload || !(co_await send_payload(exchange, *reset_payload))) {
                 co_return;
             }
@@ -380,12 +388,12 @@ private:
     }
 
     fiber::async::Task<void> handle_bidi(fiber::http::HttpExchange &exchange) {
-        fiber::nacos::detail::grpc::GrpcFrameReader reader(1024 * 1024);
+        fiber::nacos::detail::grpc::GrpcFrameReader reader(static_cast<std::size_t>(1024 * 1024));
         auto setup_payload = co_await read_payload(exchange, reader);
         if (!setup_payload) {
             co_return;
         }
-        auto setup_view = nacos_detail::validate_payload(*setup_payload, 1024 * 1024);
+        auto setup_view = nacos_detail::validate_payload(*setup_payload, static_cast<std::size_t>(1024 * 1024));
         fiber::mem::BufPool setup_pool;
         dto::req::ConnectionSetupRequest setup;
         if (!setup_view || setup_view->type != dto::req::ConnectionSetupRequest::kTypeName ||
@@ -403,7 +411,8 @@ private:
             co_return;
         }
         if (support_ability_negotiation_) {
-            auto ack = nacos_detail::encode_payload(dto::req::SetupAckRequest{}, server_metadata(), 1024 * 1024);
+            auto ack = nacos_detail::encode_payload(dto::req::SetupAckRequest{}, server_metadata(),
+                                                    static_cast<std::size_t>(1024 * 1024));
             if (!ack || !(co_await send_payload(exchange, *ack))) {
                 co_return;
             }
@@ -412,7 +421,7 @@ private:
         co_await read_server_responses(exchange, reader);
 
         for (;;) {
-            auto chunk = co_await exchange.read_body(64 * 1024, 2s);
+            auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 2s);
             if (!chunk || chunk->complete()) {
                 break;
             }
@@ -537,6 +546,7 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
     result.connection_id = rpc.connection_id();
 
     if (ready) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
         auth_publisher->publish(fiber::nacos::NacosAuthAccess{
                 .kind = fiber::nacos::NacosAuthAccessKind::Present,
                 .access_token = "token-2",
@@ -584,7 +594,7 @@ RpcCaseResult execute_rpc_case(bool support_ability_negotiation, bool send_conne
                         [server_ptr = server.get(), server_finished]() { return server_ptr->serve(server_finished); });
 
     fiber::nacos::NacosClientConfigParams params;
-    params.server_hosts.push_back("127.0.0.1");
+    params.server_hosts.emplace_back("127.0.0.1");
     params.username = "nacos";
     params.password = "nacos";
     params.grpc_port = server->port();
@@ -599,7 +609,7 @@ RpcCaseResult execute_rpc_case(bool support_ability_negotiation, bool send_conne
     options.handshake_timeout = 1s;
     options.compatibility_setup_delay = 20ms;
     options.heartbeat_interval = 100ms;
-    options.max_inbound_message_bytes = 1024 * 1024;
+    options.max_inbound_message_bytes = static_cast<std::size_t>(1024 * 1024);
 
     auto client_finished = std::make_shared<std::promise<RpcCaseResult>>();
     auto client_future = client_finished->get_future();
@@ -715,7 +725,7 @@ DetachedTask run_pre_run_shutdown(fiber::event::EventLoop *loop, fiber::nacos::N
 
 TEST(NacosRpcTest, ShutdownBeforeRunCompletesWithoutConnecting) {
     fiber::nacos::NacosClientConfigParams params;
-    params.server_hosts.push_back("127.0.0.1");
+    params.server_hosts.emplace_back("127.0.0.1");
     params.grpc_port = 1;
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(config.has_value());
@@ -793,11 +803,11 @@ TEST(NacosRpcTest, RnacosInteropWhenEnabled) {
     const auto parsed = std::from_chars(port_view.data(), port_view.data() + port_view.size(), port);
     ASSERT_EQ(parsed.ec, std::errc());
     ASSERT_EQ(parsed.ptr, port_view.data() + port_view.size());
-    ASSERT_GT(port, 0u);
-    ASSERT_LE(port, 65535u);
+    ASSERT_GT(port, 0U);
+    ASSERT_LE(port, 65535U);
 
     fiber::nacos::NacosClientConfigParams params;
-    params.server_hosts.push_back("127.0.0.1");
+    params.server_hosts.emplace_back("127.0.0.1");
     params.grpc_port = static_cast<std::uint16_t>(port);
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(config.has_value());

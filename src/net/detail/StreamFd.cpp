@@ -89,6 +89,8 @@ StreamFd::~StreamFd() {
     // Off-loop destruction is legal only for a detached object: the handover
     // protocol adopts it on a loop and closes it there, so nothing may remain
     // subscribed or queued here.
+    // Positive form states the invariant directly.
+    // NOLINTNEXTLINE(readability-simplify-boolean-expr)
     FIBER_ASSERT(!rwfd_.registered() && terminal_callback_ == nullptr && !terminal_notify_entry_.is_in_queue());
 }
 

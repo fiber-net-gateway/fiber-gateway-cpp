@@ -84,7 +84,7 @@ Http1HeaderParseBufferOptions header_parse_buffer_options(const Http1ServerOptio
 Http1Connection::Http1Connection(std::unique_ptr<HttpTransport> transport, const HttpHandler &handler,
                                  Http1ServerOptions options, std::shared_ptr<const HttpHandler> handler_owner) :
     loop_(event::EventLoop::current()), transport_(std::move(transport)), handler_(&handler),
-    handler_owner_(std::move(handler_owner)), options_(std::move(options)) {}
+    handler_owner_(std::move(handler_owner)), options_(options) {}
 
 Http1Connection::~Http1Connection() {
     if (transport_ && transport_->valid() && loop_.in_loop()) {
@@ -309,7 +309,7 @@ Http1Connection::parse_request(HttpExchange &exchange, std::chrono::steady_clock
                     co_return std::unexpected(common::IoErr::NoMem);
                 }
                 exchange.cache_request_header_field(*field);
-                if (auto *handler = header_handler_map().get(std::string_view(lowercase, name_len), hash)) {
+                if (const auto *handler = header_handler_map().get(std::string_view(lowercase, name_len), hash)) {
                     if (!(*handler)(exchange, *field)) {
                         co_return ParseCode::InvalidHeader;
                     }

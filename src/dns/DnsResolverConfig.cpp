@@ -7,6 +7,7 @@
 #include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 #include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
@@ -54,7 +55,7 @@ bool parse_uint(std::string_view text, unsigned min_value, unsigned max_value, u
 }
 
 bool option_value(std::string_view option, std::string_view name, std::string_view &value) noexcept {
-    if (option.size() <= name.size() || option.substr(0, name.size()) != name || option[name.size()] != ':') {
+    if (option.size() <= name.size() || !option.starts_with(name) || option[name.size()] != ':') {
         return false;
     }
     value = option.substr(name.size() + 1);
@@ -238,7 +239,7 @@ void DnsSearchList::clear() noexcept {
 
 std::string_view DnsSearchList::operator[](std::size_t index) const noexcept {
     FIBER_ASSERT(index < count_);
-    return std::string_view(storage_.data() + offsets_[index], lengths_[index]);
+    return {storage_.data() + offsets_[index], lengths_[index]};
 }
 
 bool DnsSearchList::add(std::string_view domain) noexcept {
@@ -305,7 +306,7 @@ std::expected<SystemResolverConfig, ResolverConfigError> load_system_resolver_co
         ::close(fd);
         return std::unexpected(make_error(ResolverConfigErrorCode::ReadFailed, 0, 0, error));
     }
-    if (stat_buf.st_size > static_cast<off_t>(kMaxResolverConfigFileSize)) {
+    if (std::cmp_greater(stat_buf.st_size, kMaxResolverConfigFileSize)) {
         ::close(fd);
         return std::unexpected(make_error(ResolverConfigErrorCode::FileTooLarge, 0));
     }

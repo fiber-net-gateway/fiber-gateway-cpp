@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -184,9 +185,13 @@ public:
 
     HttpResponseWriter writer() noexcept {
         static const HttpResponseWriter::Ops kOps{
-                &CaptureSink::on_send_header, &CaptureSink::on_write_all_chain, &CaptureSink::on_write_all_bytes,
-                &CaptureSink::on_write_chain, &CaptureSink::on_write_bytes,     &CaptureSink::on_flush,
-                &CaptureSink::on_abort,
+                .send_header = &CaptureSink::on_send_header,
+                .write_all_chain = &CaptureSink::on_write_all_chain,
+                .write_all_bytes = &CaptureSink::on_write_all_bytes,
+                .write_chain = &CaptureSink::on_write_chain,
+                .write_bytes = &CaptureSink::on_write_bytes,
+                .flush = &CaptureSink::on_flush,
+                .abort = &CaptureSink::on_abort,
         };
         return {this, kOps};
     }
@@ -206,7 +211,7 @@ private:
             return false;
         }
         body.append(reinterpret_cast<const char *>(buf), len);
-        writes.push_back(WriteCall{len, end});
+        writes.push_back(WriteCall{.len = len, .end = end});
         return true;
     }
 
@@ -221,7 +226,7 @@ private:
     }
 
     static Task<IoResult<void>> on_send_header(void *ctx, const OutgoingHeaderBlockView &header,
-                                               std::chrono::milliseconds) {
+                                               std::chrono::milliseconds /*unused*/) {
         auto *self = static_cast<CaptureSink *>(ctx);
         CapturedHeader captured;
         captured.kind = header.kind;
@@ -238,7 +243,7 @@ private:
     }
 
     static Task<IoResult<std::size_t>> on_write_all_chain(void *ctx, IoBufChain chunk,
-                                                          std::chrono::milliseconds) noexcept {
+                                                          std::chrono::milliseconds /*unused*/) noexcept {
         auto *self = static_cast<CaptureSink *>(ctx);
         if (self->fail_writes_with.has_value()) {
             co_return std::unexpected(*self->fail_writes_with);
@@ -249,16 +254,17 @@ private:
     }
 
     static Task<IoResult<std::size_t>> on_write_all_bytes(void *ctx, const std::uint8_t *buf, std::size_t len, bool end,
-                                                          std::chrono::milliseconds) noexcept {
+                                                          std::chrono::milliseconds /*unused*/) noexcept {
         auto *self = static_cast<CaptureSink *>(ctx);
         if (!self->note_write(buf, len, end)) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
             co_return std::unexpected(*self->fail_writes_with);
         }
         co_return len;
     }
 
     static Task<IoResult<std::size_t>> on_write_chain(void *ctx, IoBufChain &chunk,
-                                                      std::chrono::milliseconds) noexcept {
+                                                      std::chrono::milliseconds /*unused*/) noexcept {
         auto *self = static_cast<CaptureSink *>(ctx);
         if (self->fail_writes_with.has_value()) {
             co_return std::unexpected(*self->fail_writes_with);
@@ -269,15 +275,16 @@ private:
     }
 
     static Task<IoResult<std::size_t>> on_write_bytes(void *ctx, const std::uint8_t *buf, std::size_t len, bool end,
-                                                      std::chrono::milliseconds) noexcept {
+                                                      std::chrono::milliseconds /*unused*/) noexcept {
         auto *self = static_cast<CaptureSink *>(ctx);
         if (!self->note_write(buf, len, end)) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
             co_return std::unexpected(*self->fail_writes_with);
         }
         co_return len;
     }
 
-    static Task<IoResult<void>> on_flush(void *ctx, std::chrono::milliseconds) noexcept {
+    static Task<IoResult<void>> on_flush(void *ctx, std::chrono::milliseconds /*unused*/) noexcept {
         ++static_cast<CaptureSink *>(ctx)->flush_count;
         co_return IoResult<void>{};
     }
@@ -365,7 +372,7 @@ TEST(GzipResponseWriterTest, CompressesBodyAndRewritesHeaders) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         const CapturedHeader &h = sink.headers[0];
         EXPECT_EQ(h.kind, OutgoingHeaderKind::Final);
         EXPECT_EQ(h.status_code, 200);
@@ -403,15 +410,15 @@ TEST(GzipResponseWriterTest, EmptyChunkedBodyProducesEmptyMember) {
             EXPECT_TRUE(head.has_value());
             const auto written = co_await w.write_all(nullptr, 0, true);
             EXPECT_TRUE(written.has_value());
-            EXPECT_EQ(*written, 0u);
+            EXPECT_EQ(*written, 0U);
             stats = gzip.stats();
         });
 
         EXPECT_EQ(sink.body, reference_gzip("", 1));
-        EXPECT_EQ(sink.body.size(), 20u);
+        EXPECT_EQ(sink.body.size(), 20U);
         EXPECT_TRUE(sink.ended());
         EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
-        EXPECT_EQ(stats.input_bytes, 0u);
+        EXPECT_EQ(stats.input_bytes, 0U);
     });
 }
 
@@ -438,7 +445,7 @@ TEST(GzipResponseWriterTest, SyncFlushIsDecodableBeforeEnd) {
             const auto flushed = co_await w.flush();
             EXPECT_TRUE(flushed.has_value());
             flushed_prefix = sink.body;
-            EXPECT_GT(flushed_prefix.size(), 0u) << "flush must publish the compressed prefix";
+            EXPECT_GT(flushed_prefix.size(), 0U) << "flush must publish the compressed prefix";
             const auto done = co_await w.write_all(bytes_of(second), second.size(), true);
             EXPECT_TRUE(done.has_value());
             stats = gzip.stats();
@@ -500,7 +507,8 @@ TEST(GzipResponseWriterTest, LargeSingleWriteCompressesCorrectly) {
         GzipResponseWriterOptions options = active_options();
         GzipResponseWriterStats stats;
         const std::string body =
-                repeat_pattern(600 * 1024, R"({"id":%d,"name":"fiber-gateway","tags":["http","quic"],"ok":true},)");
+                repeat_pattern(static_cast<std::size_t>(600 * 1024),
+                               R"({"id":%d,"name":"fiber-gateway","tags":["http","quic"],"ok":true},)");
 
         run_scenario([&]() -> Task<void> {
             GzipResponseWriter gzip(exchange, sink.writer(), options);
@@ -554,7 +562,7 @@ TEST(GzipResponseWriterTest, ChainWriteCompletesBody) {
             const auto written = co_await w.write(chain);
             EXPECT_TRUE(written.has_value());
             EXPECT_EQ(*written, part_a.size() + part_b.size());
-            EXPECT_EQ(chain.readable_bytes(), 0u);
+            EXPECT_EQ(chain.readable_bytes(), 0U);
             stats = gzip.stats();
         });
 
@@ -590,7 +598,7 @@ TEST(GzipResponseWriterTest, CompressesConfiguredContentTypeAndKeepsWeakEtag) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         const CapturedHeader &h = sink.headers[0];
         EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
         EXPECT_EQ(field_value(h, "ETag"), std::optional<std::string>("W/\"v1\"")) << "weak ETag must stay untouched";
@@ -623,9 +631,9 @@ TEST(GzipResponseWriterTest, ExistingVaryIsNotDuplicated) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         const CapturedHeader &h = sink.headers[0];
-        EXPECT_EQ(field_count(h, "Vary"), 1u);
+        EXPECT_EQ(field_count(h, "Vary"), 1U);
         EXPECT_EQ(field_value(h, "Vary"), std::optional<std::string>("Accept-Encoding"));
         EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
         EXPECT_EQ(sink.body, reference_gzip(body, 1));
@@ -662,7 +670,7 @@ TEST(GzipResponseWriterTest, InformationalHeaderPassesThroughBeforeFinal) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 2u);
+        ASSERT_EQ(sink.headers.size(), 2U);
         EXPECT_EQ(sink.headers[0].kind, OutgoingHeaderKind::Informational);
         EXPECT_EQ(sink.headers[0].status_code, 100);
         EXPECT_EQ(sink.headers[1].kind, OutgoingHeaderKind::Final);
@@ -704,7 +712,7 @@ TEST(GzipResponseWriterTest, TrailerHeaderFinishesActiveBody) {
             EXPECT_EQ(late.error(), IoErr::Already);
         });
 
-        ASSERT_EQ(sink.headers.size(), 2u);
+        ASSERT_EQ(sink.headers.size(), 2U);
         EXPECT_EQ(sink.headers[1].kind, OutgoingHeaderKind::Trailer);
         EXPECT_EQ(field_value(sink.headers[1], "X-Checksum"), std::optional<std::string>("deadbeef"));
         EXPECT_EQ(sink.body, reference_gzip(body, 1));
@@ -740,7 +748,7 @@ TEST(GzipResponseWriterTest, BypassWithoutAcceptAddsVaryOnly) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         const CapturedHeader &h = sink.headers[0];
         EXPECT_EQ(field_value(h, "Vary"), std::optional<std::string>("Accept-Encoding")) << "still a compressible body";
         EXPECT_EQ(field_value(h, "Content-Encoding"), std::nullopt);
@@ -752,8 +760,8 @@ TEST(GzipResponseWriterTest, BypassWithoutAcceptAddsVaryOnly) {
         EXPECT_EQ(sink.body, body) << "bypass must pass the body through verbatim";
         EXPECT_TRUE(sink.ended());
         EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
-        EXPECT_EQ(stats.input_bytes, 0u);
-        EXPECT_EQ(stats.output_bytes, 0u);
+        EXPECT_EQ(stats.input_bytes, 0U);
+        EXPECT_EQ(stats.output_bytes, 0U);
     });
 }
 
@@ -775,7 +783,7 @@ TEST(GzipResponseWriterTest, BypassesBodylessStatusWithoutVary) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         const CapturedHeader &h = sink.headers[0];
         EXPECT_EQ(h.status_code, 204);
         EXPECT_TRUE(h.end_stream);
@@ -811,7 +819,7 @@ TEST(GzipResponseWriterTest, BypassesAlreadyEncodedResponse) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         const CapturedHeader &h = sink.headers[0];
         EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip")) << "left untouched";
         EXPECT_EQ(field_value(h, "Vary"), std::nullopt);
@@ -845,7 +853,7 @@ TEST(GzipResponseWriterTest, BypassesNoTransformResponse) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         const CapturedHeader &h = sink.headers[0];
         EXPECT_EQ(field_value(h, "Vary"), std::nullopt) << "no-transform is not an intrinsic candidate";
         EXPECT_EQ(field_value(h, "Cache-Control"), std::optional<std::string>("no-transform"));
@@ -877,7 +885,7 @@ TEST(GzipResponseWriterTest, BypassesBelowMinLengthBody) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         const CapturedHeader &h = sink.headers[0];
         EXPECT_EQ(field_value(h, "Vary"), std::nullopt);
         EXPECT_EQ(field_value(h, "Content-Length"), std::optional<std::string>("9"));
@@ -909,7 +917,7 @@ TEST(GzipResponseWriterTest, BypassesUnconfiguredContentType) {
             stats = gzip.stats();
         });
 
-        ASSERT_EQ(sink.headers.size(), 1u);
+        ASSERT_EQ(sink.headers.size(), 1U);
         EXPECT_EQ(field_value(sink.headers[0], "Vary"), std::nullopt) << "type mismatch is not an intrinsic candidate";
         EXPECT_EQ(sink.body, body);
         EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
@@ -1078,7 +1086,7 @@ TEST(GzipResponseWriterTest, OperationsAfterFinishAreRejected) {
 }
 
 TEST(GzipResponseWriterTest, NeverActivatedWriterDestroysCleanly) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &node_pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*node_pool*/) {
         HttpExchange exchange(SocketAddress{});
         CaptureSink sink;
         GzipResponseWriterOptions options = active_options();

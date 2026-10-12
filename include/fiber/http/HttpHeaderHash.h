@@ -7,7 +7,7 @@
 
 namespace fiber::http {
 
-inline constexpr uint64_t http_header_name_to_lowercase_and_hash(std::string_view name, char *dst) noexcept {
+constexpr uint64_t http_header_name_to_lowercase_and_hash(std::string_view name, char *dst) noexcept {
     std::uint32_t hash = 0;
     for (std::size_t i = 0; i < name.size(); ++i) {
         unsigned char lower = static_cast<unsigned char>(name[i]);
@@ -22,11 +22,11 @@ inline constexpr uint64_t http_header_name_to_lowercase_and_hash(std::string_vie
     return static_cast<std::uint64_t>(hash);
 }
 
-inline constexpr uint64_t http_header_name_hash(std::string_view name) noexcept {
+constexpr uint64_t http_header_name_hash(std::string_view name) noexcept {
     return http_header_name_to_lowercase_and_hash(name, nullptr);
 }
 
-inline constexpr bool http_header_name_equals_ci(std::string_view a, std::string_view b) noexcept {
+constexpr bool http_header_name_equals_ci(std::string_view a, std::string_view b) noexcept {
     if (a.size() != b.size()) {
         return false;
     }

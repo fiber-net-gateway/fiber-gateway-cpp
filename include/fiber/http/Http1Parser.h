@@ -55,7 +55,7 @@ public:
         HttpUriParseState uri_parse{};
     };
 
-public:
+
     RequestLineParser() noexcept;
 
     void reset();

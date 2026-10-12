@@ -100,6 +100,7 @@ public:
     Http2Stream(void *owner, const Ops &ops) noexcept;
 
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_id_; }
+    // NOLINTNEXTLINE(readability-make-member-function-const) non-const twin returns a mutable pointer
     [[nodiscard]] void *owner() noexcept { return owner_; }
     [[nodiscard]] const void *owner() const noexcept { return owner_; }
     [[nodiscard]] std::int32_t send_window() const noexcept { return send_window_; }

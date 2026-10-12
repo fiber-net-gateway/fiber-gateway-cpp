@@ -126,9 +126,12 @@ struct DecoderRecorder {
 
     static const fiber::http::Http2HpackDecoder::Ops &ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kOps{
-                &DecoderRecorder::on_indexed_field, &DecoderRecorder::on_indexed_name,
-                &DecoderRecorder::on_name_raw,      &DecoderRecorder::on_name_huffman,
-                &DecoderRecorder::on_value_raw,     &DecoderRecorder::on_value_huffman,
+                .on_indexed_field = &DecoderRecorder::on_indexed_field,
+                .on_indexed_name = &DecoderRecorder::on_indexed_name,
+                .on_name_raw = &DecoderRecorder::on_name_raw,
+                .on_name_huffman = &DecoderRecorder::on_name_huffman,
+                .on_value_raw = &DecoderRecorder::on_value_raw,
+                .on_value_huffman = &DecoderRecorder::on_value_huffman,
         };
         return kOps;
     }
@@ -275,4 +278,43 @@ TEST(Http2HpackDecoderTest, RejectsIndexedNameLongerThanConfiguredLimit) {
 
     const std::uint8_t block[] = {0x01, 0x01, 'x'};
     EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2HpackDecoderTest, RejectsFifthIntegerContinuationByte) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+
+    // A saturated table-size prefix enters integer continuation parsing.
+    // Five zero-payload continuations would advance the shift to 35 before
+    // the terminator, causing UB without the continuation-length guard.
+    const std::uint8_t block[] = {0x3f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00};
+    EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2HpackDecoderTest, RejectsFifthIntegerContinuationByteAcrossCalls) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+
+    const std::uint8_t prefix[] = {0x3f, 0x80, 0x80, 0x80, 0x80};
+    EXPECT_EQ(decoder.decode(prefix, sizeof(prefix), false), fiber::common::IoErr::None);
+    const std::uint8_t fifth[] = {0x80};
+    EXPECT_EQ(decoder.decode(fifth, sizeof(fifth), false), fiber::common::IoErr::Invalid);
+}
+
+TEST(Http2HpackDecoderTest, AcceptsIntegerTerminatedInFourthContinuationByte) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+
+    // The same table size (31) fits within the supported continuation length.
+    const std::uint8_t block[] = {0x3f, 0x80, 0x80, 0x80, 0x00};
+    EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::None);
 }

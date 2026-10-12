@@ -6,6 +6,7 @@
 
 #include <fiber/common/Assert.h>
 
+#include <algorithm>
 #include <cstring>
 #include <new>
 #include <utility>
@@ -84,7 +85,7 @@ bool gc_array_reserve(GcHeap *heap, GcArray *arr, std::size_t expected) {
         std::construct_at(&new_elems[i]);
     }
     for (std::size_t i = 0; i < arr->size; ++i) {
-        new_elems[i] = std::move(arr->elems[i]);
+        new_elems[i] = arr->elems[i];
     }
     if (arr->elems) {
         for (std::size_t i = 0; i < arr->capacity; ++i) {
@@ -110,7 +111,7 @@ bool gc_array_set(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value) 
     }
     FIBER_ASSERT(heap->no_gc_active());
     if (index < arr->size) {
-        arr->elems[index] = std::move(value);
+        arr->elems[index] = value;
         return true;
     }
     if (!gc_array_reserve(heap, arr, index + 1)) {
@@ -120,7 +121,7 @@ bool gc_array_set(GcHeap *heap, GcArray *arr, std::size_t index, JsValue value) 
         arr->elems[arr->size] = JsValue::make_undefined();
         arr->size += 1;
     }
-    arr->elems[arr->size] = std::move(value);
+    arr->elems[arr->size] = value;
     arr->size += 1;
     arr->version += 1;
     return true;
@@ -134,7 +135,7 @@ bool gc_array_push(GcHeap *heap, GcArray *arr, JsValue value) {
     if (!gc_array_reserve(heap, arr, arr->size + 1)) {
         return false;
     }
-    arr->elems[arr->size] = std::move(value);
+    arr->elems[arr->size] = value;
     arr->size += 1;
     arr->version += 1;
     return true;
@@ -145,12 +146,12 @@ bool gc_array_pop(GcArray *arr, JsValue *out) {
         return false;
     }
     std::size_t idx = arr->size - 1;
-    JsValue removed = std::move(arr->elems[idx]);
+    JsValue removed = arr->elems[idx];
     arr->elems[idx] = JsValue::make_undefined();
     arr->size -= 1;
     arr->version += 1;
     if (out) {
-        *out = std::move(removed);
+        *out = removed;
     }
     return true;
 }
@@ -160,16 +161,14 @@ bool gc_array_insert(GcHeap *heap, GcArray *arr, std::size_t index, JsValue valu
         return false;
     }
     FIBER_ASSERT(heap->no_gc_active());
-    if (index > arr->size) {
-        index = arr->size;
-    }
+    index = std::min(index, arr->size);
     if (!gc_array_reserve(heap, arr, arr->size + 1)) {
         return false;
     }
     for (std::size_t i = arr->size; i > index; --i) {
-        arr->elems[i] = std::move(arr->elems[i - 1]);
+        arr->elems[i] = arr->elems[i - 1];
     }
-    arr->elems[index] = std::move(value);
+    arr->elems[index] = value;
     arr->size += 1;
     arr->version += 1;
     return true;
@@ -180,10 +179,10 @@ bool gc_array_remove(GcArray *arr, std::size_t index, JsValue *out) {
         return false;
     }
     if (out) {
-        *out = std::move(arr->elems[index]);
+        *out = arr->elems[index];
     }
     for (std::size_t i = index + 1; i < arr->size; ++i) {
-        arr->elems[i - 1] = std::move(arr->elems[i]);
+        arr->elems[i - 1] = arr->elems[i];
     }
     arr->elems[arr->size - 1] = JsValue::make_undefined();
     arr->size -= 1;

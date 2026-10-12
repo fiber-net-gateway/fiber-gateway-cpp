@@ -501,9 +501,7 @@ DetachedTask run_split_framing_chunked_server(fiber::event::EventLoop *loop, std
 
     const std::string payload = "0123456789abcdefghijklmnopqrstuvwxyz0123";
     const std::string segments[] = {
-            "HTTP/1.1 200 OK\r\n"
-            "Transfer-Encoding: chunked\r\n"
-            "\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
             "2", // half of the chunk-size line
             "8\r\n", // size line completes, payload not sent yet
             payload,
@@ -1168,7 +1166,7 @@ DetachedTask run_read_content_length_body_on_borrowed_connection_client(fiber::h
 
     // The fd left its home loop via the handover protocol: adopt it here
     // before the first use re-registers it on this loop.
-    connection->adopt_loop(fiber::event::EventLoop::current());
+    EXPECT_EQ(connection->adopt_loop(fiber::event::EventLoop::current()), fiber::common::IoErr::None);
 
     fiber::mem::BufPool pool;
     fiber::http::HttpHeaders headers(pool);
@@ -1519,14 +1517,14 @@ TEST(ClientHttp1ExchangeTest, SendHeaderAndContentLengthBodyWriteRawHttp1Request
     EXPECT_EQ(result.body_error, fiber::common::IoErr::None);
     EXPECT_EQ(result.request_count_before_send, 0U);
     EXPECT_EQ(result.request_count_after_send, 1U);
-    EXPECT_EQ(result.body_written, 5u);
+    EXPECT_EQ(result.body_written, 5U);
     EXPECT_TRUE(result.request_complete);
     EXPECT_EQ(result.redundant_pointer_error, fiber::common::IoErr::None);
-    EXPECT_EQ(result.redundant_pointer_written, 0u);
+    EXPECT_EQ(result.redundant_pointer_written, 0U);
     EXPECT_EQ(result.redundant_chain_error, fiber::common::IoErr::None);
-    EXPECT_EQ(result.redundant_chain_written, 0u);
+    EXPECT_EQ(result.redundant_chain_written, 0U);
     EXPECT_EQ(result.repeated_completion_error, fiber::common::IoErr::None);
-    EXPECT_EQ(result.repeated_completion_written, 0u);
+    EXPECT_EQ(result.repeated_completion_written, 0U);
     EXPECT_EQ(result.incomplete_empty_error, fiber::common::IoErr::Already);
     EXPECT_EQ(result.nonempty_after_done_error, fiber::common::IoErr::Already);
 
@@ -1963,7 +1961,7 @@ TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnecti
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        connection->adopt_loop(group.at(0));
+        EXPECT_EQ(connection->adopt_loop(group.at(0)), fiber::common::IoErr::None);
         delete connection;
         connection = nullptr;
         close_promise.set_value();

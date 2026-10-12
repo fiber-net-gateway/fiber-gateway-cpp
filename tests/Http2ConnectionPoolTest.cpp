@@ -34,14 +34,16 @@ struct PoolHarness {
             factory(&factory), conn(options, this, ops()), gate(event::EventLoop::current(), conn) {}
         static const http::Http2Connection::Ops &ops() noexcept {
             static const http::Http2Connection::Ops ops{
-                    [](void *ctx, std::uint32_t id, http::Http2Connection &conn) noexcept {
-                        return static_cast<Server *>(ctx)->factory->create_peer_stream(id, conn);
-                    },
-                    [](void *ctx, http::Http2Connection &conn) noexcept {
-                        if (conn.state() == http::Http2Connection::State::Closed)
-                            static_cast<Server *>(ctx)->gate.on_connection_closed();
-                    },
-                    nullptr};
+                    .create_peer_stream =
+                            [](void *ctx, std::uint32_t id, http::Http2Connection &conn) noexcept {
+                                return static_cast<Server *>(ctx)->factory->create_peer_stream(id, conn);
+                            },
+                    .on_state_change =
+                            [](void *ctx, http::Http2Connection &conn) noexcept {
+                                if (conn.state() == http::Http2Connection::State::Closed)
+                                    static_cast<Server *>(ctx)->gate.on_connection_closed();
+                            },
+                    .on_capacity_change = nullptr};
             return ops;
         }
         http::ServerRequestFactory *factory;
@@ -76,12 +78,13 @@ struct PoolHarness {
         async::spawn(loop, [this]() { return accept_loop(); });
     }
     HttpConnectionGroupKey key(std::uint16_t identity = 0) const {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
         return *HttpConnectionGroupKey::make("127.0.0.1", identity ? identity : port,
                                              HttpConnectionGroupKey::Scheme::Http);
     }
-    Http2ConnectionPoolCore::Connector connector() { return {&PoolHarness::connect, this}; }
+    Http2ConnectionPoolCore::Connector connector() { return {.connect = &PoolHarness::connect, .ctx = this}; }
     static Task<common::IoResult<void>> connect(void *ctx, http::Http2ClientConnection &conn,
-                                                const HttpConnectionGroupKey &) noexcept {
+                                                const HttpConnectionGroupKey & /*unused*/) noexcept {
         auto &h = *static_cast<PoolHarness *>(ctx);
         ++h.dials;
         ++h.dials_active;
@@ -171,8 +174,8 @@ struct PoolHarness {
             co_await async::sleep(1ms);
         pool.shutdown();
         co_await pool.join();
-        EXPECT_EQ(pool.connection_total(), 0u);
-        EXPECT_EQ(pool.group_count(), 0u);
+        EXPECT_EQ(pool.connection_total(), 0U);
+        EXPECT_EQ(pool.group_count(), 0U);
         listener.close();
         while (!accept_done)
             co_await async::sleep(1ms);
@@ -256,13 +259,13 @@ TEST(Http2ConnectionPoolTest, ConcurrentRequestsShareSingleDialAndConnection) {
         }
         while (h.requests != 12)
             co_await async::sleep(1ms);
-        EXPECT_EQ(h.dials, 1u);
-        EXPECT_EQ(h.servers.size(), 1u);
-        EXPECT_EQ(h.max_dials_active, 1u);
+        EXPECT_EQ(h.dials, 1U);
+        EXPECT_EQ(h.servers.size(), 1U);
+        EXPECT_EQ(h.max_dials_active, 1U);
         h.hold_responses = false;
         while (done != 12)
             co_await async::sleep(1ms);
-        EXPECT_EQ(h.pool.idle_total(), 1u);
+        EXPECT_EQ(h.pool.idle_total(), 1U);
     });
 }
 
@@ -295,7 +298,7 @@ TEST(Http2ConnectionPoolTest, SaturationWaitsAndReturnsSameConnection) {
                 a->reset();
                 while (!acquired)
                     co_await async::sleep(1ms);
-                EXPECT_EQ(h.dials, 1u);
+                EXPECT_EQ(h.dials, 1U);
             },
             single_connection(0), 2);
 }
@@ -320,7 +323,7 @@ TEST(Http2ConnectionPoolTest, SaturatedConnectionReturnsToHeadWithoutReorderingO
                 EXPECT_TRUE(next);
                 if (next)
                     EXPECT_EQ(&next->connection(), first);
-                EXPECT_EQ(h.dials, 3u);
+                EXPECT_EQ(h.dials, 3U);
             },
             options);
 }
@@ -367,7 +370,7 @@ TEST(Http2ConnectionPoolTest, TimeoutUnlinksWaiterAndLaterAcquireSucceeds) {
                 lease->reset();
                 auto next = co_await h.acquire(0ms);
                 EXPECT_TRUE(next);
-                EXPECT_EQ(h.dials, 1u);
+                EXPECT_EQ(h.dials, 1U);
             },
             single_connection());
 }
@@ -383,11 +386,11 @@ TEST(Http2ConnectionPoolTest, IdleExpiryClosesAndRecyclesBucket) {
                     co_return;
                 co_await h.settled(*lease);
                 co_await async::sleep(25ms);
-                EXPECT_EQ(h.pool.connection_total(), 1u); // A held lease never expires.
+                EXPECT_EQ(h.pool.connection_total(), 1U); // A held lease never expires.
                 lease->reset();
                 co_await h.pool.join();
-                EXPECT_EQ(h.pool.group_count(), 0u);
-                EXPECT_EQ(h.pool.idle_total(), 0u);
+                EXPECT_EQ(h.pool.group_count(), 0U);
+                EXPECT_EQ(h.pool.idle_total(), 0U);
                 (void) co_await h.servers.front()->gate.join();
                 EXPECT_TRUE(h.servers.front()->conn.peer_goaway_received());
             },
@@ -420,7 +423,7 @@ TEST(Http2ConnectionPoolTest, SettingsShrinkAndGrowRecomputeAvailableSlots) {
                 co_await h.settings(*a, 3);
                 while (!acquired)
                     co_await async::sleep(1ms);
-                EXPECT_EQ(h.dials, 1u);
+                EXPECT_EQ(h.dials, 1U);
             },
             single_connection(0));
 }
@@ -452,7 +455,7 @@ TEST(Http2ConnectionPoolTest, PeerGoawayDrainsInFlightRequestAndAllowsReplacemen
         auto response = co_await ex->read_header(1s);
         EXPECT_TRUE(response);
         ex.reset();
-        EXPECT_EQ(h.dials, 2u);
+        EXPECT_EQ(h.dials, 2U);
     });
 }
 
@@ -466,14 +469,14 @@ TEST(Http2ConnectionPoolTest, ClosedConnectionLivesUntilLastLeaseReturns) {
         h.servers.front()->conn.shutdown(IoErr::ConnReset);
         (void) co_await lease->connection().wait_closed();
         co_await async::yield();
-        EXPECT_EQ(h.pool.connection_total(), 1u);
-        EXPECT_EQ(h.pool.idle_total(), 0u);
+        EXPECT_EQ(h.pool.connection_total(), 1U);
+        EXPECT_EQ(h.pool.idle_total(), 0U);
         EXPECT_TRUE(lease->connection().close_gate().closed());
         EXPECT_EQ(lease->key(), h.key());
         lease->reset();
-        EXPECT_EQ(h.pool.connection_total(), 1u); // Deferred, even outside the callback.
+        EXPECT_EQ(h.pool.connection_total(), 1U); // Deferred, even outside the callback.
         co_await h.pool.join();
-        EXPECT_EQ(h.pool.connection_total(), 0u);
+        EXPECT_EQ(h.pool.connection_total(), 0U);
     });
 }
 
@@ -490,8 +493,8 @@ TEST(Http2ConnectionPoolTest, DialFailuresRetryWithoutBroadcastingError) {
         }
         while (completed != 5)
             co_await async::sleep(1ms);
-        EXPECT_EQ(h.dials, 3u);
-        EXPECT_EQ(h.max_dials_active, 1u);
+        EXPECT_EQ(h.dials, 3U);
+        EXPECT_EQ(h.max_dials_active, 1U);
     });
 }
 
@@ -501,10 +504,10 @@ TEST(Http2ConnectionPoolTest, PersistentDialFailureTimesOutWithBoundedRetries) {
         auto lease = co_await h.acquire(45ms);
         EXPECT_FALSE(lease);
         EXPECT_EQ(lease.error(), IoErr::TimedOut);
-        EXPECT_GE(h.dials, 2u);
-        EXPECT_LE(h.dials, 6u);
+        EXPECT_GE(h.dials, 2U);
+        EXPECT_LE(h.dials, 6U);
         co_await h.pool.join();
-        EXPECT_EQ(h.pool.group_count(), 0u);
+        EXPECT_EQ(h.pool.group_count(), 0U);
     });
 }
 
@@ -514,9 +517,9 @@ TEST(Http2ConnectionPoolTest, DeadlineCancelsSuspendedConnector) {
         auto result = co_await h.acquire(10ms);
         EXPECT_FALSE(result);
         EXPECT_EQ(result.error(), IoErr::TimedOut);
-        EXPECT_EQ(h.dials_active, 0u);
+        EXPECT_EQ(h.dials_active, 0U);
         co_await h.pool.join();
-        EXPECT_EQ(h.pool.group_count(), 0u);
+        EXPECT_EQ(h.pool.group_count(), 0U);
     });
 }
 
@@ -536,8 +539,8 @@ TEST(Http2ConnectionPoolTest, ClearCancelsDialAndWaitersAndCanBeReused) {
             co_await async::sleep(1ms);
         h.pool.clear();
         co_await h.pool.join();
-        EXPECT_EQ(done, 3u);
-        EXPECT_EQ(h.dials_active, 0u);
+        EXPECT_EQ(done, 3U);
+        EXPECT_EQ(h.dials_active, 0U);
         h.dial_delay = 0ms;
         auto lease = co_await h.acquire();
         EXPECT_TRUE(lease);
@@ -562,7 +565,7 @@ TEST(Http2ConnectionPoolTest, ShutdownWithLiveLeaseCancelsWaitersAndJoinsAfterRe
                 h.pool.shutdown();
                 while (!done)
                     co_await async::sleep(1ms);
-                EXPECT_EQ(h.pool.connection_total(), 1u);
+                EXPECT_EQ(h.pool.connection_total(), 1U);
                 auto rejected = co_await h.acquire(0ms);
                 EXPECT_FALSE(rejected);
                 EXPECT_EQ(rejected.error(), IoErr::Canceled);
@@ -585,12 +588,12 @@ TEST(Http2ConnectionPoolTest, LifetimeLimitRetiresAfterFinalLease) {
                 a->reset();
                 auto poll = co_await h.acquire(0ms);
                 EXPECT_FALSE(poll);
-                EXPECT_EQ(h.pool.connection_total(), 1u);
+                EXPECT_EQ(h.pool.connection_total(), 1U);
                 b->reset();
                 co_await h.pool.join();
                 auto next = co_await h.acquire();
                 EXPECT_TRUE(next);
-                EXPECT_EQ(h.dials, 2u);
+                EXPECT_EQ(h.dials, 2U);
             },
             options);
 }
@@ -611,9 +614,9 @@ TEST(Http2ConnectionPoolTest, ZeroIdleBudgetStillAllowsAcquireAndReusesEntryStor
                     storage = &lease->connection();
                     lease->reset();
                     co_await h.pool.join();
-                    EXPECT_EQ(h.pool.group_count(), 0u);
+                    EXPECT_EQ(h.pool.group_count(), 0U);
                 }
-                EXPECT_EQ(h.dials, 100u);
+                EXPECT_EQ(h.dials, 100U);
             },
             options);
 }
@@ -641,7 +644,7 @@ TEST(Http2ConnectionPoolTest, GlobalLimitReleaseWakesAnotherGroup) {
                 first->reset();
                 while (!done)
                     co_await async::sleep(1ms);
-                EXPECT_EQ(h.dials, 2u);
+                EXPECT_EQ(h.dials, 2U);
             },
             options);
 }
@@ -654,8 +657,8 @@ TEST(Http2ConnectionPoolTest, DestroyingAcquireCoroutineCancelsWaiterAndDial) {
                 EXPECT_FALSE(result);
                 EXPECT_EQ(result.error(), IoErr::TimedOut);
                 co_await h.pool.join();
-                EXPECT_EQ(h.dials_active, 0u);
-                EXPECT_EQ(h.pool.group_count(), 0u);
+                EXPECT_EQ(h.dials_active, 0U);
+                EXPECT_EQ(h.pool.group_count(), 0U);
                 h.dial_delay = 0ms;
                 auto lease = co_await h.acquire();
                 EXPECT_TRUE(lease);
@@ -684,6 +687,7 @@ TEST(Http2ConnectionPoolTest, PooledExchangeMoveAssignmentReleasesOldSlotFirst) 
                 http::Http2PooledExchange left(std::move(*a), buffers), right(std::move(*b), buffers);
                 left = std::move(right);
                 EXPECT_TRUE(left.valid());
+                // NOLINTNEXTLINE(bugprone-use-after-move) moved-from inspection is the test subject
                 EXPECT_FALSE(right.valid());
                 auto free = co_await h.acquire(0ms);
                 EXPECT_TRUE(free);
@@ -691,7 +695,7 @@ TEST(Http2ConnectionPoolTest, PooledExchangeMoveAssignmentReleasesOldSlotFirst) 
                 EXPECT_FALSE(full);
                 left.reset();
                 free->reset();
-                EXPECT_EQ(h.pool.idle_total(), 1u);
+                EXPECT_EQ(h.pool.idle_total(), 1U);
             },
             options);
 }
@@ -722,7 +726,7 @@ TEST(Http2ConnectionPoolTest, IdleBudgetEvictsOldestAndUnsaturatedReleaseKeepsOr
                 EXPECT_NE(a, b);
                 b2->reset();
                 next->reset(); // A is the oldest idle connection.
-                EXPECT_EQ(h.pool.idle_total(), 1u);
+                EXPECT_EQ(h.pool.idle_total(), 1U);
                 while (h.pool.connection_total() != 1)
                     co_await async::sleep(1ms);
                 auto survivor = co_await h.acquire();
@@ -754,8 +758,8 @@ TEST(Http2ConnectionPoolTest, ParallelDialOptionHonorsConfiguredLimit) {
                 }
                 while (acquired != 4)
                     co_await async::sleep(1ms);
-                EXPECT_EQ(h.dials, 4u);
-                EXPECT_EQ(h.max_dials_active, 2u);
+                EXPECT_EQ(h.dials, 4U);
+                EXPECT_EQ(h.max_dials_active, 2U);
                 release = true;
                 while (done != 4)
                     co_await async::sleep(1ms);
@@ -771,8 +775,8 @@ TEST(Http2ConnectionPoolTest, PollNeverDialsAndLocalLimitIsConservative) {
                 auto poll = co_await h.acquire(0ms);
                 EXPECT_FALSE(poll);
                 EXPECT_EQ(poll.error(), IoErr::Busy);
-                EXPECT_EQ(h.dials, 0u);
-                EXPECT_EQ(h.pool.group_count(), 0u);
+                EXPECT_EQ(h.dials, 0U);
+                EXPECT_EQ(h.pool.group_count(), 0U);
                 auto lease = co_await h.acquire();
                 EXPECT_TRUE(lease);
                 if (!lease)
@@ -810,16 +814,16 @@ TEST(Http2ConnectionPoolTest, CountObserverReportsReadyTransitionsAndFinalZero) 
                         &counts);
                 auto lease = co_await h.acquire();
                 EXPECT_TRUE(lease);
-                EXPECT_EQ(counts.total, 1u);
-                EXPECT_EQ(counts.ready, 0u);
+                EXPECT_EQ(counts.total, 1U);
+                EXPECT_EQ(counts.ready, 0U);
                 if (lease)
                     lease->reset();
-                EXPECT_EQ(counts.ready, 1u);
+                EXPECT_EQ(counts.ready, 1U);
                 h.pool.clear();
                 co_await h.pool.join();
-                EXPECT_EQ(counts.total, 0u);
-                EXPECT_EQ(counts.ready, 0u);
-                EXPECT_GE(counts.calls, 5u);
+                EXPECT_EQ(counts.total, 0U);
+                EXPECT_EQ(counts.ready, 0U);
+                EXPECT_GE(counts.calls, 5U);
                 h.pool.clear_conn_count_changed_callback();
             },
             single_connection());
@@ -861,14 +865,14 @@ TEST(LocalHttp2ConnectionPoolSetTest, ShutdownWaitsForRealConnectionLeaseAndDefe
         bool released = false;
         async::spawn(h.loop, [&]() -> DetachedTask {
             co_await async::sleep(10ms);
-            EXPECT_EQ(set.connection_total(), 1u);
+            EXPECT_EQ(set.connection_total(), 1U);
             lease->reset();
             released = true;
         });
         co_await set.shutdown_async();
         EXPECT_TRUE(released);
-        EXPECT_EQ(set.connection_total(), 0u);
-        EXPECT_EQ(set.group_count(), 0u);
+        EXPECT_EQ(set.connection_total(), 0U);
+        EXPECT_EQ(set.group_count(), 0U);
     });
 }
 TEST(Http2ConnectionPoolTest, AbandonedPooledExchangeCancelsStreamBeforeReturningSlot) {
@@ -890,9 +894,9 @@ TEST(Http2ConnectionPoolTest, AbandonedPooledExchangeCancelsStreamBeforeReturnin
                     EXPECT_TRUE(sent);
                     while (!h.requests)
                         co_await async::sleep(1ms);
-                    EXPECT_EQ(connection->http2().local_active_stream_count(), 1u);
+                    EXPECT_EQ(connection->http2().local_active_stream_count(), 1U);
                 }
-                EXPECT_EQ(connection->http2().local_active_stream_count(), 0u);
+                EXPECT_EQ(connection->http2().local_active_stream_count(), 0U);
                 auto next = co_await h.acquire(0ms);
                 EXPECT_TRUE(next);
                 if (next)
@@ -939,7 +943,7 @@ TEST(Http2ConnectionPoolTest, DialFailuresAreReportedAndBackOffExponentially) {
                 co_await h.pool.join();
                 auto again = co_await h.acquire(5s);
                 EXPECT_TRUE(again);
-                EXPECT_EQ(report.counts.back(), 1u);
+                EXPECT_EQ(report.counts.back(), 1U);
                 h.pool.clear_dial_failed_callback();
             },
             options);
@@ -950,8 +954,8 @@ TEST(Http2ConnectionPoolTest, TryAcquireReusesWithoutDialingOrBarging) {
             [](PoolHarness &h) -> Task<void> {
                 // Nothing pooled yet: no group is created and no dial starts.
                 EXPECT_FALSE(h.pool.try_acquire(h.key()).has_value());
-                EXPECT_EQ(h.dials, 0u);
-                EXPECT_EQ(h.pool.group_count(), 0u);
+                EXPECT_EQ(h.dials, 0U);
+                EXPECT_EQ(h.pool.group_count(), 0U);
 
                 auto lease = co_await h.acquire();
                 EXPECT_TRUE(lease);
@@ -962,10 +966,10 @@ TEST(Http2ConnectionPoolTest, TryAcquireReusesWithoutDialingOrBarging) {
 
                 auto reused = h.pool.try_acquire(h.key());
                 EXPECT_TRUE(reused.has_value());
-                EXPECT_EQ(h.dials, 1u);
+                EXPECT_EQ(h.dials, 1U);
                 // Saturated at one stream per connection: no slot, still no dial.
                 EXPECT_FALSE(h.pool.try_acquire(h.key()).has_value());
-                EXPECT_EQ(h.dials, 1u);
+                EXPECT_EQ(h.dials, 1U);
 
                 // A queued waiter owns the next slot; try_acquire must not barge.
                 bool queued = false;

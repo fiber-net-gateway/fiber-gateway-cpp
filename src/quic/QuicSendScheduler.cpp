@@ -355,10 +355,9 @@ QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnectio
 
         const std::size_t sent_message_count = *sent;
         FIBER_ASSERT(sent_message_count <= (used_individual_fallback ? datagram_count : messages.count));
-        const std::size_t sent_count =
-                used_individual_fallback
-                        ? sent_message_count
-                        : (sent_message_count == 0 ? 0 : messages.datagram_ends[sent_message_count - 1]);
+        const std::size_t last_datagram_end =
+                sent_message_count == 0 ? 0 : messages.datagram_ends[sent_message_count - 1];
+        const std::size_t sent_count = used_individual_fallback ? sent_message_count : last_datagram_end;
         FIBER_ASSERT(sent_count <= datagram_count);
         for (std::size_t i = 0; i < sent_count; ++i) {
             if (datagrams[i].pacing_controlled) {

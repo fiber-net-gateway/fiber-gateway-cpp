@@ -451,7 +451,6 @@ TEST(QuicTransportCodecTest, CreatesAndParsesCryptoFrame) {
     EXPECT_EQ(parsed->frame.u.crypto.length, payload.size());
     ASSERT_EQ(parsed->frame.data.len, payload.size());
     EXPECT_EQ(parsed->frame.data.data[1], 0xad);
-    fiber::quic::quic_output_frame_release_data(frame);
 }
 
 TEST(QuicTransportCodecTest, ChecksFramePermissionByEncryptionLevel) {
@@ -485,8 +484,7 @@ TEST(QuicTransportCodecTest, CreatesAndClientParsesNewTokenFrame) {
     const std::array<std::uint8_t, 3> token{'a', 'b', 'c'};
     fiber::quic::QuicOutputFrame frame{};
     frame.type = fiber::quic::QuicFrameType::NewToken;
-    frame.u.new_token.data = token.data();
-    frame.u.new_token.length = token.size();
+    ASSERT_TRUE(fiber::quic::quic_output_frame_set_owned_data(frame, token.data(), token.size()).has_value());
 
     std::array<std::uint8_t, 16> buf{};
     fiber::quic::QuicWriteCursor out(buf.data(), buf.size());

@@ -86,7 +86,7 @@ common::IoErr Http2Stream::on_data_payload_recv(mem::IoBuf payload, std::size_t 
     return common::IoErr::None;
 }
 
-void Http2Stream::on_rst_recv(Http2ErrorCode, common::IoErr result) noexcept {
+void Http2Stream::on_rst_recv(Http2ErrorCode /*unused*/, common::IoErr result) noexcept {
     remote_rst_ = true;
     close(result);
 }
@@ -127,7 +127,7 @@ void Http2Stream::update_send_window(std::int32_t delta) noexcept {
 
 void Http2Stream::consume_recv_window(std::uint32_t bytes) noexcept {
     FIBER_ASSERT(recv_window_remaining_ >= 0);
-    FIBER_ASSERT(bytes <= static_cast<std::uint32_t>(recv_window_remaining_));
+    FIBER_ASSERT(std::cmp_less_equal(bytes, recv_window_remaining_));
     recv_window_remaining_ -= static_cast<std::int32_t>(bytes);
 }
 
@@ -140,7 +140,7 @@ common::IoErr Http2Stream::maybe_replenish_recv_window(std::size_t buffered_byte
         return common::IoErr::Invalid;
     }
 
-    if (recv_window_remaining_ > static_cast<std::int32_t>(recv_window_low_watermark_)) {
+    if (std::cmp_greater(recv_window_remaining_, recv_window_low_watermark_)) {
         return common::IoErr::None;
     }
 

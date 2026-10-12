@@ -1,10 +1,11 @@
 #include <fiber/event/SignalService.h>
 
 #include <cerrno>
+#include <csignal>
 #include <pthread.h>
-#include <signal.h>
 #include <sys/signalfd.h>
 #include <unistd.h>
+#include <utility>
 
 #include <fiber/common/Assert.h>
 
@@ -229,7 +230,7 @@ void SignalService::drain_signalfd() {
     for (;;) {
         signalfd_siginfo info{};
         ssize_t rc = ::read(signalfd_, &info, sizeof(info));
-        if (rc == static_cast<ssize_t>(sizeof(info))) {
+        if (std::cmp_equal(rc, sizeof(info))) {
             on_delivery(to_signal_info(info));
             continue;
         }

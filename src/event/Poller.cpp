@@ -10,6 +10,7 @@
 #include <sys/timerfd.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 
 #include <fiber/common/Assert.h>
 
@@ -316,11 +317,11 @@ int Poller::sync_timer_fd(std::chrono::steady_clock::time_point deadline, std::c
     return 0;
 }
 
-int Poller::drain_timer_fd() {
+int Poller::drain_timer_fd() const {
     std::uint64_t expirations = 0;
     for (;;) {
         const ssize_t result = ::read(timer_fd_, &expirations, sizeof(expirations));
-        if (result == static_cast<ssize_t>(sizeof(expirations))) {
+        if (std::cmp_equal(result, sizeof(expirations))) {
             return 0;
         }
         if (result < 0 && errno == EINTR) {

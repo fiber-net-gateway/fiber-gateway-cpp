@@ -113,10 +113,10 @@ public:
         }
         return out;
     }
-    async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
+    async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds /*timeout*/) override {
         co_return std::unexpected(IoErr::NotSupported);
     }
-    async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
+    async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds /*timeout*/) override {
         co_return std::unexpected(IoErr::NotSupported);
     }
     void close() override {
@@ -145,14 +145,14 @@ public:
         return count;
     }
     void expect_goaway(std::uint32_t last_id) const {
-        EXPECT_EQ(frame_count(Type::Goaway), 1u);
+        EXPECT_EQ(frame_count(Type::Goaway), 1U);
         for (std::size_t offset = 0; offset + 9 <= written.size();) {
             auto length = u32(written.data() + offset) >> 8;
             ASSERT_LE(offset + 9 + length, written.size());
             if (static_cast<unsigned char>(written[offset + 3]) == static_cast<unsigned char>(Type::Goaway)) {
-                ASSERT_GE(length, 8u);
+                ASSERT_GE(length, 8U);
                 EXPECT_EQ(u32(written.data() + offset + 9), last_id);
-                EXPECT_EQ(u32(written.data() + offset + 13), 0u);
+                EXPECT_EQ(u32(written.data() + offset + 13), 0U);
             }
             offset += 9 + length;
         }
@@ -202,13 +202,13 @@ async::Task<void> respond(http::HttpExchange &exchange) {
 
 struct Session {
     explicit Session(std::chrono::milliseconds idle = kIdle, http::Http2Connection::Options options = io_options(),
-                     http::HttpHandler handler = respond) :
+                     const http::HttpHandler &handler = respond) :
         factory(handler), connection(event::EventLoop::current(), options, factory, idle) {
         auto transport = std::make_unique<WireTransport>();
         wire = transport.get();
         EXPECT_EQ(connection.start(std::move(transport)), IoErr::None);
     }
-    void preface(std::string_view extra = {}) {
+    void preface(std::string_view extra = {}) const {
         wire->feed(std::string(kPreface) + frame(Type::Settings) + std::string(extra));
     }
     async::Task<http::Http2Connection::CloseResult> join() {
@@ -367,8 +367,8 @@ TEST(Http2ServerConnectionTest, PingAndSettingsDoNotRefreshIdleDeadline) {
         // This check occurs while traffic is still being supplied. Waiting for
         // closure only after stopping traffic would let a refresh bug pass.
         EXPECT_NE(s.connection.http2().state(), State::Running);
-        EXPECT_GT(s.wire->frame_count(Type::Ping), 1u);
-        EXPECT_GT(s.wire->frame_count(Type::Settings), 2u);
+        EXPECT_GT(s.wire->frame_count(Type::Ping), 1U);
+        EXPECT_GT(s.wire->frame_count(Type::Settings), 2U);
         co_await s.finish();
     });
 }
@@ -380,7 +380,7 @@ TEST(Http2ServerConnectionTest, DisabledIdlePolicyRetainsAnEmptySession) {
         co_await async::sleep(kIdle * 3);
         EXPECT_EQ(s.connection.http2().state(), State::Running);
         EXPECT_FALSE(s.connection.idle_timer_entry_.is_in_heap());
-        EXPECT_EQ(s.wire->frame_count(Type::Goaway), 0u);
+        EXPECT_EQ(s.wire->frame_count(Type::Goaway), 0U);
         s.connection.request_drain();
         co_await s.finish();
     });
@@ -415,7 +415,7 @@ TEST(Http2ServerConnectionTest, PrefaceStillUsesReadTimeout) {
         EXPECT_FALSE(closed);
         if (!closed)
             EXPECT_EQ(closed.error(), IoErr::TimedOut);
-        EXPECT_EQ(s.wire->frame_count(Type::Goaway), 0u);
+        EXPECT_EQ(s.wire->frame_count(Type::Goaway), 0U);
     });
 }
 
@@ -431,7 +431,7 @@ TEST(Http2ServerConnectionTest, ExpiryFirstStopsAdmissionAndFlushesGoaway) {
         s.wire->feed(request(1, true));
         co_await async::sleep(20ms);
         EXPECT_FALSE(s.connection.http2().has_active_streams());
-        EXPECT_EQ(s.wire->frame_count(Type::Headers), 0u);
+        EXPECT_EQ(s.wire->frame_count(Type::Headers), 0U);
         EXPECT_FALSE(s.connection.idle_timer_entry_.is_in_heap());
         s.wire->unblock_write();
         co_await s.finish();
@@ -469,7 +469,7 @@ TEST(Http2ServerConnectionTest, GracefulCloseWaitsForOutputTheTransportHolds) {
         EXPECT_NE(s.connection.http2().state(), State::Closed);
         s.wire->release_held();
         co_await s.finish();
-        EXPECT_EQ(s.wire->held_at_close, 0u);
+        EXPECT_EQ(s.wire->held_at_close, 0U);
     });
 }
 

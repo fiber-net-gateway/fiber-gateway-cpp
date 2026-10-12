@@ -33,7 +33,7 @@ namespace {
     if (lhs.size() != rhs.size()) {
         return false;
     }
-    if (lhs.size() == 0) {
+    if (lhs.empty()) {
         return true;
     }
     return std::equal(lhs.data(), lhs.data() + lhs.size(), rhs.data());
@@ -135,7 +135,7 @@ struct FrameParseClose {
     return path;
 }
 
-void discard_frame_queue(QuicConnection &conn, QuicPacketNumberSpace &space, QuicOutputFrameQueue &queue) noexcept {
+void discard_frame_queue(QuicConnection &conn, QuicPacketNumberSpace &space, QuicOutputFrameList &queue) noexcept {
     (void) conn;
     while (QuicOutputFrame *frame = queue.pop_front()) {
         space.release_frame(*frame);
@@ -148,7 +148,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
     discard_frame_queue(conn, space, space.pending_frames);
     discard_frame_queue(conn, space, space.sending_frames);
     discard_frame_queue(conn, space, space.sent_frames);
-    if (space.ack_frame.queued) {
+    if (space.ack_frame.hook.linked()) {
         space.pending_frames.erase(space.ack_frame);
     }
     space.send_ack = false;
@@ -195,15 +195,10 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
         return std::unexpected(taken.error());
     }
 
-    while (mem::IoBufNode *node = contiguous.pop_front_node()) {
-        auto provided = conn.tls().provide_crypto_data(level, node->buf.readable_data(), node->buf.readable());
-        conn.recv_extent_pool().release(node);
-        if (!provided) {
-            return std::unexpected(provided.error());
-        }
+    if (contiguous.readable_bytes() == 0) {
+        return {};
     }
-
-    return {};
+    return conn.tls().provide_crypto_data(level, contiguous);
 }
 
 [[nodiscard]] common::IoResult<bool> handle_crypto_frame(QuicConnection &conn, QuicEncryptionLevel level,
@@ -427,7 +422,7 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 // STREAM_STATE_ERROR (nginx
                 // ngx_quic_handle_stream_data_blocked_frame).
                 if (conn.is_local_stream(frame.u.stream_data_blocked.id) &&
-                    conn.is_unidirectional_stream(frame.u.stream_data_blocked.id)) {
+                    fiber::quic::QuicConnection::is_unidirectional_stream(frame.u.stream_data_blocked.id)) {
                     conn.close(QuicErrorCode::StreamStateError,
                                static_cast<std::uint64_t>(QuicFrameType::StreamDataBlocked));
                     return std::unexpected(common::IoErr::Busy);

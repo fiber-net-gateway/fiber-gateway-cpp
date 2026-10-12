@@ -380,7 +380,7 @@ bool gc_array_pop(ValueHandle array, ValueHandle out) {
     }
     JsValue popped = JsValue::make_undefined();
     bool ok = gc_array_pop(arr, &popped);
-    *out = std::move(popped);
+    *out = popped;
     return ok;
 }
 
@@ -410,7 +410,7 @@ bool gc_array_remove(ValueHandle array, std::size_t index, ValueHandle out) {
     }
     JsValue removed = JsValue::make_undefined();
     bool ok = gc_array_remove(arr, index, &removed);
-    *out = std::move(removed);
+    *out = removed;
     return ok;
 }
 

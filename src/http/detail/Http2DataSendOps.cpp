@@ -49,7 +49,7 @@ common::IoErr Http2DataSendAllOp::on_encode(const Http2OutboundEncodeRequest &re
 }
 
 common::IoErr Http2DataSendSomeOp::on_encode(const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
-                                             Http2OutboundEncodeResult &result) noexcept {
+                                             Http2OutboundEncodeResult &result) const noexcept {
     if (total_bytes_ == 0) {
         FIBER_ASSERT(end_);
         mem::IoBufChain empty;

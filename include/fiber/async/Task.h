@@ -178,12 +178,12 @@ public:
 
         bool await_ready() const noexcept { return !handle || handle.done(); }
 
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<> cont) {
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> cont) const {
             handle.promise().set_continuation(cont);
             return handle;
         }
 
-        void await_resume() { handle.promise().result(); }
+        void await_resume() const { handle.promise().result(); }
     };
 
     Awaiter operator co_await() && { return Awaiter{handle_}; }

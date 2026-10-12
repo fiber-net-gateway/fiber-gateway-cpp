@@ -9,13 +9,17 @@
 namespace fiber::http {
 
 const Http2HpackDecoder::Ops &Http2HpackDiscardSink::ops() noexcept {
-    static const Http2HpackDecoder::Ops ops{&indexed_field, &indexed_name, &name_raw,
-                                            &name_huffman,  &value_raw,    &value_huffman};
+    static const Http2HpackDecoder::Ops ops{.on_indexed_field = &indexed_field,
+                                            .on_indexed_name = &indexed_name,
+                                            .on_name_raw = &name_raw,
+                                            .on_name_huffman = &name_huffman,
+                                            .on_value_raw = &value_raw,
+                                            .on_value_huffman = &value_huffman};
     return ops;
 }
 
 common::IoErr Http2HpackDiscardSink::materialize(mem::IoBuf &buffer, const std::uint8_t *data, std::size_t len,
-                                                 bool huffman) noexcept {
+                                                 bool huffman) const noexcept {
     bool valid = true;
     const std::size_t size = huffman ? hpack_huffman_decoded_length(data, len, &valid) : len;
     if (!valid || size > max_string_size_) {
@@ -47,7 +51,8 @@ common::IoErr Http2HpackDiscardSink::materialize(mem::IoBuf &buffer, const std::
     return common::IoErr::None;
 }
 
-common::IoErr Http2HpackDiscardSink::indexed_field(void *, Http2HpackDecoder::TableEntryView) noexcept {
+common::IoErr Http2HpackDiscardSink::indexed_field(void * /*unused*/,
+                                                   Http2HpackDecoder::TableEntryView /*unused*/) noexcept {
     return common::IoErr::None;
 }
 common::IoErr Http2HpackDiscardSink::indexed_name(void *ctx, Http2HpackDecoder::TableEntryView entry) noexcept {
@@ -78,7 +83,7 @@ std::string_view Http2HpackDiscardSink::view_of(const mem::IoBuf &buffer) noexce
     if (!buffer) {
         return {};
     }
-    return std::string_view(reinterpret_cast<const char *>(buffer.readable_data()), buffer.readable());
+    return {reinterpret_cast<const char *>(buffer.readable_data()), buffer.readable()};
 }
 common::IoErr Http2HpackDiscardSink::value_raw(void *ctx, const std::uint8_t *data, std::size_t len,
                                                Http2HpackDecoder::FieldView *out) noexcept {

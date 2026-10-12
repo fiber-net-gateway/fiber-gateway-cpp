@@ -13,8 +13,8 @@
 namespace fiber::http {
 
 struct Http1ClientExchangeOptions {
-    std::size_t response_header_init_size = 8 * 1024;
-    std::size_t response_header_large_size = 32 * 1024;
+    std::size_t response_header_init_size = static_cast<std::size_t>(8 * 1024);
+    std::size_t response_header_large_size = static_cast<std::size_t>(32 * 1024);
     std::size_t response_header_large_num = 4;
 };
 

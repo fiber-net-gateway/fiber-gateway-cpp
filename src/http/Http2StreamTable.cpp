@@ -97,6 +97,9 @@ bool Http2StreamTable::rehash(std::size_t new_bucket_count) noexcept {
             continue;
         }
         std::size_t idx = hash_stream_id(src.stream_id) & new_mask;
+        // fresh is value-initialized ({}), so every bucket starts empty; the
+        // analyzer mis-models the nothrow array-new initializer.
+        // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.Branch)
         while (fresh[idx].stream) {
             idx = (idx + 1) & new_mask;
         }
@@ -125,7 +128,7 @@ Http2Stream::Lease Http2StreamTable::erase(std::uint32_t stream_id) noexcept {
 }
 
 std::size_t Http2StreamTable::hash_stream_id(std::uint32_t stream_id) noexcept {
-    std::uint32_t value = stream_id * 2654435761u;
+    std::uint32_t value = stream_id * 2654435761U;
     value ^= value >> 16;
     return value;
 }

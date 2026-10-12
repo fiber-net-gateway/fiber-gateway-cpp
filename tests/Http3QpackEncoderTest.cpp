@@ -114,8 +114,12 @@ struct DecodeRecorder {
 
     static const Http3QpackDecoder::Ops &ops() noexcept {
         static const Http3QpackDecoder::Ops kOps{
-                &DecodeRecorder::on_indexed_field, &DecodeRecorder::on_indexed_name, &DecodeRecorder::on_name_raw,
-                &DecodeRecorder::on_name_huffman,  &DecodeRecorder::on_value_raw,    &DecodeRecorder::on_value_huffman,
+                .on_indexed_field = &DecodeRecorder::on_indexed_field,
+                .on_indexed_name = &DecodeRecorder::on_indexed_name,
+                .on_name_raw = &DecodeRecorder::on_name_raw,
+                .on_name_huffman = &DecodeRecorder::on_name_huffman,
+                .on_value_raw = &DecodeRecorder::on_value_raw,
+                .on_value_huffman = &DecodeRecorder::on_value_huffman,
         };
         return kOps;
     }
@@ -137,7 +141,7 @@ void decode_all(const std::vector<std::uint8_t> &bytes, DecodeRecorder &recorder
 } // namespace
 
 TEST(Http3QpackEncoderTest, EmitsEmptyBlockPrefix) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer;
 
         IoBufChain block;
@@ -147,7 +151,7 @@ TEST(Http3QpackEncoderTest, EmitsEmptyBlockPrefix) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesStaticExactMethodAsIndexedField) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_method(HttpMethod::Get), IoErr::None);
 
@@ -164,7 +168,7 @@ TEST(Http3QpackEncoderTest, EncodesStaticExactMethodAsIndexedField) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesStaticExactStatusAsIndexedField) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_status(200), IoErr::None);
 
@@ -175,7 +179,7 @@ TEST(Http3QpackEncoderTest, EncodesStaticExactStatusAsIndexedField) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesNonStaticStatusUsingStaticNameReference) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_status(418), IoErr::None);
 
@@ -192,7 +196,7 @@ TEST(Http3QpackEncoderTest, EncodesNonStaticStatusUsingStaticNameReference) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesPathUsingStaticNameReference) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_path("/index.html"), IoErr::None);
 
@@ -205,7 +209,7 @@ TEST(Http3QpackEncoderTest, EncodesPathUsingStaticNameReference) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesAuthorityUsingStaticNameIndexZero) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_authority("example.com"), IoErr::None);
 
@@ -225,7 +229,7 @@ TEST(Http3QpackEncoderTest, EncodesAuthorityUsingStaticNameIndexZero) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesLiteralNameAndDecodesBack) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "ok"), IoErr::None);
 
@@ -242,7 +246,7 @@ TEST(Http3QpackEncoderTest, EncodesLiteralNameAndDecodesBack) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesHuffmanNameAndValue) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1});
         ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "ok"), IoErr::None);
 
@@ -262,7 +266,7 @@ TEST(Http3QpackEncoderTest, EncodesHuffmanNameAndValue) {
 }
 
 TEST(Http3QpackEncoderTest, DoesNotHuffmanEncodeValueThatWouldExpand) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         // RFC 9204 §4.5: Huffman must only be used when it shortens the string.
         // "!!!" expands under Huffman (3 -> 4 bytes), so it must be sent raw even
         // though the threshold gate (here 1) would otherwise permit Huffman.
@@ -284,7 +288,7 @@ TEST(Http3QpackEncoderTest, DoesNotHuffmanEncodeValueThatWouldExpand) {
 }
 
 TEST(Http3QpackEncoderTest, SupportsSmallWriterChunks) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024}, 1);
         ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "chunked"), IoErr::None);
 
@@ -300,7 +304,7 @@ TEST(Http3QpackEncoderTest, SupportsSmallWriterChunks) {
 }
 
 TEST(Http3QpackEncoderTest, UsesNewTailWhenContiguousHuffmanOutputDoesNotFit) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1}, 4);
         ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
 
@@ -319,7 +323,7 @@ TEST(Http3QpackEncoderTest, UsesNewTailWhenContiguousHuffmanOutputDoesNotFit) {
 }
 
 TEST(Http3QpackEncoderTest, SupportsReservedPrefixForHttp3HeadersFrame) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         constexpr std::size_t kReserve = 16;
 
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024}, 4, kReserve);
@@ -365,7 +369,7 @@ TEST(Http3QpackEncoderTest, SupportsReservedPrefixForHttp3HeadersFrame) {
 }
 
 TEST(Http3QpackEncoderTest, RejectsStringsAboveLimit) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(
                 Http3QpackEncoder::Options{.max_string_size = 2, .huffman_threshold = 1024});
         EXPECT_EQ(writer.encode_field("x", fiber::http::http_header_name_hash("x"), "abc"), IoErr::Invalid);
@@ -379,7 +383,7 @@ TEST(Http3QpackEncoderTest, RejectsStringsAboveLimit) {
 // same-name index. Both paths must stay byte-identical to the general find() route.
 
 TEST(Http3QpackEncoderTest, EncodesStatus500AsIndexedField) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_status(500), IoErr::None);
 
@@ -391,7 +395,7 @@ TEST(Http3QpackEncoderTest, EncodesStatus500AsIndexedField) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesStatus502UsingStaticNameReference) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_status(502), IoErr::None);
 
@@ -409,7 +413,7 @@ TEST(Http3QpackEncoderTest, EncodesStatus502UsingStaticNameReference) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesPostAsIndexedField) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_method(HttpMethod::Post), IoErr::None);
 
@@ -421,7 +425,7 @@ TEST(Http3QpackEncoderTest, EncodesPostAsIndexedField) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesNonStaticMethodUsingStaticNameReference) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_method(HttpMethod::MKCOL), IoErr::None);
 
@@ -440,7 +444,7 @@ TEST(Http3QpackEncoderTest, EncodesNonStaticMethodUsingStaticNameReference) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesSchemeHttpsAndHttpAsIndexedField) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter w_https(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(w_https.encode_scheme("https"), IoErr::None);
         IoBufChain b_https;
@@ -458,7 +462,7 @@ TEST(Http3QpackEncoderTest, EncodesSchemeHttpsAndHttpAsIndexedField) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesNonStaticSchemeUsingStaticNameReference) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_scheme("ftp"), IoErr::None);
 
@@ -476,7 +480,7 @@ TEST(Http3QpackEncoderTest, EncodesNonStaticSchemeUsingStaticNameReference) {
 }
 
 TEST(Http3QpackEncoderTest, EncodesRootPathAsIndexedField) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
         ASSERT_EQ(writer.encode_path("/"), IoErr::None);
 

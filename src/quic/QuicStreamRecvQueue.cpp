@@ -13,7 +13,7 @@ namespace fiber::quic {
 
 namespace {
 
-static constexpr std::uint64_t kQuicMaxFlowControlLimit = (1ULL << 62U) - 1U;
+constexpr std::uint64_t kQuicMaxFlowControlLimit = (1ULL << 62U) - 1U;
 
 QuicDataReassembler::Options reassembler_options(QuicStreamRecvQueue::Options options) noexcept {
     return {
@@ -233,9 +233,7 @@ async::Task<common::IoResult<std::size_t>> QuicStreamRecvQueue::take(std::size_t
 }
 
 void QuicStreamRecvQueue::update_max_stream_data(std::uint64_t limit) noexcept {
-    if (limit > max_stream_data_) {
-        max_stream_data_ = limit;
-    }
+    max_stream_data_ = std::max(limit, max_stream_data_);
 }
 
 std::uint64_t QuicStreamRecvQueue::next_max_stream_data_limit() const noexcept {

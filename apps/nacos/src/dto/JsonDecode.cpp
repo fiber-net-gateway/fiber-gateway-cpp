@@ -157,6 +157,7 @@ FIBER_JSON_STRUCT(fiber::nacos::dto::resp::InstanceResponse, FIBER_JSON_BASE(fib
 namespace fiber::nacos::dto {
 
 #define FIBER_NACOS_DEFINE_JSON_PARSE(Type)                                                                            \
+    /* NOLINTNEXTLINE(bugprone-macro-parentheses) */                                                                   \
     json::ParseStatus parse_json(json::JsonParser &parser, mem::BufPool &pool, Type &out) noexcept {                   \
         return json::parse_value(parser, pool, out);                                                                   \
     }

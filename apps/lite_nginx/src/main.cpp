@@ -1,6 +1,6 @@
 #include "app/App.h"
 
-#include <signal.h>
+#include <csignal>
 
 int main(int argc, char **argv) {
     (void) ::signal(SIGPIPE, SIG_IGN);

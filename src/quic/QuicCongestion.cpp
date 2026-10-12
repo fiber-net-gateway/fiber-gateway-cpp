@@ -215,7 +215,7 @@ std::size_t quic_congestion_cubic_window(QuicCongestionState &cg, QuicTime now) 
 
     const std::int64_t cc =
             10000000000LL / static_cast<std::int64_t>(cg.mtu) / static_cast<std::int64_t>(kQuicCongestionCubicC);
-    std::int64_t w = t * t * t / cc + static_cast<std::int64_t>(cg.w_max);
+    std::int64_t w = (t * t * t / cc) + static_cast<std::int64_t>(cg.w_max);
     if (w < 0) {
         return 0;
     }

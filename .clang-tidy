@@ -1,0 +1,107 @@
+# clang-tidy configuration for fiber-gateway-cpp.
+# Run via ./run_tidy.sh (see that script for build-tree requirements).
+# Tool baseline: clang-tidy 20.x; wildcard check sets are version-dependent.
+# Check-set rationale and baseline counts for every disable live in
+# feature/clang-tidy-rollout.md; do not remove a disable without re-running
+# the baseline documented there.
+#
+# Deliberately NOT enabled (tier-2 candidates, see rollout doc):
+#   misc-include-cleaner (massive churn vs. the deliberate relative-include style)
+#   misc-header-include-cycle, misc-no-recursion
+#   misc-non-private-member-variables-in-classes (perf-first code uses public-member structs)
+#   cppcoreguidelines-* (pro-bounds/pro-type-ownership conflict with perf-first design)
+#   readability-identifier-naming (needs a naming-spec project of its own)
+#   modernize-use-std-print (cold-path cosmetic churn, format-string conversion risk)
+#   modernize-use-ranges (its std::lower_bound->ranges::lower_bound fix emits code
+#     libc++ 20 rejects — no matching __lower_bound call, breaks the build)
+#
+# Baseline-triaged disables (rationale + counts in feature/clang-tidy-rollout.md):
+#   bugprone-exception-escape — 100% policy false positives here (60+ sampled across
+#     common/net/tls): (a) bad_alloc under noexcept boundaries is fatal by house
+#     policy, (b) guarded expected/optional ::value() — the check is not
+#     path-sensitive, and libc++ throws via __throw_bad_expected_access whose type
+#     IgnoredExceptions cannot match (all 4 spellings verified ineffective).
+#     Reopen when the check grows path sensitivity or matches libc++ throw helpers.
+#     Existing per-site NOLINTs stay as documentation.
+#   performance-enum-size — enum widths are wire/ABI-deliberate (IoErr:u16, TLS suites)
+#   performance-no-int-to-ptr — only fired in generated Http1HeaderLineParser + deliberate
+#     tagged-pointer roundtrips elsewhere; generated/ is silenced by its own .clang-tidy
+#   readability-redundant-member-init — house style mandates explicit member init at
+#     construction boundaries; the check strips ctor-init repeats of NSDMI (IntrusiveList/
+#     EventLoop/IoBufChain cores)
+#   clang-analyzer-cplusplus.NewDeleteLeaks — all sampled findings are libc++ unique_ptr
+#     '__ptr_' internals (analyzer mis-modeling), not real leaks
+#   clang-analyzer-security.PointerSub — intrusive-entry handle_offset idiom
+#     ((char*)&entry - (char*)&handle) is deliberate container_of-style offset math
+# Every project module (src/, include/, example/, apps/, tests/, fuzz/) has been brought to zero
+# warnings (commit series in feature/clang-tidy-rollout.md); this holds them
+# there. Fuzz translation units require a separate FIBER_BUILD_FUZZERS tree.
+WarningsAsErrors: '*'
+
+Checks: >
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  performance-*,
+  -performance-enum-size,
+  -performance-no-int-to-ptr,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  -modernize-use-auto,
+  -modernize-use-nodiscard,
+  -modernize-use-default-member-init,
+  -modernize-macro-to-enum,
+  -modernize-use-std-print,
+  -modernize-use-ranges,
+  readability-*,
+  -readability-function-cognitive-complexity,
+  -readability-magic-numbers,
+  -readability-identifier-naming,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-else-after-return,
+  -readability-isolate-declaration,
+  -readability-convert-member-functions-to-static,
+  -readability-braces-around-statements,
+  -readability-suspicious-call-argument,
+  -readability-use-anyofallof,
+  -readability-redundant-member-init,
+  misc-definitions-in-headers,
+  misc-unused-parameters,
+  misc-static-assert,
+  misc-confusable-identifiers,
+  misc-redundant-expression,
+  misc-unconventional-assign-operator,
+  misc-throw-by-value-catch-by-reference,
+  clang-analyzer-*,
+  -clang-analyzer-osx.*,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-optin.cplusplus.UninitializedObject,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
+  -clang-analyzer-security.PointerSub,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
+# Header paths containing a top-ish segment literally named src/ or include/
+# (the compile db's -I dirs are absolute, so header diagnostics print as
+# absolute paths; this also matches repo-relative forms).
+HeaderFilterRegex: '(^|/)(src|include)/'
+# Exclusion wins over HeaderFilterRegex: fetched deps (temp/_deps boringssl/
+# googletest/protobuf include dirs), libc++/system headers under /usr, and
+# build-tree generated headers (build*/, cmake-build-debug).
+ExcludeHeaderFilterRegex: '_deps|(^|/)(temp|build[^/]*)/|(^|/)usr/|(^|/)generated/|cmake-build'
+# During -fix runs clang-tidy formats only the code it replaces, using the
+# repo .clang-format (found by upward search from each source file).
+FormatStyle: file
+CheckOptions:
+  # DeMorgan rewrites (!a && !b -> !(a || b)) fight the house idiom of
+  # positive-form compound FIBER_ASSERT invariants; every other facet of the
+  # check (redundant !!, comparisons against bool literals, etc.) stays on.
+  - key: readability-simplify-boolean-expr.SimplifyDeMorgan
+    value: 'false'
+  # (void)expr; is the house intent-marker for best-effort discards on
+  # abort/close paths (alert sends, notify-on-teardown); honor it instead of
+  # demanding [[nodiscard]] capture tricks. Unlike cert-err33-c this check
+  # defaults AllowCastToVoid to false.
+  - key: bugprone-unused-return-value.AllowCastToVoid
+    value: 'true'

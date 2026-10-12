@@ -21,7 +21,7 @@ std::string repo_path(const std::string &relative) {
 
 std::string read_file(const std::string &path) {
     std::ifstream f(path, std::ios::binary);
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return {(std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()};
 }
 
 std::shared_ptr<fiber::script::Script> compile(const std::string &src) {

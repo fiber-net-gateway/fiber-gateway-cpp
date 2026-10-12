@@ -4,6 +4,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -253,7 +254,8 @@ TEST(CatEncoderTest, EncodesOfficialAndProcessHeartbeatStatistics) {
         info.stats.connection_failures = 7;
         info.stats.read_failures = 2;
         info.stats.peer_closes = 3;
-        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 96, 16 * 1024);
+        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 96,
+                                                                static_cast<std::size_t>(16 * 1024));
         ASSERT_TRUE(encoded);
         const auto bytes = encoded_bytes(*encoded);
         const auto contains = [&](std::string_view value) {
@@ -306,7 +308,8 @@ TEST(CatEncoderTest, OmitsOptionalSystemStatisticsWhenFieldBudgetIsExhausted) {
                 .ip = "1.2.3.4",
                 .system_stats = &system,
         };
-        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 29, 16 * 1024);
+        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 29,
+                                                                static_cast<std::size_t>(16 * 1024));
         ASSERT_TRUE(encoded);
         const auto bytes = encoded_bytes(*encoded);
         const auto contains = [&](std::string_view value) {

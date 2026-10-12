@@ -6,8 +6,7 @@
 
 #include "JsonTypes.h"
 
-namespace fiber::json {
-namespace detail {
+namespace fiber::json::detail {
 
 enum class TokenKind : std::uint8_t {
     Eof,
@@ -131,7 +130,6 @@ private:
 [[nodiscard]] bool decode_string(TokenKind kind, const char *data, std::size_t len, Buffer &scratch, const char *&out,
                                  std::size_t &out_len, ParseError &error, std::size_t offset) noexcept;
 
-} // namespace detail
-} // namespace fiber::json
+} // namespace fiber::json::detail
 
 #endif // FIBER_JSONLEX_H

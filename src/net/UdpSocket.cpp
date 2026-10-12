@@ -6,7 +6,7 @@ namespace fiber::net {
 
 UdpSocket::UdpSocket(fiber::event::EventLoop &loop) : socket_(loop) {}
 
-UdpSocket::~UdpSocket() {}
+UdpSocket::~UdpSocket() = default;
 
 fiber::common::IoResult<void> UdpSocket::bind(const SocketAddress &addr, const UdpBindOptions &options) {
     return socket_.bind(addr, options);
@@ -45,7 +45,7 @@ UdpSocket::RecvPacketTask UdpSocket::recv_packet(void *buf, size_t len, std::chr
 }
 
 UdpSocket::SendTask UdpSocket::send_packet(UdpPacketSendSpec spec, std::chrono::milliseconds timeout) noexcept {
-    return socket_.send_packet(std::move(spec), timeout);
+    return socket_.send_packet(spec, timeout);
 }
 
 fiber::common::IoResult<UdpPacketRecvResult> UdpSocket::try_recv_packet(void *buf, size_t len) noexcept {

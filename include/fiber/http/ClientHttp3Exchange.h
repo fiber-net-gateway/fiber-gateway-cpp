@@ -52,7 +52,7 @@ public:
     async::Task<common::IoResult<const Http3ResponseHead *>>
     read_header(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     async::Task<common::IoResult<mem::IoBufChain>>
-    read_body(std::size_t max_bytes = 64 * 1024,
+    read_body(std::size_t max_bytes = static_cast<std::size_t>(64 * 1024),
               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
     common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;

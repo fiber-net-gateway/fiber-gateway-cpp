@@ -60,7 +60,9 @@ public:
     // QUIC mode (10 §3.3): CRYPTO-stream bytes at `level` — raw handshake
     // messages, no record framing. The QUIC layer gates level ordering.
     // Requires a config with quic callbacks; mutually exclusive with feed().
-    [[nodiscard]] common::IoResult<Event> feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept;
+    // Takes all nodes from bytes before pumping; bytes is empty even if pumping fails.
+    // Input must not carry the stream-complete flag.
+    [[nodiscard]] common::IoResult<Event> feed_quic(TlsQuicLevel level, mem::IoBufChain &bytes) noexcept;
 
     // 0-RTT read path: decrypted early-data plaintext (non-empty only when
     // accepted; bounded by 14336). The glue drains it before and after

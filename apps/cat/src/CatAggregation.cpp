@@ -4,6 +4,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <limits>
 #include <new>
 #include <utility>
@@ -56,15 +57,15 @@ std::uint64_t duration_bucket(std::uint64_t duration) noexcept {
         return duration;
     }
     if (duration < 200) {
-        return duration - duration % 5;
+        return duration - (duration % 5);
     }
     if (duration < 500) {
-        return duration - duration % 20;
+        return duration - (duration % 20);
     }
     if (duration < 2000) {
-        return duration - duration % 50;
+        return duration - (duration % 50);
     }
-    return duration - duration % 200;
+    return duration - (duration % 200);
 }
 
 bool checked_add(std::size_t lhs, std::size_t rhs, std::size_t &result) noexcept {
@@ -420,7 +421,7 @@ bool AggregationShard::flush_kind(CatClientCore &core, AggregateKind kind) noexc
     limits.max_type_bytes = max_key_bytes_;
     limits.max_name_bytes = max_key_bytes_;
     limits.max_data_bytes_per_message = kAggregateDataCapacity;
-    limits.max_tree_bytes = std::max<std::size_t>(max_bytes_, 64 * 1024);
+    limits.max_tree_bytes = std::max<std::size_t>(max_bytes_, static_cast<unsigned long>(64 * 1024));
     TraceContext context{.propagation_context = {.message_id = id->view()}};
     mem::BufPool tree_pool;
     auto root_created = create_transaction_root(
@@ -537,7 +538,7 @@ bool AggregationShard::flush_metrics(CatClientCore &core) noexcept {
     limits.max_name_bytes = max_key_bytes_;
     limits.max_status_bytes = 16;
     limits.max_data_bytes_per_message = kAggregateDataCapacity;
-    limits.max_tree_bytes = std::max<std::size_t>(max_bytes_, 64 * 1024);
+    limits.max_tree_bytes = std::max<std::size_t>(max_bytes_, static_cast<unsigned long>(64 * 1024));
     mem::BufPool tree_pool;
     auto root_created = create_transaction_root(tree_pool, "System", "MetricAggregator", limits,
                                                 {.propagation_context = {.message_id = id->view()}});

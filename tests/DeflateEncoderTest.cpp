@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <random>
 #include <string>
@@ -107,7 +108,7 @@ std::vector<std::string> corpus(std::size_t scale) {
 
 // ---- drivers ----
 
-constexpr std::size_t kMaxOutChunk = 64 * 1024;
+constexpr std::size_t kMaxOutChunk = static_cast<const std::size_t>(64 * 1024);
 
 std::size_t next_chunk(std::mt19937 &rng, std::size_t max, bool randomize, std::size_t fallback) {
     if (!randomize) {
@@ -148,7 +149,7 @@ std::string drive_write_all(CoreEncoder &enc, std::string_view input, std::size_
             take -= step.consumed;
             EXPECT_TRUE(step.status == EncodeStatus::NeedInput || step.status == EncodeStatus::NeedOutput);
             if (step.status == EncodeStatus::NeedInput) {
-                EXPECT_EQ(take, 0u);
+                EXPECT_EQ(take, 0U);
                 break;
             }
         }
@@ -299,7 +300,8 @@ std::string gunzip_raw_incremental(std::string_view raw, std::size_t chunk) {
 TEST(DeflateEncoderTest, MatchesUpstreamOneShotAtEveryLevel) {
     for (int level = 1; level <= 9; ++level) {
         for (const std::string &input: corpus(60000)) {
-            const std::string ours = drive_stream(level, {input}, false, 1u << 30, 64 * 1024, false, 1);
+            const std::string ours =
+                    drive_stream(level, {input}, false, 1U << 30, static_cast<std::size_t>(64 * 1024), false, 1);
             const std::string upstream = reference_raw(input, level);
             ASSERT_EQ(ours, upstream) << "level " << level << " size " << input.size();
         }
@@ -310,8 +312,8 @@ TEST(DeflateEncoderTest, OutputIndependentOfSlicing) {
     const std::string input = json_payload(90000) + random_bytes(40000, 3) + utf8_payload(20000);
     for (int level: {1, 4, 6, 9}) {
         const std::string reference = reference_raw(input, level);
-        for (std::size_t in_chunk: {1u, 2u, 3u, 7u, 258u, 4096u}) {
-            for (std::size_t out_chunk: {1u, 2u, 5u, 6u, 7u, 16 * 1024u}) {
+        for (std::size_t in_chunk: {1U, 2U, 3U, 7U, 258U, 4096U}) {
+            for (std::size_t out_chunk: {1U, 2U, 5U, 6U, 7U, 16 * 1024U}) {
                 const std::string ours = drive_stream(level, {input}, false, in_chunk, out_chunk, false, 1);
                 ASSERT_EQ(ours, reference) << "level " << level << " in " << in_chunk << " out " << out_chunk;
             }
@@ -328,8 +330,8 @@ TEST(DeflateEncoderTest, ZeroOutputSpanIsLegal) {
             enc.state(), {reinterpret_cast<const std::uint8_t *>("hello world"), 11}, {buf.data(), 0});
     // Upstream-faithful: the input is consumed into the window and symbol
     // buffer even with no room to emit anything.
-    EXPECT_EQ(step.consumed, 11u);
-    EXPECT_EQ(step.written, 0u);
+    EXPECT_EQ(step.consumed, 11U);
+    EXPECT_EQ(step.written, 0U);
     EXPECT_EQ(step.status, EncodeStatus::NeedInput);
     // The accepted input still lands in the stream: finishing produces the
     // exact reference byte stream for it.
@@ -341,8 +343,8 @@ TEST(DeflateEncoderTest, EmptyWriteIsInert) {
     CoreEncoder enc(6);
     std::array<std::uint8_t, 64> buf{};
     const EncodeStep step = DeflateEncoder::write(enc.state(), {}, {buf.data(), buf.size()});
-    EXPECT_EQ(step.consumed, 0u);
-    EXPECT_EQ(step.written, 0u);
+    EXPECT_EQ(step.consumed, 0U);
+    EXPECT_EQ(step.written, 0U);
     EXPECT_EQ(step.status, EncodeStatus::NeedInput);
 
     const std::string rest = drive_write_all(enc, "payload", 4096, 4096, false, 1) + drive_finish(enc, 4096, false, 1);
@@ -352,9 +354,10 @@ TEST(DeflateEncoderTest, EmptyWriteIsInert) {
 // ---- block types ----
 
 TEST(DeflateEncoderTest, EmitsStoredBlockForIncompressibleData) {
-    const std::string input = random_bytes(128 * 1024, 11);
+    const std::string input = random_bytes(static_cast<std::size_t>(128 * 1024), 11);
     for (int level: {1, 6, 9}) {
-        const std::string ours = drive_stream(level, {input}, false, 1u << 30, 64 * 1024, false, 1);
+        const std::string ours =
+                drive_stream(level, {input}, false, 1U << 30, static_cast<std::size_t>(64 * 1024), false, 1);
         EXPECT_EQ(first_block_type(ours), 0) << "level " << level;
         EXPECT_EQ(ours, reference_raw(input, level));
     }
@@ -371,7 +374,8 @@ TEST(DeflateEncoderTest, EmitsFixedBlockForTinyLiteralInput) {
 TEST(DeflateEncoderTest, EmitsDynamicBlockForTextCorpus) {
     const std::string input = json_payload(20000);
     for (int level: {1, 6, 9}) {
-        const std::string ours = drive_stream(level, {input}, false, 1u << 30, 64 * 1024, false, 1);
+        const std::string ours =
+                drive_stream(level, {input}, false, 1U << 30, static_cast<std::size_t>(64 * 1024), false, 1);
         EXPECT_EQ(first_block_type(ours), 2) << "level " << level;
         EXPECT_EQ(ours, reference_raw(input, level));
     }
@@ -380,14 +384,16 @@ TEST(DeflateEncoderTest, EmitsDynamicBlockForTextCorpus) {
 // ---- window behavior ----
 
 TEST(DeflateEncoderTest, WindowBoundarySizesRoundTripAndMatch) {
-    for (std::size_t size: {32766u, 32767u, 32768u, 32769u, 65535u, 65536u, 65537u, 65538u}) {
+    for (std::size_t size: {32766U, 32767U, 32768U, 32769U, 65535U, 65536U, 65537U, 65538U}) {
         const std::string compressible = repeat_pattern(size, "pattern-for-window-boundaries-");
         const std::string incompressible = random_bytes(size, 500 + size);
         for (int level: {1, 6, 9}) {
-            const std::string out1 = drive_stream(level, {compressible}, false, 1u << 30, 64 * 1024, false, 1);
+            const std::string out1 =
+                    drive_stream(level, {compressible}, false, 1U << 30, static_cast<std::size_t>(64 * 1024), false, 1);
             ASSERT_EQ(out1, reference_raw(compressible, level)) << "size " << size;
             ASSERT_EQ(gunzip_raw_incremental(out1, 4096), compressible);
-            const std::string out2 = drive_stream(level, {incompressible}, false, 1u << 30, 64 * 1024, false, 1);
+            const std::string out2 = drive_stream(level, {incompressible}, false, 1U << 30,
+                                                  static_cast<std::size_t>(64 * 1024), false, 1);
             ASSERT_EQ(out2, reference_raw(incompressible, level)) << "size " << size;
             ASSERT_EQ(gunzip_raw_incremental(out2, 4096), incompressible);
         }
@@ -401,10 +407,11 @@ TEST(DeflateEncoderTest, LargeIncompressibleStreamsMatchUpstream) {
     // the stored-block boundaries and BFINAL placement. The minimal diverging
     // input was 65732 random bytes fed as 65536 + 196 (a level-1 run whose
     // symbol buffer then fills exactly during the finish drain).
-    for (std::size_t size: {65732u, 256 * 1024u, 1024 * 1024u}) {
+    for (std::size_t size: {65732U, 256 * 1024U, 1024 * 1024U}) {
         const std::string input = random_bytes(size, 7);
         for (int level: {1, 6, 9}) {
-            const std::string ours = drive_stream(level, {input}, false, 64 * 1024, 64 * 1024, false, 1);
+            const std::string ours = drive_stream(level, {input}, false, static_cast<std::size_t>(64 * 1024),
+                                                  static_cast<std::size_t>(64 * 1024), false, 1);
             ASSERT_EQ(ours, reference_raw(input, level)) << "size " << size << " level " << level;
         }
     }
@@ -415,7 +422,8 @@ TEST(DeflateEncoderTest, MatchesAcrossWindowSlideWithLongRepeats) {
     const std::string period = random_bytes(30000, 21);
     const std::string input = repeat_pattern(200000, period);
     for (int level: {1, 6, 9}) {
-        const std::string ours = drive_stream(level, {input}, false, 1u << 30, 64 * 1024, false, 1);
+        const std::string ours =
+                drive_stream(level, {input}, false, 1U << 30, static_cast<std::size_t>(64 * 1024), false, 1);
         ASSERT_EQ(ours, reference_raw(input, level));
         ASSERT_EQ(gunzip_raw_incremental(ours, 16384), input);
     }
@@ -424,11 +432,14 @@ TEST(DeflateEncoderTest, MatchesAcrossWindowSlideWithLongRepeats) {
 TEST(DeflateEncoderTest, FarMatchNearMaxDist) {
     // A repeat at distance ~32400 (just inside MAX_DIST) and one at ~33000
     // (outside); upstream and the port must agree byte for byte either way.
-    for (std::size_t filler_size: {32100u, 33000u}) {
+    for (std::size_t filler_size: {32100U, 33000U}) {
         const std::string chunk = random_bytes(300, 31);
         const std::string filler = random_bytes(filler_size, 32);
-        const std::string input = chunk + filler + chunk;
-        const std::string ours = drive_stream(6, {input}, false, 1u << 30, 64 * 1024, false, 1);
+        std::string input = chunk;
+        input += filler;
+        input += chunk;
+        const std::string ours =
+                drive_stream(6, {input}, false, 1U << 30, static_cast<std::size_t>(64 * 1024), false, 1);
         ASSERT_EQ(ours, reference_raw(input, 6)) << "filler " << filler_size;
     }
 }
@@ -437,7 +448,8 @@ TEST(DeflateEncoderTest, MinAndMaxMatchLengths) {
     const std::string min_match = repeat_pattern(3000, "abc");
     const std::string max_match = repeat_pattern(30000, std::string(258, 'x'));
     for (const std::string *input: {&min_match, &max_match}) {
-        const std::string ours = drive_stream(6, {*input}, false, 1u << 30, 64 * 1024, false, 1);
+        const std::string ours =
+                drive_stream(6, {*input}, false, 1U << 30, static_cast<std::size_t>(64 * 1024), false, 1);
         ASSERT_EQ(ours, reference_raw(*input, 6));
         ASSERT_EQ(gunzip_raw_incremental(ours, 4096), *input);
     }
@@ -450,7 +462,7 @@ TEST(DeflateEncoderTest, FlushEmitsSyncMarkerAndIsDecodableWithoutEof) {
     const std::string input = "hello world, hello world, hello";
     const std::string body = drive_write_all(enc, input, 4096, 4096, false, 1);
     const std::string marker = drive_flush(enc, 4096, false, 1);
-    EXPECT_GE(marker.size(), 4u);
+    EXPECT_GE(marker.size(), 4U);
     EXPECT_EQ(marker.substr(marker.size() - 4), std::string("\x00\x00\xff\xff", 4));
 
     // Everything before the marker must be decodable without the final block.
@@ -492,14 +504,14 @@ TEST(DeflateEncoderTest, FlushOnVirginStreamEmitsBareMarker) {
     std::array<std::uint8_t, 16> buf{};
     const EncodeStep step = DeflateEncoder::flush(enc.state(), {buf.data(), buf.size()});
     ASSERT_EQ(step.status, EncodeStatus::Flushed);
-    ASSERT_EQ(step.written, 5u); // 3-bit header + pad + LEN + NLEN
+    ASSERT_EQ(step.written, 5U); // 3-bit header + pad + LEN + NLEN
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(buf.data()), 5),
               std::string_view("\x00\x00\x00\xff\xff", 5));
 
     // The same operation sequence on the reference.
     fiber::test::ZlibReferenceDeflate ref(6, -15);
     std::string expected = ref.step({}, 4096, fiber::test::ZlibReferenceFlush::Sync).output;
-    ASSERT_EQ(expected.size(), 5u);
+    ASSERT_EQ(expected.size(), 5U);
 
     const std::string rest = drive_write_all(enc, "data", 4096, 4096, false, 1) + drive_finish(enc, 4096, false, 1);
     std::size_t offset = 0;
@@ -526,9 +538,13 @@ TEST(DeflateEncoderTest, FlushSequenceMatchesUpstreamByteForByte) {
     const std::string b = random_bytes(5000, 61);
     const std::string c = utf8_payload(10000);
     for (int level: {1, 6, 9}) {
-        const std::string ours = drive_stream(level, {a, b, c}, true, 8192, 16 * 1024, false, 5);
-        ASSERT_EQ(ours, reference_raw_sequence(level, {a, b, c}, true, 16 * 1024)) << "level " << level;
-        ASSERT_EQ(gunzip_raw_incremental(ours, 16384), a + b + c);
+        const std::string ours =
+                drive_stream(level, {a, b, c}, true, 8192, static_cast<std::size_t>(16 * 1024), false, 5);
+        ASSERT_EQ(ours, reference_raw_sequence(level, {a, b, c}, true, std::size_t{16} * 1024)) << "level " << level;
+        std::string expected = a;
+        expected += b;
+        expected += c;
+        ASSERT_EQ(gunzip_raw_incremental(ours, 16384), expected);
     }
 }
 
@@ -542,7 +558,7 @@ TEST(DeflateEncoderTest, EmptyStreamFinishIsEmptyFixedBlock) {
 
 TEST(DeflateEncoderTest, FinishResumableWithOneByteOutput) {
     const std::string input = json_payload(50000);
-    const std::string ours = drive_stream(6, {input}, false, 1u << 30, 1, false, 1);
+    const std::string ours = drive_stream(6, {input}, false, 1U << 30, 1, false, 1);
     EXPECT_EQ(ours, reference_raw(input, 6));
 }
 
@@ -552,16 +568,16 @@ TEST(DeflateEncoderTest, FinishIsIdempotent) {
     (void) drive_finish(enc, 4096, false, 1);
     std::array<std::uint8_t, 16> buf{};
     const EncodeStep again = DeflateEncoder::finish(enc.state(), {buf.data(), buf.size()});
-    EXPECT_EQ(again.written, 0u);
+    EXPECT_EQ(again.written, 0U);
     EXPECT_EQ(again.status, EncodeStatus::Finished);
 }
 
 TEST(DeflateEncoderTest, LastInputFullyConsumedBeforeFinish) {
     // finish() after the final write that ended exactly on a block boundary.
-    for (std::size_t size: {16383u, 16384u, 16385u}) {
+    for (std::size_t size: {16383U, 16384U, 16385U}) {
         const std::string input = repeat_pattern(size, "0123456789abcdef");
         CoreEncoder enc(6);
-        const std::string body = drive_write_all(enc, input, size, 1u << 30, false, 1);
+        const std::string body = drive_write_all(enc, input, size, 1U << 30, false, 1);
         const std::string out = body + drive_finish(enc, 4096, false, 1);
         ASSERT_EQ(out, reference_raw(input, 6)) << "size " << size;
         ASSERT_EQ(gunzip_raw_incremental(out, 4096), input);

@@ -27,7 +27,7 @@ void fill_ecn_fields(QuicOutputFrame &frame, const QuicEcnCounters &ecn_counters
 QuicPacketNumberSpace::QuicPacketNumberSpace() noexcept { reset(QuicEncryptionLevel::Initial); }
 
 QuicPacketNumberSpace::~QuicPacketNumberSpace() {
-    auto release_queue = [this](QuicOutputFrameQueue &queue) noexcept {
+    auto release_queue = [this](QuicOutputFrameList &queue) noexcept {
         while (QuicOutputFrame *frame = queue.pop_front()) {
             release_frame(*frame);
         }
@@ -36,20 +36,18 @@ QuicPacketNumberSpace::~QuicPacketNumberSpace() {
     release_queue(pending_frames);
     release_queue(sending_frames);
     release_queue(sent_frames);
-    quic_output_frame_release_data(ack_frame);
 }
 
 void QuicPacketNumberSpace::set_frame_pool(QuicOutputFramePool &pool) noexcept { frame_pool = &pool; }
 
 void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
-    quic_output_frame_release_data(ack_frame);
     level = space_level;
     crypto_sent = 0;
     crypto_recv.clear();
     next_packet_number = 0;
     largest_acked_packet_number = kUnsetPacketNumber;
     largest_received_packet_number = kUnsetPacketNumber;
-    ack_frame = QuicOutputFrame{};
+    ack_frame.reset();
     pending_ack = kUnsetPacketNumber;
     largest_range = kUnsetPacketNumber;
     first_range = 0;
@@ -64,7 +62,7 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     send_ack = false;
 }
 
-QuicOutputFrame *QuicPacketNumberSpace::alloc_frame() noexcept {
+QuicOutputFrame *QuicPacketNumberSpace::alloc_frame() const noexcept {
     return frame_pool != nullptr ? frame_pool->alloc() : new (std::nothrow) QuicOutputFrame{};
 }
 
@@ -72,7 +70,7 @@ void QuicPacketNumberSpace::release_frame(QuicOutputFrame &frame) noexcept {
     if (&frame == &ack_frame) {
         return;
     }
-    if (frame.queued) {
+    if (frame.hook.linked()) {
         return;
     }
 
@@ -81,7 +79,6 @@ void QuicPacketNumberSpace::release_frame(QuicOutputFrame &frame) noexcept {
         return;
     }
 
-    quic_output_frame_release_data(frame);
     delete &frame;
 }
 
@@ -135,8 +132,7 @@ common::IoResult<void> quic_prepare_ack_frame(QuicOutputFrame &frame, std::uint6
         range_buf_len = rcur.offset();
     }
 
-    quic_output_frame_release_data(frame);
-    frame = QuicOutputFrame{};
+    frame.reset();
     frame.type = QuicFrameType::Ack;
     frame.u.ack.largest = largest;
     frame.u.ack.delay = delay;
@@ -174,7 +170,7 @@ void QuicPacketNumberSpace::generate_forced_ack(std::uint64_t largest, std::uint
     }
 
     // Use the static ack_frame if available; otherwise fall back to pool.
-    QuicOutputFrame *frame = ack_frame.queued ? alloc_frame() : &ack_frame;
+    QuicOutputFrame *frame = ack_frame.hook.linked() ? alloc_frame() : &ack_frame;
     if (frame == nullptr) {
         return;
     }
@@ -299,7 +295,7 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
             ++ack_range_count;
         }
         if (ack_range_count > 1) {
-            std::memmove(&ack_ranges[1], &ack_ranges[0], sizeof(QuicAckRange) * (ack_range_count - 1));
+            std::memmove(&ack_ranges[1], ack_ranges.data(), sizeof(QuicAckRange) * (ack_range_count - 1));
         }
         ack_ranges[0].gap = gap;
         ack_ranges[0].range = range;

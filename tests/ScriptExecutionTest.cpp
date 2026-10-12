@@ -51,7 +51,7 @@ public:
 
         bool await_ready() const noexcept { return self && self->ready_; }
 
-        void await_suspend(std::coroutine_handle<> handle) noexcept {
+        void await_suspend(std::coroutine_handle<> handle) const noexcept {
             if (self) {
                 self->continuation_ = handle;
             }
@@ -369,10 +369,10 @@ std::string value_to_string(const fiber::script::JsValue &value) {
         return {};
     }
     if (js_value_is_borrowed_string(value)) {
-        return std::string(js_value_native_string(value).data, js_value_native_string(value).len);
+        return {js_value_native_string(value).data, js_value_native_string(value).len};
     }
     std::string out;
-    auto *str = js_value_heap_ptr<const fiber::script::GcString>(value);
+    const auto *str = js_value_heap_ptr<const fiber::script::GcString>(value);
     if (fiber::script::gc_string_to_utf8(str, out)) {
         return out;
     }
@@ -639,7 +639,7 @@ TEST(ScriptExecutionTest, FunctionDefaultArgumentIsAppendedBeforeHostCall) {
     auto result = script.exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 4);
-    EXPECT_EQ(func.observed_argc, 2u);
+    EXPECT_EQ(func.observed_argc, 2U);
 }
 
 // #5: assignment RHS accepts a ternary and chains right-associatively.
@@ -695,7 +695,7 @@ TEST(ScriptExecutionTest, EqualityChainIsLeftAssociative) {
 // #7: octal escapes (\0, \12, \012) decode correctly.
 TEST(ScriptExecutionTest, OctalEscapeNulMatchesHexEscape) {
     TestLibrary library;
-    auto compiled = compile_script("return (\"\\0\" === \"\\x00\") ? 7 : 9;", library);
+    auto compiled = compile_script(R"(return ("\0" === "\x00") ? 7 : 9;)", library);
     auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
     fiber::script::Script script(compiled_ptr);
 
@@ -707,7 +707,7 @@ TEST(ScriptExecutionTest, OctalEscapeNulMatchesHexEscape) {
 
 TEST(ScriptExecutionTest, OctalEscapeTwoDigitsMatchesNewline) {
     TestLibrary library;
-    auto compiled = compile_script("return (\"\\12\" === \"\\n\") ? 7 : 9;", library);
+    auto compiled = compile_script(R"(return ("\12" === "\n") ? 7 : 9;)", library);
     auto compiled_ptr = std::make_shared<fiber::script::ir::Compiled>(std::move(compiled));
     fiber::script::Script script(compiled_ptr);
 

@@ -58,24 +58,25 @@ TEST(TlsCredentialTest, HandlesShareOneReferenceCount) {
 
     fiber::net::TlsCredential first = std::move(*created);
     EXPECT_TRUE(created->empty());
-    EXPECT_EQ(first.use_count(), 1u);
+    EXPECT_EQ(first.use_count(), 1U);
 
     fiber::net::TlsCredential second = first;
-    EXPECT_EQ(first.use_count(), 2u);
+    EXPECT_EQ(first.use_count(), 2U);
     fiber::net::TlsCredential &alias = second;
     second = alias; // self-assignment keeps the count balanced
-    EXPECT_EQ(first.use_count(), 2u);
+    EXPECT_EQ(first.use_count(), 2U);
 
     fiber::net::TlsCredential third = std::move(second);
+    // NOLINTNEXTLINE(bugprone-use-after-move) moved-from inspection is the test subject
     EXPECT_TRUE(second.empty());
-    EXPECT_EQ(third.use_count(), 2u);
+    EXPECT_EQ(third.use_count(), 2U);
     third = first; // same material: retain-then-release
-    EXPECT_EQ(first.use_count(), 2u);
+    EXPECT_EQ(first.use_count(), 2U);
 
     third.reset();
     EXPECT_TRUE(third.empty());
-    EXPECT_EQ(third.use_count(), 0u);
-    EXPECT_EQ(first.use_count(), 1u);
+    EXPECT_EQ(third.use_count(), 0U);
+    EXPECT_EQ(first.use_count(), 1U);
 
     first = fiber::net::TlsCredential{};
     EXPECT_TRUE(first.empty());

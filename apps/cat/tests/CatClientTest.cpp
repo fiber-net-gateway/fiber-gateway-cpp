@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -187,7 +188,7 @@ run_collector(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_p
     const std::size_t payload_size = static_cast<std::size_t>(prefix[0]) << 24 |
                                      static_cast<std::size_t>(prefix[1]) << 16 |
                                      static_cast<std::size_t>(prefix[2]) << 8 | prefix[3];
-    if (payload_size == 0 || payload_size > 2 * 1024 * 1024) {
+    if (payload_size == 0 || payload_size > static_cast<std::size_t>(2 * 1024 * 1024)) {
         stream.close();
         frame_promise->set_value(std::unexpected(fiber::common::IoErr::MessageTooLarge));
         co_return;
@@ -238,7 +239,7 @@ fiber::async::DetachedTask run_multi_frame_collector(
         const std::size_t payload_size = static_cast<std::size_t>(prefix[0]) << 24 |
                                          static_cast<std::size_t>(prefix[1]) << 16 |
                                          static_cast<std::size_t>(prefix[2]) << 8 | prefix[3];
-        if (payload_size == 0 || payload_size > 2 * 1024 * 1024) {
+        if (payload_size == 0 || payload_size > static_cast<std::size_t>(2 * 1024 * 1024)) {
             stream.close();
             frames_promise->set_value(std::unexpected(fiber::common::IoErr::MessageTooLarge));
             co_return;
@@ -846,7 +847,7 @@ fiber::async::DetachedTask run_slow_ordered_collector(fiber::event::EventLoop *l
     }
     fiber::net::TcpStream stream(*loop, accepted->release_fd(), accepted->take_peer());
     co_await fiber::async::sleep(100ms);
-    std::array<std::uint8_t, 64 * 1024> chunk{};
+    std::array<std::uint8_t, static_cast<size_t>(64 * 1024)> chunk{};
     std::size_t offset = 0;
     bool ordered = true;
     const std::size_t total = normal_bytes + priority_bytes;
@@ -986,9 +987,9 @@ fiber::async::DetachedTask run_would_block_order_client(fiber::event::EventLoop 
     }
     fiber::cat::CatClientOptions options;
     options.enable_heartbeat = false;
-    options.max_queued_bytes = 32 * 1024 * 1024;
-    options.max_batch_bytes = 32 * 1024 * 1024;
-    options.max_send_bytes_per_pump = 32 * 1024 * 1024;
+    options.max_queued_bytes = static_cast<std::size_t>(32 * 1024 * 1024);
+    options.max_batch_bytes = static_cast<std::size_t>(32 * 1024 * 1024);
+    options.max_send_bytes_per_pump = static_cast<std::size_t>(32 * 1024 * 1024);
     options.max_send_calls_per_pump = 64;
     options.collector_connect_timeout = 1s;
     options.collector_write_timeout = 2s;
@@ -1014,7 +1015,7 @@ fiber::async::DetachedTask run_would_block_order_client(fiber::event::EventLoop 
 }
 
 TEST(CatClientTest, WouldBlockRecoveryDoesNotPreemptPartiallyWrittenFrame) {
-    constexpr std::size_t normal_bytes = 8 * 1024 * 1024;
+    constexpr std::size_t normal_bytes = static_cast<std::size_t>(8 * 1024 * 1024);
     constexpr std::size_t priority_bytes = 8;
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -1069,9 +1070,9 @@ fiber::async::DetachedTask run_partial_reset_client(fiber::event::EventLoop *loo
     }
     fiber::cat::CatClientOptions options;
     options.enable_heartbeat = false;
-    options.max_queued_bytes = 32 * 1024 * 1024;
-    options.max_batch_bytes = 32 * 1024 * 1024;
-    options.max_send_bytes_per_pump = 32 * 1024 * 1024;
+    options.max_queued_bytes = static_cast<std::size_t>(32 * 1024 * 1024);
+    options.max_batch_bytes = static_cast<std::size_t>(32 * 1024 * 1024);
+    options.max_send_bytes_per_pump = static_cast<std::size_t>(32 * 1024 * 1024);
     options.max_send_calls_per_pump = 64;
     options.collector_connect_timeout = 1s;
     options.collector_write_timeout = 1s;
@@ -1081,7 +1082,7 @@ fiber::async::DetachedTask run_partial_reset_client(fiber::event::EventLoop *loo
         promise->set_value({});
         co_return;
     }
-    (void) core->submit_encoded(make_frame(8 * 1024 * 1024, 4));
+    (void) core->submit_encoded(make_frame(static_cast<std::size_t>(8 * 1024 * 1024), 4));
     const auto deadline = loop->now() + 3s;
     while (core->stats().dropped_partial_frame == 0 && loop->now() < deadline) {
         co_await fiber::async::sleep(1ms);
@@ -1349,7 +1350,7 @@ start_internal_core(fiber::event::EventLoop *loop,
     }
     fiber::cat::CatClientOptions options;
     options.max_queued_messages = 2048;
-    options.max_queued_bytes = 1024 * 1024;
+    options.max_queued_bytes = static_cast<std::size_t>(1024 * 1024);
     options.collector_connect_timeout = 10ms;
     options.shutdown_drain_timeout = 0ms;
     auto core = std::make_shared<fiber::cat::detail::CatClientCore>(*loop, std::move(*config), options, nullptr);

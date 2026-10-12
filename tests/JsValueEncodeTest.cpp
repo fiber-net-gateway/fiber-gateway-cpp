@@ -80,7 +80,7 @@ TEST(JsValueEncodeTest, EncodeArrayWithStrings) {
 
     arr->elems[0] = JsValue::make_integer(1);
     arr->elems[1] = JsValue::make_boolean(false);
-    arr->elems[2] = std::move(str);
+    arr->elems[2] = str;
     arr->size = 3;
 
     JsValue root = js_make_heap_ref(&arr->hdr, GcHeapKind::Array);

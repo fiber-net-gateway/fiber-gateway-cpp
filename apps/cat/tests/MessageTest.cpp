@@ -280,6 +280,8 @@ TEST(CatMessageTest, MoveAssignmentAbandonsPreviousMessage) {
 
         first = std::move(second);
         EXPECT_TRUE(first.valid());
+        // Probing the moved-from state is the point of this test.
+        // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
         EXPECT_FALSE(second.valid());
         EXPECT_EQ(first.complete(), RecordError::None);
     });
@@ -330,10 +332,10 @@ TEST(CatMessageTest, FixedChildrenChunksPreserveInsertionOrderAcrossBoundaries) 
         ASSERT_TRUE(root_result);
         auto *root = *root_result;
         std::array<fiber::cat::detail::EventData *, 33> children{};
-        for (std::size_t i = 0; i < children.size(); ++i) {
+        for (auto &i: children) {
             auto child = fiber::cat::detail::create_event(*root, "E", "child");
             ASSERT_TRUE(child);
-            children[i] = *child;
+            i = *child;
         }
 
         ASSERT_EQ(root->child_count, 33U);
@@ -513,7 +515,7 @@ struct MutatingContextVisitor {
     RecordError mutation = RecordError::Completed;
 };
 
-bool mutate_context(void *opaque, std::string_view, std::string_view) noexcept {
+bool mutate_context(void *opaque, std::string_view /*unused*/, std::string_view /*unused*/) noexcept {
     auto &state = *static_cast<MutatingContextVisitor *>(opaque);
     state.mutation = fiber::cat::detail::put_context(*state.trace, "second", "value");
     return true;

@@ -27,11 +27,11 @@ std::array<std::uint64_t, 3> find_colliding_stream_ids(std::size_t bucket_count)
     return out;
 }
 
-void destroy_heap_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+void destroy_heap_stream(void * /*unused*/, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
-void noop_destroy_stream(void *, fiber::quic::QuicStream &) noexcept {}
+void noop_destroy_stream(void * /*unused*/, fiber::quic::QuicStream & /*unused*/) noexcept {}
 
-fiber::quic::QuicStream::Lease make_stream(std::uint64_t stream_id, fiber::mem::IoBufNodePool &) {
+fiber::quic::QuicStream::Lease make_stream(std::uint64_t stream_id, fiber::mem::IoBufNodePool & /*unused*/) {
     auto *stream = new fiber::quic::QuicStream(nullptr, destroy_heap_stream);
     stream->stream_id_ = stream_id;
     return fiber::quic::QuicStream::Lease::adopt(stream);
@@ -40,7 +40,7 @@ fiber::quic::QuicStream::Lease make_stream(std::uint64_t stream_id, fiber::mem::
 } // namespace
 
 TEST(QuicStreamTest, ExposesStreamIdTypeAndSequence) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         fiber::quic::QuicStream client_bidi(nullptr, noop_destroy_stream);
         fiber::quic::QuicStream server_uni(nullptr, noop_destroy_stream);
         fiber::quic::QuicStream later_client_bidi(nullptr, noop_destroy_stream);

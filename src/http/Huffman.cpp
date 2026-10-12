@@ -70,52 +70,140 @@ constexpr std::uint16_t kEosSymbol = 256U;
 constexpr std::uint16_t kInvalidState = 0xffffU;
 
 constexpr std::array<EncodeCode, 257> kCodeTable{{
-        {0x00001ff8, 13}, {0x007fffd8, 23}, {0x0fffffe2, 28}, {0x0fffffe3, 28}, {0x0fffffe4, 28}, {0x0fffffe5, 28},
-        {0x0fffffe6, 28}, {0x0fffffe7, 28}, {0x0fffffe8, 28}, {0x00ffffea, 24}, {0x3ffffffc, 30}, {0x0fffffe9, 28},
-        {0x0fffffea, 28}, {0x3ffffffd, 30}, {0x0fffffeb, 28}, {0x0fffffec, 28}, {0x0fffffed, 28}, {0x0fffffee, 28},
-        {0x0fffffef, 28}, {0x0ffffff0, 28}, {0x0ffffff1, 28}, {0x0ffffff2, 28}, {0x3ffffffe, 30}, {0x0ffffff3, 28},
-        {0x0ffffff4, 28}, {0x0ffffff5, 28}, {0x0ffffff6, 28}, {0x0ffffff7, 28}, {0x0ffffff8, 28}, {0x0ffffff9, 28},
-        {0x0ffffffa, 28}, {0x0ffffffb, 28}, {0x00000014, 6},  {0x000003f8, 10}, {0x000003f9, 10}, {0x00000ffa, 12},
-        {0x00001ff9, 13}, {0x00000015, 6},  {0x000000f8, 8},  {0x000007fa, 11}, {0x000003fa, 10}, {0x000003fb, 10},
-        {0x000000f9, 8},  {0x000007fb, 11}, {0x000000fa, 8},  {0x00000016, 6},  {0x00000017, 6},  {0x00000018, 6},
-        {0x00000000, 5},  {0x00000001, 5},  {0x00000002, 5},  {0x00000019, 6},  {0x0000001a, 6},  {0x0000001b, 6},
-        {0x0000001c, 6},  {0x0000001d, 6},  {0x0000001e, 6},  {0x0000001f, 6},  {0x0000005c, 7},  {0x000000fb, 8},
-        {0x00007ffc, 15}, {0x00000020, 6},  {0x00000ffb, 12}, {0x000003fc, 10}, {0x00001ffa, 13}, {0x00000021, 6},
-        {0x0000005d, 7},  {0x0000005e, 7},  {0x0000005f, 7},  {0x00000060, 7},  {0x00000061, 7},  {0x00000062, 7},
-        {0x00000063, 7},  {0x00000064, 7},  {0x00000065, 7},  {0x00000066, 7},  {0x00000067, 7},  {0x00000068, 7},
-        {0x00000069, 7},  {0x0000006a, 7},  {0x0000006b, 7},  {0x0000006c, 7},  {0x0000006d, 7},  {0x0000006e, 7},
-        {0x0000006f, 7},  {0x00000070, 7},  {0x00000071, 7},  {0x00000072, 7},  {0x000000fc, 8},  {0x00000073, 7},
-        {0x000000fd, 8},  {0x00001ffb, 13}, {0x0007fff0, 19}, {0x00001ffc, 13}, {0x00003ffc, 14}, {0x00000022, 6},
-        {0x00007ffd, 15}, {0x00000003, 5},  {0x00000023, 6},  {0x00000004, 5},  {0x00000024, 6},  {0x00000005, 5},
-        {0x00000025, 6},  {0x00000026, 6},  {0x00000027, 6},  {0x00000006, 5},  {0x00000074, 7},  {0x00000075, 7},
-        {0x00000028, 6},  {0x00000029, 6},  {0x0000002a, 6},  {0x00000007, 5},  {0x0000002b, 6},  {0x00000076, 7},
-        {0x0000002c, 6},  {0x00000008, 5},  {0x00000009, 5},  {0x0000002d, 6},  {0x00000077, 7},  {0x00000078, 7},
-        {0x00000079, 7},  {0x0000007a, 7},  {0x0000007b, 7},  {0x00007ffe, 15}, {0x000007fc, 11}, {0x00003ffd, 14},
-        {0x00001ffd, 13}, {0x0ffffffc, 28}, {0x000fffe6, 20}, {0x003fffd2, 22}, {0x000fffe7, 20}, {0x000fffe8, 20},
-        {0x003fffd3, 22}, {0x003fffd4, 22}, {0x003fffd5, 22}, {0x007fffd9, 23}, {0x003fffd6, 22}, {0x007fffda, 23},
-        {0x007fffdb, 23}, {0x007fffdc, 23}, {0x007fffdd, 23}, {0x007fffde, 23}, {0x00ffffeb, 24}, {0x007fffdf, 23},
-        {0x00ffffec, 24}, {0x00ffffed, 24}, {0x003fffd7, 22}, {0x007fffe0, 23}, {0x00ffffee, 24}, {0x007fffe1, 23},
-        {0x007fffe2, 23}, {0x007fffe3, 23}, {0x007fffe4, 23}, {0x001fffdc, 21}, {0x003fffd8, 22}, {0x007fffe5, 23},
-        {0x003fffd9, 22}, {0x007fffe6, 23}, {0x007fffe7, 23}, {0x00ffffef, 24}, {0x003fffda, 22}, {0x001fffdd, 21},
-        {0x000fffe9, 20}, {0x003fffdb, 22}, {0x003fffdc, 22}, {0x007fffe8, 23}, {0x007fffe9, 23}, {0x001fffde, 21},
-        {0x007fffea, 23}, {0x003fffdd, 22}, {0x003fffde, 22}, {0x00fffff0, 24}, {0x001fffdf, 21}, {0x003fffdf, 22},
-        {0x007fffeb, 23}, {0x007fffec, 23}, {0x001fffe0, 21}, {0x001fffe1, 21}, {0x003fffe0, 22}, {0x001fffe2, 21},
-        {0x007fffed, 23}, {0x003fffe1, 22}, {0x007fffee, 23}, {0x007fffef, 23}, {0x000fffea, 20}, {0x003fffe2, 22},
-        {0x003fffe3, 22}, {0x003fffe4, 22}, {0x007ffff0, 23}, {0x003fffe5, 22}, {0x003fffe6, 22}, {0x007ffff1, 23},
-        {0x03ffffe0, 26}, {0x03ffffe1, 26}, {0x000fffeb, 20}, {0x0007fff1, 19}, {0x003fffe7, 22}, {0x007ffff2, 23},
-        {0x003fffe8, 22}, {0x01ffffec, 25}, {0x03ffffe2, 26}, {0x03ffffe3, 26}, {0x03ffffe4, 26}, {0x07ffffde, 27},
-        {0x07ffffdf, 27}, {0x03ffffe5, 26}, {0x00fffff1, 24}, {0x01ffffed, 25}, {0x0007fff2, 19}, {0x001fffe3, 21},
-        {0x03ffffe6, 26}, {0x07ffffe0, 27}, {0x07ffffe1, 27}, {0x03ffffe7, 26}, {0x07ffffe2, 27}, {0x00fffff2, 24},
-        {0x001fffe4, 21}, {0x001fffe5, 21}, {0x03ffffe8, 26}, {0x03ffffe9, 26}, {0x0ffffffd, 28}, {0x07ffffe3, 27},
-        {0x07ffffe4, 27}, {0x07ffffe5, 27}, {0x000fffec, 20}, {0x00fffff3, 24}, {0x000fffed, 20}, {0x001fffe6, 21},
-        {0x003fffe9, 22}, {0x001fffe7, 21}, {0x001fffe8, 21}, {0x007ffff3, 23}, {0x003fffea, 22}, {0x003fffeb, 22},
-        {0x01ffffee, 25}, {0x01ffffef, 25}, {0x00fffff4, 24}, {0x00fffff5, 24}, {0x03ffffea, 26}, {0x007ffff4, 23},
-        {0x03ffffeb, 26}, {0x07ffffe6, 27}, {0x03ffffec, 26}, {0x03ffffed, 26}, {0x07ffffe7, 27}, {0x07ffffe8, 27},
-        {0x07ffffe9, 27}, {0x07ffffea, 27}, {0x07ffffeb, 27}, {0x0ffffffe, 28}, {0x07ffffec, 27}, {0x07ffffed, 27},
-        {0x07ffffee, 27}, {0x07ffffef, 27}, {0x07fffff0, 27}, {0x03ffffee, 26}, {0x3fffffff, 30},
+        {.bits = 0x00001ff8, .bit_length = 13}, {.bits = 0x007fffd8, .bit_length = 23},
+        {.bits = 0x0fffffe2, .bit_length = 28}, {.bits = 0x0fffffe3, .bit_length = 28},
+        {.bits = 0x0fffffe4, .bit_length = 28}, {.bits = 0x0fffffe5, .bit_length = 28},
+        {.bits = 0x0fffffe6, .bit_length = 28}, {.bits = 0x0fffffe7, .bit_length = 28},
+        {.bits = 0x0fffffe8, .bit_length = 28}, {.bits = 0x00ffffea, .bit_length = 24},
+        {.bits = 0x3ffffffc, .bit_length = 30}, {.bits = 0x0fffffe9, .bit_length = 28},
+        {.bits = 0x0fffffea, .bit_length = 28}, {.bits = 0x3ffffffd, .bit_length = 30},
+        {.bits = 0x0fffffeb, .bit_length = 28}, {.bits = 0x0fffffec, .bit_length = 28},
+        {.bits = 0x0fffffed, .bit_length = 28}, {.bits = 0x0fffffee, .bit_length = 28},
+        {.bits = 0x0fffffef, .bit_length = 28}, {.bits = 0x0ffffff0, .bit_length = 28},
+        {.bits = 0x0ffffff1, .bit_length = 28}, {.bits = 0x0ffffff2, .bit_length = 28},
+        {.bits = 0x3ffffffe, .bit_length = 30}, {.bits = 0x0ffffff3, .bit_length = 28},
+        {.bits = 0x0ffffff4, .bit_length = 28}, {.bits = 0x0ffffff5, .bit_length = 28},
+        {.bits = 0x0ffffff6, .bit_length = 28}, {.bits = 0x0ffffff7, .bit_length = 28},
+        {.bits = 0x0ffffff8, .bit_length = 28}, {.bits = 0x0ffffff9, .bit_length = 28},
+        {.bits = 0x0ffffffa, .bit_length = 28}, {.bits = 0x0ffffffb, .bit_length = 28},
+        {.bits = 0x00000014, .bit_length = 6},  {.bits = 0x000003f8, .bit_length = 10},
+        {.bits = 0x000003f9, .bit_length = 10}, {.bits = 0x00000ffa, .bit_length = 12},
+        {.bits = 0x00001ff9, .bit_length = 13}, {.bits = 0x00000015, .bit_length = 6},
+        {.bits = 0x000000f8, .bit_length = 8},  {.bits = 0x000007fa, .bit_length = 11},
+        {.bits = 0x000003fa, .bit_length = 10}, {.bits = 0x000003fb, .bit_length = 10},
+        {.bits = 0x000000f9, .bit_length = 8},  {.bits = 0x000007fb, .bit_length = 11},
+        {.bits = 0x000000fa, .bit_length = 8},  {.bits = 0x00000016, .bit_length = 6},
+        {.bits = 0x00000017, .bit_length = 6},  {.bits = 0x00000018, .bit_length = 6},
+        {.bits = 0x00000000, .bit_length = 5},  {.bits = 0x00000001, .bit_length = 5},
+        {.bits = 0x00000002, .bit_length = 5},  {.bits = 0x00000019, .bit_length = 6},
+        {.bits = 0x0000001a, .bit_length = 6},  {.bits = 0x0000001b, .bit_length = 6},
+        {.bits = 0x0000001c, .bit_length = 6},  {.bits = 0x0000001d, .bit_length = 6},
+        {.bits = 0x0000001e, .bit_length = 6},  {.bits = 0x0000001f, .bit_length = 6},
+        {.bits = 0x0000005c, .bit_length = 7},  {.bits = 0x000000fb, .bit_length = 8},
+        {.bits = 0x00007ffc, .bit_length = 15}, {.bits = 0x00000020, .bit_length = 6},
+        {.bits = 0x00000ffb, .bit_length = 12}, {.bits = 0x000003fc, .bit_length = 10},
+        {.bits = 0x00001ffa, .bit_length = 13}, {.bits = 0x00000021, .bit_length = 6},
+        {.bits = 0x0000005d, .bit_length = 7},  {.bits = 0x0000005e, .bit_length = 7},
+        {.bits = 0x0000005f, .bit_length = 7},  {.bits = 0x00000060, .bit_length = 7},
+        {.bits = 0x00000061, .bit_length = 7},  {.bits = 0x00000062, .bit_length = 7},
+        {.bits = 0x00000063, .bit_length = 7},  {.bits = 0x00000064, .bit_length = 7},
+        {.bits = 0x00000065, .bit_length = 7},  {.bits = 0x00000066, .bit_length = 7},
+        {.bits = 0x00000067, .bit_length = 7},  {.bits = 0x00000068, .bit_length = 7},
+        {.bits = 0x00000069, .bit_length = 7},  {.bits = 0x0000006a, .bit_length = 7},
+        {.bits = 0x0000006b, .bit_length = 7},  {.bits = 0x0000006c, .bit_length = 7},
+        {.bits = 0x0000006d, .bit_length = 7},  {.bits = 0x0000006e, .bit_length = 7},
+        {.bits = 0x0000006f, .bit_length = 7},  {.bits = 0x00000070, .bit_length = 7},
+        {.bits = 0x00000071, .bit_length = 7},  {.bits = 0x00000072, .bit_length = 7},
+        {.bits = 0x000000fc, .bit_length = 8},  {.bits = 0x00000073, .bit_length = 7},
+        {.bits = 0x000000fd, .bit_length = 8},  {.bits = 0x00001ffb, .bit_length = 13},
+        {.bits = 0x0007fff0, .bit_length = 19}, {.bits = 0x00001ffc, .bit_length = 13},
+        {.bits = 0x00003ffc, .bit_length = 14}, {.bits = 0x00000022, .bit_length = 6},
+        {.bits = 0x00007ffd, .bit_length = 15}, {.bits = 0x00000003, .bit_length = 5},
+        {.bits = 0x00000023, .bit_length = 6},  {.bits = 0x00000004, .bit_length = 5},
+        {.bits = 0x00000024, .bit_length = 6},  {.bits = 0x00000005, .bit_length = 5},
+        {.bits = 0x00000025, .bit_length = 6},  {.bits = 0x00000026, .bit_length = 6},
+        {.bits = 0x00000027, .bit_length = 6},  {.bits = 0x00000006, .bit_length = 5},
+        {.bits = 0x00000074, .bit_length = 7},  {.bits = 0x00000075, .bit_length = 7},
+        {.bits = 0x00000028, .bit_length = 6},  {.bits = 0x00000029, .bit_length = 6},
+        {.bits = 0x0000002a, .bit_length = 6},  {.bits = 0x00000007, .bit_length = 5},
+        {.bits = 0x0000002b, .bit_length = 6},  {.bits = 0x00000076, .bit_length = 7},
+        {.bits = 0x0000002c, .bit_length = 6},  {.bits = 0x00000008, .bit_length = 5},
+        {.bits = 0x00000009, .bit_length = 5},  {.bits = 0x0000002d, .bit_length = 6},
+        {.bits = 0x00000077, .bit_length = 7},  {.bits = 0x00000078, .bit_length = 7},
+        {.bits = 0x00000079, .bit_length = 7},  {.bits = 0x0000007a, .bit_length = 7},
+        {.bits = 0x0000007b, .bit_length = 7},  {.bits = 0x00007ffe, .bit_length = 15},
+        {.bits = 0x000007fc, .bit_length = 11}, {.bits = 0x00003ffd, .bit_length = 14},
+        {.bits = 0x00001ffd, .bit_length = 13}, {.bits = 0x0ffffffc, .bit_length = 28},
+        {.bits = 0x000fffe6, .bit_length = 20}, {.bits = 0x003fffd2, .bit_length = 22},
+        {.bits = 0x000fffe7, .bit_length = 20}, {.bits = 0x000fffe8, .bit_length = 20},
+        {.bits = 0x003fffd3, .bit_length = 22}, {.bits = 0x003fffd4, .bit_length = 22},
+        {.bits = 0x003fffd5, .bit_length = 22}, {.bits = 0x007fffd9, .bit_length = 23},
+        {.bits = 0x003fffd6, .bit_length = 22}, {.bits = 0x007fffda, .bit_length = 23},
+        {.bits = 0x007fffdb, .bit_length = 23}, {.bits = 0x007fffdc, .bit_length = 23},
+        {.bits = 0x007fffdd, .bit_length = 23}, {.bits = 0x007fffde, .bit_length = 23},
+        {.bits = 0x00ffffeb, .bit_length = 24}, {.bits = 0x007fffdf, .bit_length = 23},
+        {.bits = 0x00ffffec, .bit_length = 24}, {.bits = 0x00ffffed, .bit_length = 24},
+        {.bits = 0x003fffd7, .bit_length = 22}, {.bits = 0x007fffe0, .bit_length = 23},
+        {.bits = 0x00ffffee, .bit_length = 24}, {.bits = 0x007fffe1, .bit_length = 23},
+        {.bits = 0x007fffe2, .bit_length = 23}, {.bits = 0x007fffe3, .bit_length = 23},
+        {.bits = 0x007fffe4, .bit_length = 23}, {.bits = 0x001fffdc, .bit_length = 21},
+        {.bits = 0x003fffd8, .bit_length = 22}, {.bits = 0x007fffe5, .bit_length = 23},
+        {.bits = 0x003fffd9, .bit_length = 22}, {.bits = 0x007fffe6, .bit_length = 23},
+        {.bits = 0x007fffe7, .bit_length = 23}, {.bits = 0x00ffffef, .bit_length = 24},
+        {.bits = 0x003fffda, .bit_length = 22}, {.bits = 0x001fffdd, .bit_length = 21},
+        {.bits = 0x000fffe9, .bit_length = 20}, {.bits = 0x003fffdb, .bit_length = 22},
+        {.bits = 0x003fffdc, .bit_length = 22}, {.bits = 0x007fffe8, .bit_length = 23},
+        {.bits = 0x007fffe9, .bit_length = 23}, {.bits = 0x001fffde, .bit_length = 21},
+        {.bits = 0x007fffea, .bit_length = 23}, {.bits = 0x003fffdd, .bit_length = 22},
+        {.bits = 0x003fffde, .bit_length = 22}, {.bits = 0x00fffff0, .bit_length = 24},
+        {.bits = 0x001fffdf, .bit_length = 21}, {.bits = 0x003fffdf, .bit_length = 22},
+        {.bits = 0x007fffeb, .bit_length = 23}, {.bits = 0x007fffec, .bit_length = 23},
+        {.bits = 0x001fffe0, .bit_length = 21}, {.bits = 0x001fffe1, .bit_length = 21},
+        {.bits = 0x003fffe0, .bit_length = 22}, {.bits = 0x001fffe2, .bit_length = 21},
+        {.bits = 0x007fffed, .bit_length = 23}, {.bits = 0x003fffe1, .bit_length = 22},
+        {.bits = 0x007fffee, .bit_length = 23}, {.bits = 0x007fffef, .bit_length = 23},
+        {.bits = 0x000fffea, .bit_length = 20}, {.bits = 0x003fffe2, .bit_length = 22},
+        {.bits = 0x003fffe3, .bit_length = 22}, {.bits = 0x003fffe4, .bit_length = 22},
+        {.bits = 0x007ffff0, .bit_length = 23}, {.bits = 0x003fffe5, .bit_length = 22},
+        {.bits = 0x003fffe6, .bit_length = 22}, {.bits = 0x007ffff1, .bit_length = 23},
+        {.bits = 0x03ffffe0, .bit_length = 26}, {.bits = 0x03ffffe1, .bit_length = 26},
+        {.bits = 0x000fffeb, .bit_length = 20}, {.bits = 0x0007fff1, .bit_length = 19},
+        {.bits = 0x003fffe7, .bit_length = 22}, {.bits = 0x007ffff2, .bit_length = 23},
+        {.bits = 0x003fffe8, .bit_length = 22}, {.bits = 0x01ffffec, .bit_length = 25},
+        {.bits = 0x03ffffe2, .bit_length = 26}, {.bits = 0x03ffffe3, .bit_length = 26},
+        {.bits = 0x03ffffe4, .bit_length = 26}, {.bits = 0x07ffffde, .bit_length = 27},
+        {.bits = 0x07ffffdf, .bit_length = 27}, {.bits = 0x03ffffe5, .bit_length = 26},
+        {.bits = 0x00fffff1, .bit_length = 24}, {.bits = 0x01ffffed, .bit_length = 25},
+        {.bits = 0x0007fff2, .bit_length = 19}, {.bits = 0x001fffe3, .bit_length = 21},
+        {.bits = 0x03ffffe6, .bit_length = 26}, {.bits = 0x07ffffe0, .bit_length = 27},
+        {.bits = 0x07ffffe1, .bit_length = 27}, {.bits = 0x03ffffe7, .bit_length = 26},
+        {.bits = 0x07ffffe2, .bit_length = 27}, {.bits = 0x00fffff2, .bit_length = 24},
+        {.bits = 0x001fffe4, .bit_length = 21}, {.bits = 0x001fffe5, .bit_length = 21},
+        {.bits = 0x03ffffe8, .bit_length = 26}, {.bits = 0x03ffffe9, .bit_length = 26},
+        {.bits = 0x0ffffffd, .bit_length = 28}, {.bits = 0x07ffffe3, .bit_length = 27},
+        {.bits = 0x07ffffe4, .bit_length = 27}, {.bits = 0x07ffffe5, .bit_length = 27},
+        {.bits = 0x000fffec, .bit_length = 20}, {.bits = 0x00fffff3, .bit_length = 24},
+        {.bits = 0x000fffed, .bit_length = 20}, {.bits = 0x001fffe6, .bit_length = 21},
+        {.bits = 0x003fffe9, .bit_length = 22}, {.bits = 0x001fffe7, .bit_length = 21},
+        {.bits = 0x001fffe8, .bit_length = 21}, {.bits = 0x007ffff3, .bit_length = 23},
+        {.bits = 0x003fffea, .bit_length = 22}, {.bits = 0x003fffeb, .bit_length = 22},
+        {.bits = 0x01ffffee, .bit_length = 25}, {.bits = 0x01ffffef, .bit_length = 25},
+        {.bits = 0x00fffff4, .bit_length = 24}, {.bits = 0x00fffff5, .bit_length = 24},
+        {.bits = 0x03ffffea, .bit_length = 26}, {.bits = 0x007ffff4, .bit_length = 23},
+        {.bits = 0x03ffffeb, .bit_length = 26}, {.bits = 0x07ffffe6, .bit_length = 27},
+        {.bits = 0x03ffffec, .bit_length = 26}, {.bits = 0x03ffffed, .bit_length = 26},
+        {.bits = 0x07ffffe7, .bit_length = 27}, {.bits = 0x07ffffe8, .bit_length = 27},
+        {.bits = 0x07ffffe9, .bit_length = 27}, {.bits = 0x07ffffea, .bit_length = 27},
+        {.bits = 0x07ffffeb, .bit_length = 27}, {.bits = 0x0ffffffe, .bit_length = 28},
+        {.bits = 0x07ffffec, .bit_length = 27}, {.bits = 0x07ffffed, .bit_length = 27},
+        {.bits = 0x07ffffee, .bit_length = 27}, {.bits = 0x07ffffef, .bit_length = 27},
+        {.bits = 0x07fffff0, .bit_length = 27}, {.bits = 0x03ffffee, .bit_length = 26},
+        {.bits = 0x3fffffff, .bit_length = 30},
 }};
 
-constexpr TrieNode make_trie_node() noexcept { return {kInvalidNode, kInvalidNode, kNoSymbol}; }
+constexpr TrieNode make_trie_node() noexcept {
+    return {.child0 = kInvalidNode, .child1 = kInvalidNode, .symbol = kNoSymbol};
+}
 
 constexpr std::uint8_t to_lower_ascii(std::uint8_t ch) noexcept {
     if (ch >= 'A' && ch <= 'Z') {
@@ -320,8 +408,8 @@ constexpr DecodeTransition advance_fixed_bits(const DecodeBuildTables &build, st
 constexpr DecodeBuildTables build_decode_build_tables() noexcept {
     DecodeBuildTables build{};
     init_decode_build(build);
-    for (std::uint16_t symbol = 0; symbol < kCodeTable.size(); ++symbol) {
-        insert_code(build, symbol, kCodeTable[symbol]);
+    for (std::size_t symbol = 0; symbol < kCodeTable.size(); ++symbol) {
+        insert_code(build, static_cast<std::uint16_t>(symbol), kCodeTable[symbol]);
     }
     mark_accepted_endings(build);
     assign_decode_states(build);
@@ -406,18 +494,20 @@ constexpr ByteDecodeRow kByteDecodeRow = build_byte_decode_row(kDecodeBuildTable
 
 template<std::size_t... States>
 constexpr std::array<const ByteDecodeRow *, sizeof...(States)>
-build_byte_decode_row_refs(std::index_sequence<States...>) noexcept {
+build_byte_decode_row_refs(std::index_sequence<States...> /*unused*/) noexcept {
     return {&kByteDecodeRow<States>...};
 }
 
 template<std::size_t... States>
-constexpr bool byte_decode_rows_output_overflow(std::index_sequence<States...>) noexcept {
+constexpr bool byte_decode_rows_output_overflow(std::index_sequence<States...> /*unused*/) noexcept {
     return (... || kByteDecodeRow<States>.output_overflow);
 }
 
 constexpr ByteDecodeTables build_byte_decode_tables() noexcept {
-    return {build_byte_decode_row_refs(std::make_index_sequence<256>{}), kDecodeBuildTables.state_count,
-            kDecodeBuildTables.state_overflow, byte_decode_rows_output_overflow(std::make_index_sequence<256>{})};
+    return {.rows = build_byte_decode_row_refs(std::make_index_sequence<256>{}),
+            .state_count = kDecodeBuildTables.state_count,
+            .state_overflow = kDecodeBuildTables.state_overflow,
+            .output_overflow = byte_decode_rows_output_overflow(std::make_index_sequence<256>{})};
 }
 
 constexpr ByteDecodeTables kByteDecodeTables = build_byte_decode_tables();
@@ -450,7 +540,7 @@ HpackHuffmanEncodeResult hpack_huffman_encode_impl(const std::uint8_t *src, std:
         while (pending_bits >= 8) {
             if constexpr (CheckDstCap) {
                 if (written == dst_cap) {
-                    return {HpackHuffmanCode::OutputFull, consumed, written};
+                    return {.code = HpackHuffmanCode::OutputFull, .consumed = consumed, .written = written};
                 }
             }
             pending_bits = static_cast<std::uint8_t>(pending_bits - 8);
@@ -465,13 +555,13 @@ HpackHuffmanEncodeResult hpack_huffman_encode_impl(const std::uint8_t *src, std:
         pending_bits = static_cast<std::uint8_t>(pending_bits + pad_bits);
         if constexpr (CheckDstCap) {
             if (written == dst_cap) {
-                return {HpackHuffmanCode::OutputFull, consumed, written};
+                return {.code = HpackHuffmanCode::OutputFull, .consumed = consumed, .written = written};
             }
         }
         dst[written++] = static_cast<std::uint8_t>(bit_buffer & 0xffU);
     }
 
-    return {HpackHuffmanCode::Ok, consumed, written};
+    return {.code = HpackHuffmanCode::Ok, .consumed = consumed, .written = written};
 }
 
 template<bool WriteOutput, bool CheckDstCap>
@@ -482,7 +572,7 @@ HpackHuffmanDecodeResult hpack_huffman_decode_table_impl(HpackHuffmanDecodeState
     std::size_t consumed = 0;
 
     if (state.state >= kByteDecodeTables.state_count) {
-        return {HpackHuffmanCode::InvalidEncoding, consumed, written};
+        return {.code = HpackHuffmanCode::InvalidEncoding, .consumed = consumed, .written = written};
     }
 
     while (consumed < len) {
@@ -493,7 +583,7 @@ HpackHuffmanDecodeResult hpack_huffman_decode_table_impl(HpackHuffmanDecodeState
                                                             src[consumed + 1U]);
                 const PackedRoot16Entry entry = kRoot16DecodeTable.entries[idx];
                 if (root16_invalid(entry)) {
-                    return {HpackHuffmanCode::InvalidEncoding, consumed, written};
+                    return {.code = HpackHuffmanCode::InvalidEncoding, .consumed = consumed, .written = written};
                 }
 
                 const std::uint8_t emit_count = root16_emit_count(entry);
@@ -518,13 +608,13 @@ HpackHuffmanDecodeResult hpack_huffman_decode_table_impl(HpackHuffmanDecodeState
 
         const PackedByteEntry entry = kByteDecodeTables.rows[state.state]->entries[src[consumed]];
         if (byte_invalid(entry)) {
-            return {HpackHuffmanCode::InvalidEncoding, consumed, written};
+            return {.code = HpackHuffmanCode::InvalidEncoding, .consumed = consumed, .written = written};
         }
         const std::uint8_t emit_count = byte_emit_count(entry);
 
         if constexpr (WriteOutput && CheckDstCap) {
             if (written + emit_count > dst_cap) {
-                return {HpackHuffmanCode::OutputFull, consumed, written};
+                return {.code = HpackHuffmanCode::OutputFull, .consumed = consumed, .written = written};
             }
         }
 
@@ -544,17 +634,17 @@ HpackHuffmanDecodeResult hpack_huffman_decode_table_impl(HpackHuffmanDecodeState
 
     if (!last) {
         if (state.state != 0) {
-            return {HpackHuffmanCode::NeedMore, consumed, written};
+            return {.code = HpackHuffmanCode::NeedMore, .consumed = consumed, .written = written};
         }
-        return {HpackHuffmanCode::Ok, consumed, written};
+        return {.code = HpackHuffmanCode::Ok, .consumed = consumed, .written = written};
     }
 
     if (!state.ending) {
-        return {HpackHuffmanCode::InvalidEncoding, consumed, written};
+        return {.code = HpackHuffmanCode::InvalidEncoding, .consumed = consumed, .written = written};
     }
 
     state.reset();
-    return {HpackHuffmanCode::Ok, consumed, written};
+    return {.code = HpackHuffmanCode::Ok, .consumed = consumed, .written = written};
 }
 
 } // namespace
@@ -615,19 +705,19 @@ HpackHuffmanEncodeResult hpack_huffman_encode_incremental(HpackHuffmanEncodeStat
             ++consumed;
 
             if (!flush_pending()) {
-                return {HpackHuffmanCode::OutputFull, consumed, written};
+                return {.code = HpackHuffmanCode::OutputFull, .consumed = consumed, .written = written};
             }
         }
     }
 
     if (!last && !state.finalizing) {
-        return {HpackHuffmanCode::Ok, consumed, written};
+        return {.code = HpackHuffmanCode::Ok, .consumed = consumed, .written = written};
     }
 
     if (!state.finalizing) {
         if (state.pending_bits == 0) {
             state.reset();
-            return {HpackHuffmanCode::Ok, consumed, written};
+            return {.code = HpackHuffmanCode::Ok, .consumed = consumed, .written = written};
         }
         const std::uint8_t pad_bits = static_cast<std::uint8_t>(8 - state.pending_bits);
         state.bit_buffer = (state.bit_buffer << pad_bits) | ((std::uint64_t{1} << pad_bits) - 1U);
@@ -636,11 +726,11 @@ HpackHuffmanEncodeResult hpack_huffman_encode_incremental(HpackHuffmanEncodeStat
     }
 
     if (!flush_pending()) {
-        return {HpackHuffmanCode::OutputFull, consumed, written};
+        return {.code = HpackHuffmanCode::OutputFull, .consumed = consumed, .written = written};
     }
 
     state.reset();
-    return {HpackHuffmanCode::Ok, consumed, written};
+    return {.code = HpackHuffmanCode::Ok, .consumed = consumed, .written = written};
 }
 
 std::size_t hpack_huffman_encode_exact(const std::uint8_t *src, std::size_t len, std::uint8_t *dst,

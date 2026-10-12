@@ -178,7 +178,10 @@ common::IoErr Http2HpackDecoder::parse_ready(const std::uint8_t *&pos, const std
 common::IoErr Http2HpackDecoder::parse_integer_cont(const std::uint8_t *&pos, const std::uint8_t *end) noexcept {
     while (pos != end) {
         std::uint8_t byte = *pos++;
-        if (integer_shift_ >= 28U && (byte & 0x7fU) != 0) {
+        // HPACK integers cap at 28 continuation bits (prefix 7 + 4x7); a fifth
+        // continuation byte would shift by >= 35, which is UB even for a zero
+        // payload (shift amount >= 32).
+        if (integer_shift_ >= 28U) {
             return common::IoErr::Invalid;
         }
         integer_value_ += static_cast<std::uint32_t>(byte & 0x7fU) << integer_shift_;

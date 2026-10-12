@@ -1,10 +1,12 @@
 #include "script/ir/Compiler.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -49,17 +51,17 @@ public:
 
     CompileResult<Compiled> compile(const ast::Node &node) {
         push_scope();
-        if (auto *block = dynamic_cast<const ast::Block *>(&node)) {
+        if (const auto *block = dynamic_cast<const ast::Block *>(&node)) {
             compile_block(*block, false);
             if (!failed()) {
                 emit_default_return(block->end_pos());
             }
-        } else if (auto *expr = dynamic_cast<const ast::Expression *>(&node)) {
+        } else if (const auto *expr = dynamic_cast<const ast::Expression *>(&node)) {
             compile_expression(*expr);
             if (!failed()) {
                 emit_end_return(expr->end_pos());
             }
-        } else if (auto *stmt = dynamic_cast<const ast::Statement *>(&node)) {
+        } else if (const auto *stmt = dynamic_cast<const ast::Statement *>(&node)) {
             compile_statement(*stmt);
             if (!failed()) {
                 emit_default_return(stmt->end_pos());
@@ -104,10 +106,10 @@ private:
     static constexpr int kInstrumentLen = 8;
     static constexpr int kIteratorLen = 12;
     static constexpr int kIteratorOff = kInstrumentLen + kIteratorLen;
-    static constexpr std::size_t kMaxIteratorVar = (1u << kIteratorLen) - 1u;
-    static constexpr std::uint32_t kMaxOperand24 = (1u << 24u) - 1u;
-    static constexpr std::uint32_t kMaxFuncIndex16 = (1u << 16u) - 1u;
-    static constexpr std::uint32_t kMaxArgCount8 = (1u << 8u) - 1u;
+    static constexpr std::size_t kMaxIteratorVar = (1U << kIteratorLen) - 1U;
+    static constexpr std::uint32_t kMaxOperand24 = (1U << 24U) - 1U;
+    static constexpr std::uint32_t kMaxFuncIndex16 = (1U << 16U) - 1U;
+    static constexpr std::uint32_t kMaxArgCount8 = (1U << 8U) - 1U;
 
     std::vector<std::int32_t> codes_;
     std::vector<std::int32_t> positions_;
@@ -134,19 +136,21 @@ private:
 
     void fail(CompileErrorReason reason, std::int64_t position, const char *message) noexcept {
         if (!error_) {
-            error_ = CompileError{reason, position, message};
+            error_ = CompileError{.reason = reason, .position = position, .message = message};
         }
     }
 
     CompileResult<DepthGuard> enter_compile_depth(std::int32_t position) {
         if (compile_depth_ >= max_depth_) {
             fail(CompileErrorReason::ProgramTooLarge, position, "maximum script compile depth exceeded");
+            // fail() always populates error_; invisible to the checker.
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
             return std::unexpected(*error_);
         }
         return DepthGuard(*this);
     }
 
-    void push_scope() { scopes_.push_back(Scope{}); }
+    void push_scope() { scopes_.emplace_back(); }
 
     void pop_scope() {
         if (!scopes_.empty()) {
@@ -169,9 +173,9 @@ private:
     }
 
     std::size_t resolve_var(const std::string &name) {
-        for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
-            auto found = it->vars.find(name);
-            if (found != it->vars.end()) {
+        for (auto &scope: std::ranges::reverse_view(scopes_)) {
+            auto found = scope.vars.find(name);
+            if (found != scope.vars.end()) {
                 return found->second;
             }
         }
@@ -182,12 +186,8 @@ private:
 
     void update_stack(int delta) {
         stack_depth_ += delta;
-        if (stack_depth_ < 0) {
-            stack_depth_ = 0;
-        }
-        if (stack_depth_ > max_stack_) {
-            max_stack_ = stack_depth_;
-        }
+        stack_depth_ = std::max(stack_depth_, 0);
+        max_stack_ = std::max(stack_depth_, max_stack_);
     }
 
     std::size_t emit_raw(std::int32_t code, std::int32_t pos, int delta) {
@@ -208,7 +208,7 @@ private:
             fail(CompileErrorReason::OperandOutOfRange, pos, "compiled operand is too large");
             return codes_.size();
         }
-        std::uint32_t code = static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(operand) << 8u);
+        std::uint32_t code = static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(operand) << 8U);
         return emit_raw(static_cast<std::int32_t>(code), pos, delta);
     }
 
@@ -224,8 +224,8 @@ private:
             fail(CompileErrorReason::TooManyArguments, pos, "function call has too many arguments");
             return codes_.size();
         }
-        std::uint32_t code = static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(argc) << 8u) |
-                             (static_cast<std::uint32_t>(func_index) << 16u);
+        std::uint32_t code = static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(argc) << 8U) |
+                             (static_cast<std::uint32_t>(func_index) << 16U);
         return emit_raw(static_cast<std::int32_t>(code), pos, delta);
     }
 
@@ -250,9 +250,9 @@ private:
             return;
         }
         std::uint32_t code = static_cast<std::uint32_t>(codes_[index]);
-        std::uint8_t op = static_cast<std::uint8_t>(code & 0xFFu);
+        std::uint8_t op = static_cast<std::uint8_t>(code & 0xFFU);
         codes_[index] =
-                static_cast<std::int32_t>(static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(target) << 8u));
+                static_cast<std::int32_t>(static_cast<std::uint32_t>(op) | (static_cast<std::uint32_t>(target) << 8U));
     }
 
     void append_exception_range(std::size_t try_begin, std::size_t catch_begin, std::size_t catch_end,
@@ -562,18 +562,18 @@ private:
             return;
         }
         auto guard = std::move(guard_result.value());
-        if (auto *block = dynamic_cast<const ast::Block *>(&stmt)) {
+        if (const auto *block = dynamic_cast<const ast::Block *>(&stmt)) {
             compile_block(*block, true);
             return;
         }
-        if (auto *expr_stmt = dynamic_cast<const ast::ExpressionStatement *>(&stmt)) {
+        if (const auto *expr_stmt = dynamic_cast<const ast::ExpressionStatement *>(&stmt)) {
             if (expr_stmt->expression()) {
                 compile_expression(*expr_stmt->expression());
                 emit_raw(static_cast<std::int32_t>(Code::POP), stmt.start_pos(), -1);
             }
             return;
         }
-        if (auto *var_stmt = dynamic_cast<const ast::VariableDeclareStatement *>(&stmt)) {
+        if (const auto *var_stmt = dynamic_cast<const ast::VariableDeclareStatement *>(&stmt)) {
             std::size_t var_idx = declare_var(var_stmt->identifier()->name());
             if (var_stmt->initializer()) {
                 compile_expression(*var_stmt->initializer());
@@ -583,7 +583,7 @@ private:
             emit_op(Code::STORE_VAR, var_idx, stmt.start_pos(), -1);
             return;
         }
-        if (auto *ret_stmt = dynamic_cast<const ast::ReturnStatement *>(&stmt)) {
+        if (const auto *ret_stmt = dynamic_cast<const ast::ReturnStatement *>(&stmt)) {
             if (ret_stmt->value()) {
                 compile_expression(*ret_stmt->value());
             }
@@ -592,7 +592,7 @@ private:
             emit_end_return(stmt.start_pos());
             return;
         }
-        if (auto *throw_stmt = dynamic_cast<const ast::ThrowStatement *>(&stmt)) {
+        if (const auto *throw_stmt = dynamic_cast<const ast::ThrowStatement *>(&stmt)) {
             if (throw_stmt->value()) {
                 compile_expression(*throw_stmt->value());
                 emit_raw(static_cast<std::int32_t>(Code::THROW_EXP), stmt.start_pos(), -1);
@@ -600,7 +600,7 @@ private:
             }
             return;
         }
-        if (auto *if_stmt = dynamic_cast<const ast::IfStatement *>(&stmt)) {
+        if (const auto *if_stmt = dynamic_cast<const ast::IfStatement *>(&stmt)) {
             compile_expression(*if_stmt->condition());
             std::size_t else_jump = emit_jump(Code::JUMP_IF_FALSE, 0, stmt.start_pos());
             int saved_depth = stack_depth_;
@@ -618,7 +618,7 @@ private:
             patch_jump(end_jump, end_target, stmt.start_pos());
             return;
         }
-        if (auto *foreach_stmt = dynamic_cast<const ast::ForeachStatement *>(&stmt)) {
+        if (const auto *foreach_stmt = dynamic_cast<const ast::ForeachStatement *>(&stmt)) {
             compile_expression(*foreach_stmt->collection());
             std::size_t iter_idx = reserve_temp_var();
             emit_op(Code::ITERATE_INTO, iter_idx, stmt.start_pos(), -1);
@@ -669,7 +669,7 @@ private:
             pop_scope();
             return;
         }
-        if (auto *try_stmt = dynamic_cast<const ast::TryCatchStatement *>(&stmt)) {
+        if (const auto *try_stmt = dynamic_cast<const ast::TryCatchStatement *>(&stmt)) {
             std::size_t try_begin = codes_.size();
             if (try_stmt->try_block()) {
                 compile_block(*try_stmt->try_block(), true);
@@ -692,14 +692,14 @@ private:
             append_exception_range(try_begin, catch_begin, catch_end, stmt.start_pos());
             return;
         }
-        if (auto *break_stmt = dynamic_cast<const ast::BreakStatement *>(&stmt)) {
+        if (const auto *break_stmt = dynamic_cast<const ast::BreakStatement *>(&stmt)) {
             if (!loops_.empty()) {
                 std::size_t idx = emit_jump(Code::JUMP, 0, break_stmt->start_pos());
                 loops_.back().break_jumps.push_back(idx);
             }
             return;
         }
-        if (auto *continue_stmt = dynamic_cast<const ast::ContinueStatement *>(&stmt)) {
+        if (const auto *continue_stmt = dynamic_cast<const ast::ContinueStatement *>(&stmt)) {
             if (!loops_.empty()) {
                 std::size_t idx = emit_jump(Code::JUMP, 0, continue_stmt->start_pos());
                 loops_.back().continue_jumps.push_back(idx);
@@ -721,7 +721,7 @@ private:
             return;
         }
         auto guard = std::move(guard_result.value());
-        if (auto *literal = dynamic_cast<const ast::Literal *>(&expr)) {
+        if (const auto *literal = dynamic_cast<const ast::Literal *>(&expr)) {
             fiber::script::JsValue value = fiber::script::JsValue::make_undefined();
             switch (literal->kind()) {
                 case ast::Literal::Kind::NullValue:
@@ -745,12 +745,12 @@ private:
             emit_op(Code::LOAD_CONST, idx, expr.start_pos(), 1);
             return;
         }
-        if (auto *identifier = dynamic_cast<const ast::Identifier *>(&expr)) {
+        if (const auto *identifier = dynamic_cast<const ast::Identifier *>(&expr)) {
             std::size_t idx = resolve_var(identifier->name());
             emit_op(Code::LOAD_VAR, idx, expr.start_pos(), 1);
             return;
         }
-        if (auto *var = dynamic_cast<const ast::VariableReference *>(&expr)) {
+        if (const auto *var = dynamic_cast<const ast::VariableReference *>(&expr)) {
             if (var->is_root()) {
                 emit_raw(static_cast<std::int32_t>(Code::LOAD_ROOT), expr.start_pos(), 1);
                 return;
@@ -759,7 +759,7 @@ private:
             emit_op(Code::LOAD_VAR, idx, expr.start_pos(), 1);
             return;
         }
-        if (auto *constant = dynamic_cast<const ast::ConstantVal *>(&expr)) {
+        if (const auto *constant = dynamic_cast<const ast::ConstantVal *>(&expr)) {
             if (constant->is_async()) {
                 if (!validate_host_callable(constant->async_constant(), Library::HostCallable::Kind::AsyncConstant,
                                             expr.start_pos())) {
@@ -777,7 +777,7 @@ private:
             }
             return;
         }
-        if (auto *call = dynamic_cast<const ast::FunctionCall *>(&expr)) {
+        if (const auto *call = dynamic_cast<const ast::FunctionCall *>(&expr)) {
             bool has_spread = false;
             for (const auto &arg: call->args()) {
                 if (dynamic_cast<const ast::ExpandArrArg *>(arg.get())) {
@@ -817,7 +817,7 @@ private:
                 if (!arg) {
                     continue;
                 }
-                if (auto *expand = dynamic_cast<const ast::ExpandArrArg *>(arg.get())) {
+                if (const auto *expand = dynamic_cast<const ast::ExpandArrArg *>(arg.get())) {
                     if (expand->value()) {
                         compile_expression(*expand->value());
                         emit_raw(static_cast<std::int32_t>(Code::EXP_ARRAY), expr.start_pos(), -1);
@@ -838,13 +838,13 @@ private:
                     expr.start_pos(), 0);
             return;
         }
-        if (auto *list = dynamic_cast<const ast::InlineList *>(&expr)) {
+        if (const auto *list = dynamic_cast<const ast::InlineList *>(&expr)) {
             emit_raw(static_cast<std::int32_t>(Code::NEW_ARRAY), expr.start_pos(), 1);
             for (const auto &item: list->values()) {
                 if (!item) {
                     continue;
                 }
-                if (auto *expand = dynamic_cast<const ast::ExpandArrArg *>(item.get())) {
+                if (const auto *expand = dynamic_cast<const ast::ExpandArrArg *>(item.get())) {
                     if (expand->value()) {
                         compile_expression(*expand->value());
                         emit_raw(static_cast<std::int32_t>(Code::EXP_ARRAY), expr.start_pos(), -1);
@@ -856,12 +856,12 @@ private:
             }
             return;
         }
-        if (auto *obj = dynamic_cast<const ast::InlineObject *>(&expr)) {
+        if (const auto *obj = dynamic_cast<const ast::InlineObject *>(&expr)) {
             emit_raw(static_cast<std::int32_t>(Code::NEW_OBJECT), expr.start_pos(), 1);
             for (const auto &entry: obj->entries()) {
                 if (entry.key.kind == ast::InlineObject::KeyKind::Expand) {
                     if (entry.value) {
-                        if (auto *expand = dynamic_cast<const ast::ExpandArrArg *>(entry.value.get())) {
+                        if (const auto *expand = dynamic_cast<const ast::ExpandArrArg *>(entry.value.get())) {
                             if (expand->value()) {
                                 compile_expression(*expand->value());
                                 emit_raw(static_cast<std::int32_t>(Code::EXP_OBJECT), expr.start_pos(), -1);
@@ -897,19 +897,19 @@ private:
             }
             return;
         }
-        if (auto *indexer = dynamic_cast<const ast::Indexer *>(&expr)) {
+        if (const auto *indexer = dynamic_cast<const ast::Indexer *>(&expr)) {
             compile_expression(*indexer->parent());
             compile_expression(*indexer->index());
             emit_raw(static_cast<std::int32_t>(Code::IDX_GET), expr.start_pos(), -1);
             return;
         }
-        if (auto *prop = dynamic_cast<const ast::PropertyReference *>(&expr)) {
+        if (const auto *prop = dynamic_cast<const ast::PropertyReference *>(&expr)) {
             compile_expression(*prop->parent());
             std::size_t prop_idx = add_string_constant(prop->name(), expr.start_pos());
             emit_op(Code::PROP_GET, prop_idx, expr.start_pos(), 0);
             return;
         }
-        if (auto *binary = dynamic_cast<const ast::BinaryOperator *>(&expr)) {
+        if (const auto *binary = dynamic_cast<const ast::BinaryOperator *>(&expr)) {
             if (binary->op() == ast::Operator::Match) {
                 fail(CompileErrorReason::Internal, expr.start_pos(), "match operator (~) is not supported");
                 return;
@@ -973,7 +973,7 @@ private:
             emit_raw(static_cast<std::int32_t>(op), expr.start_pos(), -1);
             return;
         }
-        if (auto *tmpl = dynamic_cast<const ast::TemplateString *>(&expr)) {
+        if (const auto *tmpl = dynamic_cast<const ast::TemplateString *>(&expr)) {
             // Lower a template literal to a left-associative operator(Add) chain:
             // ((s0 + e0) + s1) + ... + s_n. Plain/empty templates emit a single
             // string const with no BOP_PLUS.
@@ -1001,7 +1001,7 @@ private:
             }
             return;
         }
-        if (auto *logic = dynamic_cast<const ast::LogicRelationalExpression *>(&expr)) {
+        if (const auto *logic = dynamic_cast<const ast::LogicRelationalExpression *>(&expr)) {
             compile_expression(*logic->left());
             emit_raw(static_cast<std::int32_t>(Code::DUMP), expr.start_pos(), 1);
             std::size_t end_jump = 0;
@@ -1016,7 +1016,7 @@ private:
             patch_jump(end_jump, end_target, expr.start_pos());
             return;
         }
-        if (auto *unary = dynamic_cast<const ast::UnaryOperator *>(&expr)) {
+        if (const auto *unary = dynamic_cast<const ast::UnaryOperator *>(&expr)) {
             compile_expression(*unary->operand());
             std::uint8_t op = Code::UNARY_PLUS;
             switch (unary->op()) {
@@ -1039,7 +1039,7 @@ private:
             emit_raw(static_cast<std::int32_t>(op), expr.start_pos(), 0);
             return;
         }
-        if (auto *ternary = dynamic_cast<const ast::Ternary *>(&expr)) {
+        if (const auto *ternary = dynamic_cast<const ast::Ternary *>(&expr)) {
             compile_expression(*ternary->test());
             std::size_t else_jump = emit_jump(Code::JUMP_IF_FALSE, 0, expr.start_pos());
             int saved_depth = stack_depth_;
@@ -1053,11 +1053,11 @@ private:
             patch_jump(end_jump, end_target, expr.start_pos());
             return;
         }
-        if (auto *assign = dynamic_cast<const ast::Assign *>(&expr)) {
+        if (const auto *assign = dynamic_cast<const ast::Assign *>(&expr)) {
             compile_assign(*assign);
             return;
         }
-        if (auto *expand = dynamic_cast<const ast::ExpandArrArg *>(&expr)) {
+        if (const auto *expand = dynamic_cast<const ast::ExpandArrArg *>(&expr)) {
             if (expand->value()) {
                 compile_expression(*expand->value());
             }
@@ -1076,21 +1076,21 @@ private:
             emit_op(Code::LOAD_CONST, const_undefined(assign.start_pos()), assign.start_pos(), 1);
             return;
         }
-        if (auto *var = dynamic_cast<const ast::VariableReference *>(left)) {
+        if (const auto *var = dynamic_cast<const ast::VariableReference *>(left)) {
             compile_expression(*right);
             emit_raw(static_cast<std::int32_t>(Code::DUMP), assign.start_pos(), 1);
             std::size_t idx = resolve_var(var->name());
             emit_op(Code::STORE_VAR, idx, assign.start_pos(), -1);
             return;
         }
-        if (auto *prop = dynamic_cast<const ast::PropertyReference *>(left)) {
+        if (const auto *prop = dynamic_cast<const ast::PropertyReference *>(left)) {
             compile_expression(*prop->parent());
             compile_expression(*right);
             std::size_t prop_idx = add_string_constant(prop->name(), assign.start_pos());
             emit_op(Code::PROP_SET, prop_idx, assign.start_pos(), -1);
             return;
         }
-        if (auto *indexer = dynamic_cast<const ast::Indexer *>(left)) {
+        if (const auto *indexer = dynamic_cast<const ast::Indexer *>(left)) {
             compile_expression(*indexer->parent());
             compile_expression(*indexer->index());
             compile_expression(*right);

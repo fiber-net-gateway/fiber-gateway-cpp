@@ -278,7 +278,9 @@ struct ReplacingBatch {
 
     ~ReplacingBatch() {
         for (int i = 0; i < 2; ++i) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
             if (items[i] && items[i]->registered()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
                 (void) poller.del(*items[i]);
             }
             if (fds[i] >= 0) {
@@ -287,11 +289,13 @@ struct ReplacingBatch {
         }
     }
 
-    static void on_original(fiber::event::Poller::Item *raw, int, fiber::event::Poller::Event) noexcept {
+    static void on_original(fiber::event::Poller::Item *raw, int /*unused*/,
+                            fiber::event::Poller::Event /*unused*/) noexcept {
         auto *self = static_cast<Item *>(raw)->owner;
         ++self->original_calls;
         // Replace both self and the pending peer regardless of kernel ordering.
         for (int i = 0; i < 2; ++i) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
             EXPECT_EQ(self->poller.del(*self->items[i]), fiber::common::IoErr::None);
             auto &item = self->items[i].emplace(*self, &on_replacement);
             EXPECT_EQ(self->poller.add(self->fds[i], fiber::event::Poller::Event::Read, &item),
@@ -299,7 +303,8 @@ struct ReplacingBatch {
         }
     }
 
-    static void on_replacement(fiber::event::Poller::Item *raw, int, fiber::event::Poller::Event) noexcept {
+    static void on_replacement(fiber::event::Poller::Item *raw, int /*unused*/,
+                               fiber::event::Poller::Event /*unused*/) noexcept {
         ++static_cast<Item *>(raw)->owner->replacement_calls;
     }
 };
@@ -307,7 +312,8 @@ struct ReplacingBatch {
 struct RecursiveItem : fiber::event::Poller::Item {
     fiber::event::Poller *poller = nullptr;
     bool call_wait = false;
-    static void on_event(fiber::event::Poller::Item *raw, int, fiber::event::Poller::Event) noexcept {
+    static void on_event(fiber::event::Poller::Item *raw, int /*unused*/,
+                         fiber::event::Poller::Event /*unused*/) noexcept {
         auto *self = static_cast<RecursiveItem *>(raw);
         if (self->call_wait) {
             self->poller->wait(std::chrono::steady_clock::now());
@@ -320,7 +326,7 @@ struct RecursiveItem : fiber::event::Poller::Item {
 
 TEST(PollerTest, CallbackCanReplaceSelfAndPendingPeerAtSameAddresses) {
     fiber::event::Poller poller;
-    ReplacingBatch context{poller};
+    ReplacingBatch context{.poller = poller};
     for (int i = 0; i < 2; ++i) {
         auto &item = context.items[i].emplace(context, &ReplacingBatch::on_original);
         context.fds[i] = ::eventfd(1, EFD_NONBLOCK | EFD_CLOEXEC);

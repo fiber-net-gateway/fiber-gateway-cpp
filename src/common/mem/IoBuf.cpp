@@ -196,10 +196,14 @@ IoBuf IoBuf::allocate_impl(std::size_t capacity, bool trackable) noexcept {
             return {};
         }
         const std::size_t aligned_offset = (payload_end + retention_mask) & ~retention_mask;
+        // Explicit dual bounds: uint32 field limit plus an overflow guard for the
+        // allocation_size addition below (provably subsumed, kept as defense).
+        // NOLINTBEGIN(misc-redundant-expression)
         if (aligned_offset > std::numeric_limits<std::uint32_t>::max() ||
             aligned_offset > std::numeric_limits<std::size_t>::max() - sizeof(StorageRetention)) {
             return {};
         }
+        // NOLINTEND(misc-redundant-expression)
         retention_offset = static_cast<std::uint32_t>(aligned_offset);
         allocation_size = aligned_offset + sizeof(StorageRetention);
     }
@@ -419,6 +423,8 @@ void IoBuf::release(ControlBlock *control) noexcept {
         if (ref.compare_exchange_weak(current, next, std::memory_order_acq_rel, std::memory_order_relaxed)) {
             if (next == 0) {
                 StorageRetention *retention = storage_retention(control);
+                // Positive form states the invariant most directly.
+                // NOLINTNEXTLINE(readability-simplify-boolean-expr)
                 FIBER_ASSERT(retention == nullptr || (retention->owner == nullptr && retention->refs == 0));
                 if (retention != nullptr) {
                     retention->~StorageRetention();

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <dirent.h>
 #include <future>
@@ -503,7 +504,7 @@ TEST(Http2EndpointTest, ConfiguredIdleTimeoutClosesWithoutAnyRequest) {
 
     int fd = connect_to(running.port);
     ASSERT_GE(fd, 0);
-    timeval timeout{2, 0};
+    timeval timeout{.tv_sec = 2, .tv_usec = 0};
     ASSERT_EQ(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
     std::string preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     preface.append("\0\0\0\x04\0\0\0\0\0", 9);
@@ -673,7 +674,7 @@ TEST(Http2EndpointTest, ConnectionsSpreadOverWorkerLoops) {
                                 },
                                 &workers);
     ASSERT_NE(running.server, nullptr);
-    EXPECT_EQ(running.server->worker_count(), 2u);
+    EXPECT_EQ(running.server->worker_count(), 2U);
 
     for (int i = 0; i < 2; ++i) {
         ClientResult result = http2_round_trip(client_group, running.port);
@@ -683,7 +684,7 @@ TEST(Http2EndpointTest, ConnectionsSpreadOverWorkerLoops) {
 
     {
         std::lock_guard guard(loops_mu);
-        EXPECT_EQ(seen.size(), 2u);
+        EXPECT_EQ(seen.size(), 2U);
         for (fiber::event::EventLoop *loop: seen) {
             EXPECT_NE(loop, &accept_group.at(0));
         }
@@ -850,7 +851,7 @@ TEST(Http2EndpointTest, ConcurrentTlsHandshakesAndStopReleaseEveryConnection) {
             });
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10 + 8 * iteration));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10 + (8 * iteration)));
         running.server->stop(); // off the owner loop, racing handshakes
         stopping.store(true);
         ASSERT_EQ(hammer_future.wait_for(15s), std::future_status::ready);
@@ -958,7 +959,7 @@ DetachedTask run_http2_streaming_client(fiber::event::EventLoop *loop, std::uint
                 result.status_code = (*header)->status_code;
                 bool complete = false;
                 while (result.err == fiber::common::IoErr::None && !complete) {
-                    auto chunk = co_await exchange.read_body(64 * 1024);
+                    auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
                     if (!chunk) {
                         result.err = chunk.error();
                         break;
@@ -1057,7 +1058,7 @@ std::vector<SSL_SESSION *> &stashed_sessions() {
     return stash;
 }
 
-int stash_new_session(SSL *, SSL_SESSION *sess) noexcept {
+int stash_new_session(SSL * /*unused*/, SSL_SESSION *sess) noexcept {
     stashed_sessions().push_back(sess);
     return 1; // the stash took ownership
 }
@@ -1091,7 +1092,7 @@ struct RawTlsHttpClient {
     int fd = -1;
 
     static bool make(bool collect_tickets, std::unique_ptr<RawTlsHttpClient> &out) {
-        auto client = std::unique_ptr<RawTlsHttpClient>(new RawTlsHttpClient);
+        auto client = std::make_unique<RawTlsHttpClient>();
         client->ctx = SSL_CTX_new(TLS_client_method());
         if (client->ctx == nullptr) {
             return false;
@@ -1143,13 +1144,13 @@ struct RawTlsHttpClient {
         return SSL_do_handshake(ssl) == 1;
     }
 
-    void resume_from(SSL_SESSION *session) { (void) SSL_set_session(ssl, session); }
+    void resume_from(SSL_SESSION *session) const { (void) SSL_set_session(ssl, session); }
 
     [[nodiscard]] bool reused() const { return SSL_session_reused(ssl) == 1; }
 
     // GET with Connection: close; returns true when the 200 status line came
     // back. Any trailing NewSessionTicket rides the read path on the way.
-    bool get_and_expect_ok() {
+    bool get_and_expect_ok() const {
         static const char kRequest[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         if (SSL_write(ssl, kRequest, static_cast<int>(sizeof(kRequest) - 1)) !=
             static_cast<int>(sizeof(kRequest) - 1)) {

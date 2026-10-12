@@ -17,7 +17,7 @@ inline constexpr unsigned kDeflateLiterals = 256;
 inline constexpr unsigned kDeflateLCodes = kDeflateLiterals + 1 + kDeflateLengthCodes; // 286
 inline constexpr unsigned kDeflateDCodes = 30;
 inline constexpr unsigned kDeflateBCodes = 19;
-inline constexpr unsigned kDeflateHeapSize = 2 * kDeflateLCodes + 1; // 573
+inline constexpr unsigned kDeflateHeapSize = (2 * kDeflateLCodes) + 1; // 573
 inline constexpr unsigned kDeflateMaxBits = 15;
 inline constexpr unsigned kDeflateEndBlock = 256;
 inline constexpr unsigned kDeflateMinMatch = 3;
@@ -60,11 +60,11 @@ constexpr unsigned bi_reverse(unsigned code, int len) noexcept {
 }
 
 // Generate canonical codes for a tree from its bit counts (zlib gen_codes).
-constexpr void gen_codes(DeflateCtData *tree, int max_code, std::uint16_t *bl_count) noexcept {
+constexpr void gen_codes(DeflateCtData *tree, int max_code, const std::uint16_t *bl_count) noexcept {
     std::uint16_t next_code[kDeflateMaxBits + 1] = {};
     unsigned code = 0;
 
-    for (int bits = 1; bits <= static_cast<int>(kDeflateMaxBits); bits++) {
+    for (unsigned bits = 1; bits <= kDeflateMaxBits; bits++) {
         code = (code + bl_count[bits - 1]) << 1;
         next_code[bits] = static_cast<std::uint16_t>(code);
     }
@@ -116,7 +116,7 @@ struct StaticTables {
 
         // Mapping dist (0..32K) -> dist code (0..29).
         int dist = 0;
-        int code = 0;
+        unsigned code = 0;
         for (; code < 16; code++) {
             base_dist[code] = static_cast<std::uint16_t>(dist);
             for (int n = 0; n < (1 << extra_dbits[code]); n++) {
@@ -124,7 +124,7 @@ struct StaticTables {
             }
         }
         dist >>= 7; // from now on, all distances are divided by 128
-        for (; code < static_cast<int>(kDeflateDCodes); code++) {
+        for (; code < kDeflateDCodes; code++) {
             base_dist[code] = static_cast<std::uint16_t>(dist << 7);
             for (int n = 0; n < (1 << (extra_dbits[code] - 7)); n++) {
                 dist_code[256 + dist++] = static_cast<std::uint8_t>(code);
@@ -133,7 +133,7 @@ struct StaticTables {
 
         // Static literal tree bit lengths and canonical codes.
         std::uint16_t bl_count[kDeflateMaxBits + 1] = {};
-        int n = 0;
+        unsigned n = 0;
         while (n <= 143) {
             static_ltree[n++].len = 8;
             bl_count[8]++;
@@ -153,7 +153,7 @@ struct StaticTables {
         gen_codes(static_ltree, kDeflateLCodes + 1, bl_count);
 
         // The static distance tree is trivial.
-        for (n = 0; n < static_cast<int>(kDeflateDCodes); n++) {
+        for (n = 0; n < kDeflateDCodes; n++) {
             static_dtree[n].len = 5;
             static_dtree[n].code = static_cast<std::uint16_t>(bi_reverse(n, 5));
         }
@@ -176,14 +176,21 @@ inline constexpr auto &kDeflateExtraDBits = deflate_tables::kTables.extra_dbits;
 inline constexpr auto &kDeflateExtraBLBits = deflate_tables::kTables.extra_blbits;
 inline constexpr auto &kDeflateBlOrder = deflate_tables::kTables.bl_order;
 
-inline constexpr DeflateStaticTreeDesc kDeflateStaticLDesc{
-        kDeflateStaticLTree, kDeflateExtraLBits, static_cast<int>(kDeflateLiterals) + 1,
-        static_cast<int>(kDeflateLCodes), static_cast<int>(kDeflateMaxBits)};
-inline constexpr DeflateStaticTreeDesc kDeflateStaticDDesc{kDeflateStaticDTree, kDeflateExtraDBits, 0,
-                                                           static_cast<int>(kDeflateDCodes),
-                                                           static_cast<int>(kDeflateMaxBits)};
-inline constexpr DeflateStaticTreeDesc kDeflateStaticBLDesc{nullptr, kDeflateExtraBLBits, 0,
-                                                            static_cast<int>(kDeflateBCodes), 7};
+inline constexpr DeflateStaticTreeDesc kDeflateStaticLDesc{.static_tree = kDeflateStaticLTree,
+                                                           .extra_bits = kDeflateExtraLBits,
+                                                           .extra_base = static_cast<int>(kDeflateLiterals) + 1,
+                                                           .elems = static_cast<int>(kDeflateLCodes),
+                                                           .max_length = static_cast<int>(kDeflateMaxBits)};
+inline constexpr DeflateStaticTreeDesc kDeflateStaticDDesc{.static_tree = kDeflateStaticDTree,
+                                                           .extra_bits = kDeflateExtraDBits,
+                                                           .extra_base = 0,
+                                                           .elems = static_cast<int>(kDeflateDCodes),
+                                                           .max_length = static_cast<int>(kDeflateMaxBits)};
+inline constexpr DeflateStaticTreeDesc kDeflateStaticBLDesc{.static_tree = nullptr,
+                                                            .extra_bits = kDeflateExtraBLBits,
+                                                            .extra_base = 0,
+                                                            .elems = static_cast<int>(kDeflateBCodes),
+                                                            .max_length = 7};
 
 } // namespace fiber::compression
 

@@ -38,7 +38,7 @@ public:
         return true;
     }
 
-    bool await_suspend(std::coroutine_handle<>) noexcept {
+    bool await_suspend(std::coroutine_handle<> /*unused*/) noexcept {
         completed_ = true;
         return false;
     }
@@ -102,7 +102,7 @@ public:
 
     bool await_ready() const noexcept { return false; }
 
-    bool await_suspend(std::coroutine_handle<>) noexcept {
+    bool await_suspend(std::coroutine_handle<> /*unused*/) noexcept {
         completed_ = true;
         return false;
     }
@@ -122,7 +122,7 @@ private:
 class StandardAwaiterOnly {
 public:
     bool await_ready() const noexcept { return true; }
-    void await_suspend(std::coroutine_handle<>) noexcept {}
+    void await_suspend(std::coroutine_handle<> /*unused*/) noexcept {}
     void await_resume() const noexcept {}
 };
 
@@ -161,7 +161,7 @@ public:
     }
 
 private:
-    static void on_detach(fiber::async::WaitAwaiter &) noexcept {}
+    static void on_detach(fiber::async::WaitAwaiter & /*unused*/) noexcept {}
 
     bool *fired_;
     bool *resumed_;
@@ -222,6 +222,7 @@ fiber::async::Task<void> immediate_void_task(bool *started) {
 // failure wake resumes the task.
 fiber::async::Task<int> task_firing_notification(NotifyAwaiter **slot, bool *finished, bool *frame_destroyed) {
     DestructionFlag flag(frame_destroyed);
+    // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage) harness populates slot before spawn
     (*slot)->notify(fiber::common::IoErr::None);
     *finished = true;
     co_return 7;

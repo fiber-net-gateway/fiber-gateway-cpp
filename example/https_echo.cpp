@@ -11,7 +11,7 @@
 #include <string>
 #include <string_view>
 
-#include <signal.h>
+#include <csignal>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -177,7 +177,7 @@ std::optional<std::size_t> parse_query_len(std::string_view query) {
     while (!query.empty()) {
         std::size_t next = query.find('&');
         std::string_view part = next == std::string_view::npos ? query : query.substr(0, next);
-        if (part.substr(0, 4) == "len=") {
+        if (part.starts_with("len=")) {
             std::string_view value_text = part.substr(4);
             if (value_text.empty()) {
                 return std::nullopt;
@@ -221,7 +221,7 @@ fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, co
         auto write_result = co_await exchange.write_all(chunk.data(), write_len, write_len == remaining);
         if (!write_result) {
             std::cout << "write error: " << fiber::common::io_err_name(write_result.error())
-                      << ", remaining=" << remaining << ", write_len=" << write_len << std::endl;
+                      << ", remaining=" << remaining << ", write_len=" << write_len << '\n';
             co_return;
         }
         remaining -= write_len;
@@ -259,18 +259,18 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange, const 
     for (;;) {
         auto read_result = co_await exchange.read_body(4096);
         if (!read_result) {
-            std::cout << "1111 end....." << std::endl;
+            std::cout << "1111 end....." << '\n';
             co_return;
         }
         bool last = read_result->complete();
         auto write_result = co_await exchange.write_all(std::move(*read_result));
         if (!write_result) {
 
-            std::cout << "2222 end....." << std::endl;
+            std::cout << "2222 end....." << '\n';
             co_return;
         }
         if (last) {
-            std::cout << "33333 end....." << std::endl;
+            std::cout << "33333 end....." << '\n';
             co_return;
         }
     }

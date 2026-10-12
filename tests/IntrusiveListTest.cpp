@@ -43,7 +43,7 @@ std::vector<int> collected_over_anchor(fiber::common::IntrusiveListHook &anchor)
 // ownership discipline the assert in ~IntrusiveList enforces.
 
 TEST(IntrusiveListTest, FreshHookIsSelfLinkedAndUnlinked) {
-    TestNode node{1};
+    TestNode node{.value = 1};
     EXPECT_FALSE(node.hook.linked());
     // Unlinked representation is the self-ring: prev/next point at the hook itself.
     EXPECT_EQ(node.hook.prev, &node.hook);
@@ -59,7 +59,7 @@ TEST(IntrusiveListTest, EmptyListHasNullEndpoints) {
 
 TEST(IntrusiveListTest, PushBackIteratesInOrder) {
     TestList list;
-    TestNode a{1}, b{2}, c{3};
+    TestNode a{.value = 1}, b{.value = 2}, c{.value = 3};
     list.push_back(a);
     list.push_back(b);
     list.push_back(c);
@@ -77,7 +77,7 @@ TEST(IntrusiveListTest, PushBackIteratesInOrder) {
 
 TEST(IntrusiveListTest, PushFrontOrdersNewestFirst) {
     TestList list;
-    TestNode a{1}, b{2}, c{3};
+    TestNode a{.value = 1}, b{.value = 2}, c{.value = 3};
     list.push_back(a);
     list.push_front(b);
     list.push_front(c);
@@ -88,7 +88,7 @@ TEST(IntrusiveListTest, PushFrontOrdersNewestFirst) {
 
 TEST(IntrusiveListTest, PushIsIdempotentForLinkedNode) {
     TestList list;
-    TestNode a{1}, b{2};
+    TestNode a{.value = 1}, b{.value = 2};
     list.push_back(a);
     list.push_back(b);
     list.push_back(a);
@@ -98,7 +98,7 @@ TEST(IntrusiveListTest, PushIsIdempotentForLinkedNode) {
 
 TEST(IntrusiveListTest, EraseIsIdempotent) {
     TestList list;
-    TestNode a{1}, b{2}, c{3};
+    TestNode a{.value = 1}, b{.value = 2}, c{.value = 3};
     list.push_back(a);
     list.push_back(b);
     list.push_back(c);
@@ -113,7 +113,7 @@ TEST(IntrusiveListTest, EraseIsIdempotent) {
 
 TEST(IntrusiveListTest, NextOfUnlinkedNodeIsNullptr) {
     TestList list;
-    TestNode a{1}, b{2};
+    TestNode a{.value = 1}, b{.value = 2};
     list.push_back(a);
     list.push_back(b);
     list.erase(b);
@@ -125,7 +125,7 @@ TEST(IntrusiveListTest, NextOfUnlinkedNodeIsNullptr) {
 
 TEST(IntrusiveListTest, InsertAfterPositionsOwner) {
     TestList list;
-    TestNode a{1}, b{2}, c{3}, d{4};
+    TestNode a{.value = 1}, b{.value = 2}, c{.value = 3}, d{.value = 4};
     list.push_back(a);
     list.push_back(b);
     list.push_back(c);
@@ -145,7 +145,7 @@ TEST(IntrusiveListTest, InsertAfterPositionsOwner) {
 
 TEST(IntrusiveListTest, InsertAfterUnlinkedPositionIsNoOp) {
     TestList list;
-    TestNode a{1}, b{2}, d{4};
+    TestNode a{.value = 1}, b{.value = 2}, d{.value = 4};
     list.push_back(a);
     list.push_back(b);
     list.erase(a);
@@ -156,7 +156,7 @@ TEST(IntrusiveListTest, InsertAfterUnlinkedPositionIsNoOp) {
 
 TEST(IntrusiveListTest, EraseDuringIterationWithPreReadNext) {
     TestList list;
-    TestNode a{1}, b{2}, c{3};
+    TestNode a{.value = 1}, b{.value = 2}, c{.value = 3};
     list.push_back(a);
     list.push_back(b);
     list.push_back(c);
@@ -174,7 +174,7 @@ TEST(IntrusiveListTest, EraseDuringIterationWithPreReadNext) {
 
 TEST(IntrusiveListTest, UnlinkSelfDetachesWithoutList) {
     TestList list;
-    TestNode a{1}, b{2};
+    TestNode a{.value = 1}, b{.value = 2};
     list.push_back(a);
     list.push_back(b);
 
@@ -185,9 +185,9 @@ TEST(IntrusiveListTest, UnlinkSelfDetachesWithoutList) {
 
 TEST(IntrusiveListTest, NodeDestructorUnlinksWhileLinked) {
     TestList list;
-    TestNode a{1};
+    TestNode a{.value = 1};
     list.push_back(a);
-    TestNode *heap = new TestNode{9};
+    TestNode *heap = new TestNode{.value = 9};
     list.push_back(*heap);
     EXPECT_EQ(collected(list), (std::vector<int>{1, 9}));
 
@@ -202,7 +202,7 @@ TEST(IntrusiveListTest, HookPrimitivesDriveBareAnchorRing) {
     // lives (e.g. QuicConnection's connection-window waiters): a bare anchor
     // hook driven with insert_before/insert_after/unlink_self.
     fiber::common::IntrusiveListHook anchor{};
-    TestNode a{1}, b{2}, c{3};
+    TestNode a{.value = 1}, b{.value = 2}, c{.value = 3};
 
     // insert_before(anchor) is push_back.
     a.hook.insert_before(anchor);
@@ -225,7 +225,7 @@ TEST(IntrusiveListTest, HookPrimitivesDriveBareAnchorRing) {
 
 TEST(IntrusiveListTest, SpliceBackAppendsInOrderAndEmptiesSource) {
     TestList dst, src;
-    TestNode a{1}, b{2}, c{3}, d{4};
+    TestNode a{.value = 1}, b{.value = 2}, c{.value = 3}, d{.value = 4};
     dst.push_back(a);
     dst.push_back(b);
     src.push_back(c);
@@ -247,7 +247,7 @@ TEST(IntrusiveListTest, SpliceBackAppendsInOrderAndEmptiesSource) {
 
 TEST(IntrusiveListTest, SpliceBackIntoEmptyAndFromEmpty) {
     TestList dst, src;
-    TestNode a{1}, b{2};
+    TestNode a{.value = 1}, b{.value = 2};
 
     // Empty source is a no-op.
     dst.push_back(a);
@@ -270,13 +270,83 @@ TEST(IntrusiveListTest, SpliceBackIntoEmptyAndFromEmpty) {
 }
 
 TEST(IntrusiveListDeathTest, ListDestructorAssertsWhenNotEmpty) {
-    TestNode node{1};
+    TestNode node{.value = 1};
     EXPECT_DEATH(
             {
                 TestList list;
                 list.push_back(node);
             },
             "FIBER_ASSERT failed: empty");
+}
+
+TEST(IntrusiveListTest, PopEndsDetachNodesAndAllowReinsertion) {
+    TestList list;
+    TestNode a{1}, b{2}, c{3};
+    EXPECT_EQ(list.pop_front(), nullptr);
+    EXPECT_EQ(list.pop_back(), nullptr);
+    list.push_back(a);
+    list.push_back(b);
+    list.push_back(c);
+
+    EXPECT_EQ(list.pop_front(), &a);
+    EXPECT_FALSE(a.hook.linked());
+    EXPECT_EQ(list.front(), &b);
+    EXPECT_EQ(list.prev_of(b), nullptr);
+    EXPECT_EQ(list.pop_back(), &c);
+    EXPECT_FALSE(c.hook.linked());
+    EXPECT_EQ(list.next_of(b), nullptr);
+    EXPECT_EQ(list.pop_back(), &b);
+    EXPECT_TRUE(list.empty());
+    list.push_front(a);
+    EXPECT_EQ(list.pop_front(), &a);
+    EXPECT_TRUE(list.empty());
+    list.push_back(c);
+    EXPECT_EQ(collected(list), (std::vector<int>{3}));
+}
+
+TEST(IntrusiveListTest, SpliceFrontPreservesOrderAndTransfersMembership) {
+    TestList dst, src;
+    TestNode a{1}, b{2}, c{3}, d{4};
+    dst.push_back(c);
+    dst.push_back(d);
+    src.push_back(a);
+    src.push_back(b);
+
+    dst.splice_front(src);
+    EXPECT_TRUE(src.empty());
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2, 3, 4}));
+    EXPECT_EQ(dst.front(), &a);
+    EXPECT_EQ(dst.back(), &d);
+    EXPECT_EQ(dst.prev_of(a), nullptr);
+    EXPECT_EQ(dst.prev_of(c), &b);
+    EXPECT_EQ(dst.prev_of(b), &a);
+    EXPECT_EQ(dst.next_of(d), nullptr);
+    dst.erase(b);
+    src.push_back(b);
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 3, 4}));
+    EXPECT_EQ(collected(src), (std::vector<int>{2}));
+}
+
+TEST(IntrusiveListTest, SpliceFrontHandlesEmptyListsAndSelfSplice) {
+    TestList dst, src;
+    TestNode a{1}, b{2};
+    dst.splice_front(src);
+    EXPECT_TRUE(dst.empty());
+    src.push_back(a);
+    src.push_back(b);
+    dst.splice_front(src);
+    EXPECT_TRUE(src.empty());
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2}));
+    EXPECT_EQ(dst.back(), &b);
+    EXPECT_EQ(dst.prev_of(a), nullptr);
+    EXPECT_EQ(dst.next_of(b), nullptr);
+
+    dst.splice_front(src);
+    dst.splice_front(dst);
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2}));
+    EXPECT_EQ(dst.pop_back(), &b);
+    EXPECT_EQ(dst.pop_front(), &a);
+    EXPECT_TRUE(dst.empty());
 }
 
 } // namespace

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#include <utility>
 
 #include <fiber/common/Assert.h>
 #include <fiber/event/EventLoopGroup.h>
@@ -65,7 +66,7 @@ void EventLoop::drain_wakeup() {
     std::uint64_t value = 0;
     for (;;) {
         ssize_t rc = ::read(event_fd_, &value, sizeof(value));
-        if (rc == static_cast<ssize_t>(sizeof(value))) {
+        if (std::cmp_equal(rc, sizeof(value))) {
             continue;
         }
         if (rc < 0 && errno == EINTR) {
@@ -203,7 +204,7 @@ void EventLoop::cancel_quiesced(TimerEntry &entry) {
     entry.in_heap_ = false;
 }
 
-void EventLoop::cancel(DeferEntry &entry) {
+void EventLoop::cancel(DeferEntry &entry) const {
     FIBER_ASSERT(in_loop());
     // The entry may sit in either the local or the next queue; the ring hook
     // unlinks without knowing which.

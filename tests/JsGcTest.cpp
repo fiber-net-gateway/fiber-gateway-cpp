@@ -55,14 +55,14 @@ bool copy_utf16_units(char16_t *dst, std::size_t len, void *ctx) noexcept {
 TEST(JsGcTest, StatsStartEmptyAndExcludeRootHandleStorage) {
     GcHeap heap;
     const auto initial = heap.stats();
-    EXPECT_EQ(initial.allocated_bytes_total, 0u);
-    EXPECT_EQ(initial.freed_bytes_total, 0u);
-    EXPECT_EQ(initial.allocation_count, 0u);
-    EXPECT_EQ(initial.free_count, 0u);
-    EXPECT_EQ(initial.current_bytes, 0u);
-    EXPECT_EQ(initial.peak_bytes, 0u);
-    EXPECT_EQ(initial.gc_count, 0u);
-    EXPECT_EQ(initial.gc_freed_bytes_total, 0u);
+    EXPECT_EQ(initial.allocated_bytes_total, 0U);
+    EXPECT_EQ(initial.freed_bytes_total, 0U);
+    EXPECT_EQ(initial.allocation_count, 0U);
+    EXPECT_EQ(initial.free_count, 0U);
+    EXPECT_EQ(initial.current_bytes, 0U);
+    EXPECT_EQ(initial.peak_bytes, 0U);
+    EXPECT_EQ(initial.gc_count, 0U);
+    EXPECT_EQ(initial.gc_freed_bytes_total, 0U);
 
     {
         GcHeap::LocalMark mark(heap);
@@ -73,23 +73,23 @@ TEST(JsGcTest, StatsStartEmptyAndExcludeRootHandleStorage) {
     }
     heap.collect();
     const auto after = heap.stats();
-    EXPECT_EQ(after.allocated_bytes_total, 0u);
-    EXPECT_EQ(after.freed_bytes_total, 0u);
-    EXPECT_EQ(after.allocation_count, 0u);
-    EXPECT_EQ(after.free_count, 0u);
-    EXPECT_EQ(after.current_bytes, 0u);
-    EXPECT_EQ(after.peak_bytes, 0u);
-    EXPECT_EQ(after.gc_count, 1u);
-    EXPECT_EQ(after.gc_freed_bytes_total, 0u);
-    EXPECT_EQ(initial.gc_count, 0u);
+    EXPECT_EQ(after.allocated_bytes_total, 0U);
+    EXPECT_EQ(after.freed_bytes_total, 0U);
+    EXPECT_EQ(after.allocation_count, 0U);
+    EXPECT_EQ(after.free_count, 0U);
+    EXPECT_EQ(after.current_bytes, 0U);
+    EXPECT_EQ(after.peak_bytes, 0U);
+    EXPECT_EQ(after.gc_count, 1U);
+    EXPECT_EQ(after.gc_freed_bytes_total, 0U);
+    EXPECT_EQ(initial.gc_count, 0U);
 }
 
 TEST(JsGcTest, StatsCountObjectStorageAndCompletedCollections) {
     GcHeap heap;
     constexpr std::uint8_t payload[] = {1, 2, 3};
     const std::size_t expected_bytes = sizeof(GcString) + 4 + sizeof(fiber::script::GcBinary) + sizeof(payload) +
-                                       sizeof(GcArray) + 4 * sizeof(JsValue) + sizeof(GcObject) +
-                                       2 * sizeof(fiber::script::GcObjectEntry) + 8 * sizeof(std::int32_t);
+                                       sizeof(GcArray) + (4 * sizeof(JsValue)) + sizeof(GcObject) +
+                                       (2 * sizeof(fiber::script::GcObjectEntry)) + (8 * sizeof(std::int32_t));
     {
         GcHeap::NoGcScope no_gc(heap);
         ASSERT_NE(fiber::script::gc_new_string(&heap, "abc", 3), nullptr);
@@ -99,31 +99,31 @@ TEST(JsGcTest, StatsCountObjectStorageAndCompletedCollections) {
     }
     const auto allocated = heap.stats();
     EXPECT_EQ(allocated.allocated_bytes_total, expected_bytes);
-    EXPECT_EQ(allocated.freed_bytes_total, 0u);
-    EXPECT_EQ(allocated.allocation_count, 8u);
-    EXPECT_EQ(allocated.free_count, 0u);
+    EXPECT_EQ(allocated.freed_bytes_total, 0U);
+    EXPECT_EQ(allocated.allocation_count, 8U);
+    EXPECT_EQ(allocated.free_count, 0U);
     EXPECT_EQ(allocated.current_bytes, expected_bytes);
     EXPECT_EQ(allocated.current_bytes, heap.bytes);
     EXPECT_EQ(allocated.peak_bytes, expected_bytes);
-    EXPECT_EQ(allocated.gc_count, 0u);
-    EXPECT_EQ(allocated.gc_freed_bytes_total, 0u);
+    EXPECT_EQ(allocated.gc_count, 0U);
+    EXPECT_EQ(allocated.gc_freed_bytes_total, 0U);
     ASSERT_NE(heap.string_intern_buckets, nullptr);
 
     // Newly linked objects survive their first collection even without roots.
-    EXPECT_EQ(heap.collect().freed, 0u);
-    EXPECT_EQ(heap.stats().gc_count, 1u);
-    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0u);
+    EXPECT_EQ(heap.collect().freed, 0U);
+    EXPECT_EQ(heap.stats().gc_count, 1U);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0U);
     const auto collected = heap.collect();
-    EXPECT_EQ(collected.total, 0u);
+    EXPECT_EQ(collected.total, 0U);
     EXPECT_EQ(collected.freed, expected_bytes);
     const auto after = heap.stats();
     EXPECT_EQ(after.allocated_bytes_total, expected_bytes);
     EXPECT_EQ(after.freed_bytes_total, expected_bytes);
-    EXPECT_EQ(after.allocation_count, 8u);
-    EXPECT_EQ(after.free_count, 8u);
-    EXPECT_EQ(after.current_bytes, 0u);
+    EXPECT_EQ(after.allocation_count, 8U);
+    EXPECT_EQ(after.free_count, 8U);
+    EXPECT_EQ(after.current_bytes, 0U);
     EXPECT_EQ(after.peak_bytes, expected_bytes);
-    EXPECT_EQ(after.gc_count, 2u);
+    EXPECT_EQ(after.gc_count, 2U);
     EXPECT_EQ(after.gc_freed_bytes_total, expected_bytes);
     EXPECT_EQ(heap.string_intern_buckets, nullptr);
 }
@@ -142,21 +142,21 @@ TEST(JsGcTest, StatsSeparateArrayGrowthReleasesFromGcReclamation) {
     const auto grown = heap.stats();
     EXPECT_EQ(grown.allocated_bytes_total, allocated_bytes);
     EXPECT_EQ(grown.freed_bytes_total, old_storage);
-    EXPECT_EQ(grown.allocation_count, 3u);
-    EXPECT_EQ(grown.free_count, 1u);
+    EXPECT_EQ(grown.allocation_count, 3U);
+    EXPECT_EQ(grown.free_count, 1U);
     EXPECT_EQ(grown.current_bytes, sizeof(GcArray) + new_storage);
     // Both old and new storage are present before reserve releases the old one.
     EXPECT_EQ(grown.peak_bytes, allocated_bytes);
-    EXPECT_EQ(grown.gc_count, 0u);
-    EXPECT_EQ(grown.gc_freed_bytes_total, 0u);
+    EXPECT_EQ(grown.gc_count, 0U);
+    EXPECT_EQ(grown.gc_freed_bytes_total, 0U);
 
     heap.collect();
     heap.collect();
     const auto after = heap.stats();
     EXPECT_EQ(after.allocated_bytes_total, allocated_bytes);
     EXPECT_EQ(after.freed_bytes_total, allocated_bytes);
-    EXPECT_EQ(after.free_count, 3u);
-    EXPECT_EQ(after.current_bytes, 0u);
+    EXPECT_EQ(after.free_count, 3U);
+    EXPECT_EQ(after.current_bytes, 0U);
     EXPECT_EQ(after.peak_bytes, grown.peak_bytes);
     EXPECT_EQ(after.gc_freed_bytes_total, grown.current_bytes);
 }
@@ -172,12 +172,12 @@ TEST(JsGcTest, StatsIncludeConstructionRollbackBeforeLinking) {
     const auto after = heap.stats();
     EXPECT_EQ(after.allocated_bytes_total, sizeof(fiber::script::GcBinary));
     EXPECT_EQ(after.freed_bytes_total, sizeof(fiber::script::GcBinary));
-    EXPECT_EQ(after.allocation_count, 1u);
-    EXPECT_EQ(after.free_count, 1u);
-    EXPECT_EQ(after.current_bytes, 0u);
-    EXPECT_EQ(after.peak_bytes, 0u);
-    EXPECT_EQ(after.gc_count, 0u);
-    EXPECT_EQ(after.gc_freed_bytes_total, 0u);
+    EXPECT_EQ(after.allocation_count, 1U);
+    EXPECT_EQ(after.free_count, 1U);
+    EXPECT_EQ(after.current_bytes, 0U);
+    EXPECT_EQ(after.peak_bytes, 0U);
+    EXPECT_EQ(after.gc_count, 0U);
+    EXPECT_EQ(after.gc_freed_bytes_total, 0U);
     EXPECT_EQ(heap.head, nullptr);
 }
 
@@ -189,7 +189,7 @@ TEST(JsGcTest, StatsDistinguishInternHitsFromDuplicateStorageReleases) {
         auto *first = fiber::script::gc_new_string(&heap, "abc", 3);
         ASSERT_NE(first, nullptr);
         ASSERT_EQ(fiber::script::gc_new_string(&heap, "abc", 3), first);
-        EXPECT_EQ(heap.stats().allocation_count, 1u);
+        EXPECT_EQ(heap.stats().allocation_count, 1U);
         EXPECT_EQ(heap.stats().allocated_bytes_total, string_bytes);
 
         auto *duplicate = fiber::script::gc_new_string_wtf8_uninit(&heap, 3, 3, true);
@@ -200,17 +200,17 @@ TEST(JsGcTest, StatsDistinguishInternHitsFromDuplicateStorageReleases) {
     const auto deduplicated = heap.stats();
     EXPECT_EQ(deduplicated.allocated_bytes_total, 2 * string_bytes);
     EXPECT_EQ(deduplicated.freed_bytes_total, string_bytes);
-    EXPECT_EQ(deduplicated.allocation_count, 2u);
-    EXPECT_EQ(deduplicated.free_count, 1u);
+    EXPECT_EQ(deduplicated.allocation_count, 2U);
+    EXPECT_EQ(deduplicated.free_count, 1U);
     EXPECT_EQ(deduplicated.current_bytes, string_bytes);
     EXPECT_EQ(deduplicated.peak_bytes, 2 * string_bytes);
-    EXPECT_EQ(deduplicated.gc_count, 0u);
-    EXPECT_EQ(deduplicated.gc_freed_bytes_total, 0u);
+    EXPECT_EQ(deduplicated.gc_count, 0U);
+    EXPECT_EQ(deduplicated.gc_freed_bytes_total, 0U);
 
     heap.collect();
     heap.collect();
     EXPECT_EQ(heap.stats().freed_bytes_total, 2 * string_bytes);
-    EXPECT_EQ(heap.stats().free_count, 2u);
+    EXPECT_EQ(heap.stats().free_count, 2U);
     EXPECT_EQ(heap.stats().gc_freed_bytes_total, string_bytes);
 }
 
@@ -249,7 +249,7 @@ TEST(JsGcTest, ShortStringsAreInternedInHeap) {
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
     EXPECT_EQ(first, second);
-    EXPECT_EQ(heap.string_intern_size, 1u);
+    EXPECT_EQ(heap.string_intern_size, 1U);
 }
 
 TEST(JsGcTest, LongStringsBypassInternCache) {
@@ -262,14 +262,14 @@ TEST(JsGcTest, LongStringsBypassInternCache) {
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
     EXPECT_NE(first, second);
-    EXPECT_EQ(heap.string_intern_size, 0u);
+    EXPECT_EQ(heap.string_intern_size, 0U);
 }
 
 TEST(JsGcTest, InternCacheUsesStringCodeUnitSemantics) {
     GcHeap heap;
     GcHeap::NoGcScope no_gc(heap);
 
-    const std::uint8_t byte = 0xE9u;
+    const std::uint8_t byte = 0xE9U;
     const char utf8[] = {static_cast<char>(0xC3), static_cast<char>(0xA9)};
     GcString *byte_str = fiber::script::gc_new_string_bytes(&heap, &byte, 1);
     GcString *utf8_str = fiber::script::gc_new_string(&heap, utf8, sizeof(utf8));
@@ -299,13 +299,13 @@ TEST(JsGcTest, InternCacheDropsSweptStrings) {
         GcHeap::NoGcScope no_gc(heap);
         GcString *str = fiber::script::gc_new_string(&heap, "gone", 4);
         ASSERT_NE(str, nullptr);
-        EXPECT_EQ(heap.string_intern_size, 1u);
+        EXPECT_EQ(heap.string_intern_size, 1U);
     }
 
     heap.collect();
     heap.collect();
-    EXPECT_EQ(heap.bytes, 0u);
-    EXPECT_EQ(heap.string_intern_size, 0u);
+    EXPECT_EQ(heap.bytes, 0U);
+    EXPECT_EQ(heap.string_intern_size, 0U);
     EXPECT_EQ(heap.string_intern_buckets, nullptr);
 
     {
@@ -313,7 +313,7 @@ TEST(JsGcTest, InternCacheDropsSweptStrings) {
         GcString *fresh = fiber::script::gc_new_string(&heap, "gone", 4);
         ASSERT_NE(fresh, nullptr);
         EXPECT_EQ(to_utf8(fresh), "gone");
-        EXPECT_EQ(heap.string_intern_size, 1u);
+        EXPECT_EQ(heap.string_intern_size, 1U);
     }
 }
 
@@ -328,7 +328,7 @@ TEST(JsGcTest, InternHitRefreshesFirstCollectProtection) {
     }
 
     heap.collect();
-    ASSERT_EQ(heap.string_intern_size, 1u);
+    ASSERT_EQ(heap.string_intern_size, 1U);
 
     {
         GcHeap::NoGcScope no_gc(heap);
@@ -338,9 +338,9 @@ TEST(JsGcTest, InternHitRefreshesFirstCollectProtection) {
     }
 
     heap.collect();
-    EXPECT_EQ(heap.string_intern_size, 1u);
+    EXPECT_EQ(heap.string_intern_size, 1U);
     heap.collect();
-    EXPECT_EQ(heap.string_intern_size, 0u);
+    EXPECT_EQ(heap.string_intern_size, 0U);
 }
 
 TEST(JsGcTest, IteratorMutationIsDetectedWithoutAllocation) {
@@ -368,7 +368,7 @@ TEST(JsGcTest, IteratorMutationIsDetectedWithoutAllocation) {
 
     // Fail-fast: mutation is detected and advancing never allocates (no snapshot).
     EXPECT_EQ(fiber::script::gc_iterator_next(&heap, iter), GcIterStep::Mutated);
-    EXPECT_EQ(heap.bytes - before_mutation, 0u);
+    EXPECT_EQ(heap.bytes - before_mutation, 0U);
 }
 
 class SingleValueSource final : public GcRootSource {
@@ -406,9 +406,9 @@ TEST(JsGcTest, RootSourcesMarkValuesWithoutTemporaryRootVector) {
     EXPECT_EQ(js_value_type(rooted), JsNodeType::String);
     EXPECT_EQ(js_value_heap_header(rooted), &live->hdr);
     EXPECT_LT(after_collect, before_collect);
-    EXPECT_GT(after_collect, 0u);
+    EXPECT_GT(after_collect, 0U);
     // The live set is stable: a follow-up collect reclaims nothing.
-    EXPECT_EQ(heap.collect().freed, 0u);
+    EXPECT_EQ(heap.collect().freed, 0U);
 }
 
 TEST(JsGcTest, GcHeapGlobalSlotsAreCollectedAsRoots) {
@@ -433,10 +433,10 @@ TEST(JsGcTest, GcHeapGlobalSlotsAreCollectedAsRoots) {
 
     EXPECT_EQ(js_value_heap_header(*root), &live->hdr);
     EXPECT_LT(heap.bytes, before_collect);
-    EXPECT_GT(heap.bytes, 0u);
+    EXPECT_GT(heap.bytes, 0U);
     // Freshly allocated objects are pre-marked, so the unreachable one survives the first collect
     // and is only reclaimed on the second.
-    EXPECT_GT(second.freed, 0u);
+    EXPECT_GT(second.freed, 0U);
 }
 
 TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
@@ -457,12 +457,12 @@ TEST(JsGcTest, GcHeapLocalMarkReleasesLocalRoots) {
 
         heap.collect();
         EXPECT_EQ(js_value_heap_header(*root), &live->hdr);
-        EXPECT_GT(heap.bytes, 0u);
+        EXPECT_GT(heap.bytes, 0U);
     }
 
     // Local roots are released when LocalMark drops; a collect now sweeps the live string.
     heap.collect();
-    EXPECT_EQ(heap.bytes, 0u);
+    EXPECT_EQ(heap.bytes, 0U);
 }
 
 TEST(JsGcTest, NewStringSurvivesFirstCollectionWithTailStorage) {
@@ -479,8 +479,8 @@ TEST(JsGcTest, NewStringSurvivesFirstCollectionWithTailStorage) {
     ASSERT_GT(heap.bytes, payload.size());
 
     auto second = heap.collect();
-    EXPECT_GT(second.freed, 0u);
-    EXPECT_EQ(heap.bytes, 0u);
+    EXPECT_GT(second.freed, 0U);
+    EXPECT_EQ(heap.bytes, 0U);
 }
 
 TEST(JsGcTest, NoGcScopeDefersThresholdCollectionUntilExit) {
@@ -493,7 +493,7 @@ TEST(JsGcTest, NoGcScopeDefersThresholdCollectionUntilExit) {
     }
     heap.collect();
     std::size_t old_bytes = heap.bytes;
-    ASSERT_GT(old_bytes, 0u);
+    ASSERT_GT(old_bytes, 0U);
 
     heap.threshold = 1;
     std::size_t during_scope = 0;
@@ -509,7 +509,7 @@ TEST(JsGcTest, NoGcScopeDefersThresholdCollectionUntilExit) {
 
     EXPECT_FALSE(heap.no_gc_active());
     EXPECT_LT(heap.bytes, during_scope);
-    EXPECT_GT(heap.bytes, 0u);
+    EXPECT_GT(heap.bytes, 0U);
 }
 
 TEST(JsGcTest, NestedNoGcScopeCollectsOnlyAfterOuterExit) {
@@ -521,9 +521,9 @@ TEST(JsGcTest, NestedNoGcScopeCollectsOnlyAfterOuterExit) {
         ASSERT_NE(garbage, nullptr);
     }
     heap.collect();
-    ASSERT_EQ(heap.stats().gc_count, 1u);
+    ASSERT_EQ(heap.stats().gc_count, 1U);
     std::size_t old_bytes = heap.bytes;
-    ASSERT_GT(old_bytes, 0u);
+    ASSERT_GT(old_bytes, 0U);
 
     heap.threshold = 1;
     std::size_t after_inner_exit = 0;
@@ -535,16 +535,16 @@ TEST(JsGcTest, NestedNoGcScopeCollectsOnlyAfterOuterExit) {
             ASSERT_NE(fresh, nullptr);
         }
         EXPECT_TRUE(heap.no_gc_active());
-        EXPECT_EQ(heap.stats().gc_count, 1u);
+        EXPECT_EQ(heap.stats().gc_count, 1U);
         after_inner_exit = heap.bytes;
         EXPECT_GT(after_inner_exit, old_bytes);
     }
 
     EXPECT_FALSE(heap.no_gc_active());
-    EXPECT_EQ(heap.stats().gc_count, 2u);
+    EXPECT_EQ(heap.stats().gc_count, 2U);
     EXPECT_EQ(heap.stats().gc_freed_bytes_total, old_bytes);
     EXPECT_LT(heap.bytes, after_inner_exit);
-    EXPECT_GT(heap.bytes, 0u);
+    EXPECT_GT(heap.bytes, 0U);
 }
 
 TEST(JsGcTest, NoGcScopeDefersExplicitCollectUntilExit) {
@@ -556,24 +556,24 @@ TEST(JsGcTest, NoGcScopeDefersExplicitCollectUntilExit) {
         ASSERT_NE(garbage, nullptr);
     }
     heap.collect();
-    ASSERT_EQ(heap.stats().gc_count, 1u);
+    ASSERT_EQ(heap.stats().gc_count, 1U);
     std::size_t before_scope = heap.bytes;
-    ASSERT_GT(before_scope, 0u);
+    ASSERT_GT(before_scope, 0U);
 
     {
         GcHeap::NoGcScope no_gc(heap);
         auto stats = heap.collect();
         EXPECT_EQ(stats.total, before_scope);
-        EXPECT_EQ(stats.freed, 0u);
+        EXPECT_EQ(stats.freed, 0U);
         EXPECT_EQ(heap.bytes, before_scope);
-        EXPECT_EQ(heap.stats().gc_count, 1u);
-        EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0u);
+        EXPECT_EQ(heap.stats().gc_count, 1U);
+        EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0U);
         heap.collect();
-        EXPECT_EQ(heap.stats().gc_count, 1u);
+        EXPECT_EQ(heap.stats().gc_count, 1U);
     }
 
-    EXPECT_EQ(heap.bytes, 0u);
-    EXPECT_EQ(heap.stats().gc_count, 2u);
+    EXPECT_EQ(heap.bytes, 0U);
+    EXPECT_EQ(heap.stats().gc_count, 2U);
     EXPECT_EQ(heap.stats().gc_freed_bytes_total, before_scope);
 }
 
@@ -594,17 +594,17 @@ TEST(JsGcTest, NoGcScopeDeferCollectSkipsExitCollection) {
     }
 
     EXPECT_FALSE(heap.no_gc_active());
-    EXPECT_EQ(heap.threshold, 1u);
+    EXPECT_EQ(heap.threshold, 1U);
     EXPECT_EQ(heap.bytes, bytes_in_scope);
-    EXPECT_EQ(heap.stats().gc_count, 0u);
-    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0u);
+    EXPECT_EQ(heap.stats().gc_count, 0U);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0U);
 
     // The dropped request does not linger: a later explicit collect still runs
     // and raises the threshold.
     heap.collect();
-    EXPECT_GE(heap.threshold, 1u << 20);
-    EXPECT_EQ(heap.stats().gc_count, 1u);
-    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0u);
+    EXPECT_GE(heap.threshold, 1U << 20);
+    EXPECT_EQ(heap.stats().gc_count, 1U);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0U);
 }
 
 TEST(JsGcTest, ValueApiBuildsObjectWithNativeKeyUnderLowThreshold) {
@@ -781,8 +781,8 @@ TEST(JsGcTest, NewStringStoresCanonicalWtf8) {
 
     GcString *ascii = fiber::script::gc_new_string(&heap, "abc", 3);
     ASSERT_NE(ascii, nullptr);
-    EXPECT_EQ(ascii->utf16_len, 3u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(ascii), 3u);
+    EXPECT_EQ(ascii->utf16_len, 3U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(ascii), 3U);
     EXPECT_TRUE(fiber::script::gc_string_is_ascii(ascii));
     EXPECT_EQ(std::string_view(fiber::script::gc_string_wtf8_data(ascii), 3), "abc");
     EXPECT_EQ(to_utf8(ascii), "abc");
@@ -790,8 +790,8 @@ TEST(JsGcTest, NewStringStoresCanonicalWtf8) {
     const char latin1[] = {static_cast<char>(0xC3), static_cast<char>(0xA9)};
     GcString *latin1_str = fiber::script::gc_new_string(&heap, latin1, sizeof(latin1));
     ASSERT_NE(latin1_str, nullptr);
-    EXPECT_EQ(latin1_str->utf16_len, 1u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(latin1_str), 2u);
+    EXPECT_EQ(latin1_str->utf16_len, 1U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(latin1_str), 2U);
     EXPECT_FALSE(fiber::script::gc_string_is_ascii(latin1_str));
     EXPECT_EQ(std::string_view(fiber::script::gc_string_wtf8_data(latin1_str), 2),
               std::string_view(latin1, sizeof(latin1)));
@@ -801,8 +801,8 @@ TEST(JsGcTest, NewStringStoresCanonicalWtf8) {
                           static_cast<char>(0x80)};
     GcString *emoji_str = fiber::script::gc_new_string(&heap, emoji, sizeof(emoji));
     ASSERT_NE(emoji_str, nullptr);
-    EXPECT_EQ(emoji_str->utf16_len, 2u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(emoji_str), 4u);
+    EXPECT_EQ(emoji_str->utf16_len, 2U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(emoji_str), 4U);
     EXPECT_EQ(std::string_view(fiber::script::gc_string_wtf8_data(emoji_str), 4),
               std::string_view(emoji, sizeof(emoji)));
     EXPECT_EQ(to_utf8(emoji_str), std::string(emoji, sizeof(emoji)));
@@ -810,8 +810,8 @@ TEST(JsGcTest, NewStringStoresCanonicalWtf8) {
     const char embedded_null[] = {'a', '\0', 'b'};
     GcString *with_null = fiber::script::gc_new_string(&heap, embedded_null, sizeof(embedded_null));
     ASSERT_NE(with_null, nullptr);
-    EXPECT_EQ(with_null->utf16_len, 3u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(with_null), 3u);
+    EXPECT_EQ(with_null->utf16_len, 3U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(with_null), 3U);
     EXPECT_EQ(to_utf8(with_null), std::string(embedded_null, sizeof(embedded_null)));
 }
 
@@ -825,10 +825,10 @@ TEST(JsGcTest, Utf16SubstringCanSplitSurrogatePair) {
     GcString *low = fiber::script::gc_new_string_substring_utf16(&heap, emoji, 1, 2);
     ASSERT_NE(high, nullptr);
     ASSERT_NE(low, nullptr);
-    EXPECT_EQ(high->utf16_len, 1u);
-    EXPECT_EQ(low->utf16_len, 1u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(high), 3u);
-    EXPECT_EQ(fiber::script::gc_string_byte_len(low), 3u);
+    EXPECT_EQ(high->utf16_len, 1U);
+    EXPECT_EQ(low->utf16_len, 1U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(high), 3U);
+    EXPECT_EQ(fiber::script::gc_string_byte_len(low), 3U);
     EXPECT_FALSE(fiber::script::gc_string_can_encode_utf8(high));
     EXPECT_FALSE(fiber::script::gc_string_can_encode_utf8(low));
 
@@ -871,7 +871,7 @@ TEST(JsGcTest, StringUtf8CursorPreservesCodePointWhenBufferIsTooSmall) {
     GcHeap heap;
     GcHeap::NoGcScope no_gc(heap);
 
-    const std::uint8_t byte = 0xE9u;
+    const std::uint8_t byte = 0xE9U;
     GcString *str = fiber::script::gc_new_string_bytes(&heap, &byte, 1);
     ASSERT_NE(str, nullptr);
 
@@ -880,16 +880,16 @@ TEST(JsGcTest, StringUtf8CursorPreservesCodePointWhenBufferIsTooSmall) {
     auto result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = 1},
                                                    GcStringUtf8Boundary::PreserveCodePoint);
     EXPECT_EQ(result.status, GcStringUtf8Status::NeedMore);
-    EXPECT_EQ(result.written, 0u);
-    EXPECT_EQ(result.needed, 2u);
-    EXPECT_EQ(cursor.index, 0u);
+    EXPECT_EQ(result.written, 0U);
+    EXPECT_EQ(result.needed, 2U);
+    EXPECT_EQ(cursor.index, 0U);
 
     result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = sizeof(buf)},
                                               GcStringUtf8Boundary::PreserveCodePoint);
     EXPECT_EQ(result.status, GcStringUtf8Status::Done);
-    EXPECT_EQ(result.written, 2u);
-    EXPECT_EQ(static_cast<unsigned char>(buf[0]), 0xC3u);
-    EXPECT_EQ(static_cast<unsigned char>(buf[1]), 0xA9u);
+    EXPECT_EQ(result.written, 2U);
+    EXPECT_EQ(static_cast<unsigned char>(buf[0]), 0xC3U);
+    EXPECT_EQ(static_cast<unsigned char>(buf[1]), 0xA9U);
 }
 
 TEST(JsGcTest, StringUtf8CursorCanSplitCodePointWhenAllowed) {
@@ -905,17 +905,17 @@ TEST(JsGcTest, StringUtf8CursorCanSplitCodePointWhenAllowed) {
     auto result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = first, .capacity = 2},
                                                    GcStringUtf8Boundary::AllowSplitCodePoint);
     EXPECT_EQ(result.status, GcStringUtf8Status::NeedMore);
-    EXPECT_EQ(result.written, 2u);
-    EXPECT_EQ(result.needed, 1u);
-    EXPECT_EQ(static_cast<unsigned char>(first[0]), 0xE4u);
-    EXPECT_EQ(static_cast<unsigned char>(first[1]), 0xB8u);
+    EXPECT_EQ(result.written, 2U);
+    EXPECT_EQ(result.needed, 1U);
+    EXPECT_EQ(static_cast<unsigned char>(first[0]), 0xE4U);
+    EXPECT_EQ(static_cast<unsigned char>(first[1]), 0xB8U);
 
     char second = 0;
     result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = &second, .capacity = 1},
                                               GcStringUtf8Boundary::AllowSplitCodePoint);
     EXPECT_EQ(result.status, GcStringUtf8Status::Done);
-    EXPECT_EQ(result.written, 1u);
-    EXPECT_EQ(static_cast<unsigned char>(second), 0xADu);
+    EXPECT_EQ(result.written, 1U);
+    EXPECT_EQ(static_cast<unsigned char>(second), 0xADU);
 }
 
 TEST(JsGcTest, StringUtf8CursorPreservesSurrogatePair) {
@@ -931,18 +931,18 @@ TEST(JsGcTest, StringUtf8CursorPreservesSurrogatePair) {
     auto result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = 3},
                                                    GcStringUtf8Boundary::PreserveCodePoint);
     EXPECT_EQ(result.status, GcStringUtf8Status::NeedMore);
-    EXPECT_EQ(result.written, 0u);
-    EXPECT_EQ(result.needed, 4u);
-    EXPECT_EQ(cursor.index, 0u);
+    EXPECT_EQ(result.written, 0U);
+    EXPECT_EQ(result.needed, 4U);
+    EXPECT_EQ(cursor.index, 0U);
 
     result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = sizeof(buf)},
                                               GcStringUtf8Boundary::PreserveCodePoint);
     EXPECT_EQ(result.status, GcStringUtf8Status::Done);
-    EXPECT_EQ(result.written, 4u);
-    EXPECT_EQ(static_cast<unsigned char>(buf[0]), 0xF0u);
-    EXPECT_EQ(static_cast<unsigned char>(buf[1]), 0x9Fu);
-    EXPECT_EQ(static_cast<unsigned char>(buf[2]), 0x98u);
-    EXPECT_EQ(static_cast<unsigned char>(buf[3]), 0x80u);
+    EXPECT_EQ(result.written, 4U);
+    EXPECT_EQ(static_cast<unsigned char>(buf[0]), 0xF0U);
+    EXPECT_EQ(static_cast<unsigned char>(buf[1]), 0x9FU);
+    EXPECT_EQ(static_cast<unsigned char>(buf[2]), 0x98U);
+    EXPECT_EQ(static_cast<unsigned char>(buf[3]), 0x80U);
 }
 
 TEST(JsGcTest, StringUtf8CursorRejectsMalformedUtf16) {
@@ -959,7 +959,7 @@ TEST(JsGcTest, StringUtf8CursorRejectsMalformedUtf16) {
     auto result = fiber::script::gc_string_to_utf8(str, cursor, GcStringUtf8Buffer{.ptr = buf, .capacity = sizeof(buf)},
                                                    GcStringUtf8Boundary::PreserveCodePoint);
     EXPECT_EQ(result.status, GcStringUtf8Status::Invalid);
-    EXPECT_EQ(result.written, 0u);
+    EXPECT_EQ(result.written, 0U);
 
     cursor = {};
     cursor.index = 2;

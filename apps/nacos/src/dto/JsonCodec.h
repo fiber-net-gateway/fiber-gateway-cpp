@@ -27,6 +27,7 @@ namespace fiber::nacos::dto {
                                            resp::AuthTokenResponse &out) noexcept;
 
 #define FIBER_NACOS_DECLARE_JSON_CODEC(Type)                                                                           \
+    /* NOLINTNEXTLINE(bugprone-macro-parentheses) */                                                                   \
     [[nodiscard]] json::ParseStatus parse_json(json::JsonParser &parser, mem::BufPool &pool, Type &out) noexcept;      \
     [[nodiscard]] json::Generator::Result encode_json(json::Generator &generator, const Type &value) noexcept
 

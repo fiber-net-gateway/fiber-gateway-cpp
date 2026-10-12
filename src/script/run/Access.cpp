@@ -4,6 +4,7 @@
 #include <fiber/script/gc/GcInternal.h>
 
 #include <string>
+#include <utility>
 
 namespace fiber::script::run {
 
@@ -16,7 +17,7 @@ fiber::script::JsValue &mutable_value(ConstValueHandle value) noexcept {
 }
 
 ValueHandle mutable_handle(ConstValueHandle value) noexcept {
-    return ValueHandle(value ? const_cast<fiber::script::JsValue *>(value.get()) : nullptr);
+    return {value ? const_cast<fiber::script::JsValue *>(value.get()) : nullptr};
 }
 
 template<typename T>
@@ -42,7 +43,7 @@ bool string_length(ConstValueHandle value, std::size_t &out) {
     }
     if (fiber::script::js_value_type(*value) == fiber::script::JsNodeType::String &&
         !fiber::script::js_value_is_borrowed_string(*value)) {
-        auto *str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value);
+        const auto *str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*value);
         out = str ? str->utf16_len : 0;
         return true;
     }
@@ -79,11 +80,11 @@ CallResult string_char_at(GcHeap &runtime, ResultPayload &result, ConstValueHand
             return set_abort(result, oom_error());
         }
     }
-    auto *str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*rooted_str);
+    const auto *str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*rooted_str);
     if (!str) {
         return set_abort(result, oom_error());
     }
-    if (index >= static_cast<std::int64_t>(str->utf16_len)) {
+    if (std::cmp_greater_equal(index, str->utf16_len)) {
         return set_undefined(result);
     }
     GcHeap::NoGcScope no_gc(runtime);
@@ -106,7 +107,7 @@ CallResult Access::expand_object(GcHeap &runtime, ConstValueHandle target, Const
     }
     fiber::script::GcHeap *heap = &runtime.heap();
     auto *target_obj = mutable_heap_ptr<fiber::script::GcObject>(target);
-    auto *add_obj = fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*addition);
+    const auto *add_obj = fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*addition);
     if (!target_obj || !add_obj) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
@@ -144,7 +145,7 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
     if (fiber::script::js_value_type(*addition) == fiber::script::JsNodeType::Array) {
-        auto *add_arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*addition);
+        const auto *add_arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*addition);
         if (!add_arr) {
             return set_exception(result, fiber::script::ExceptionKind::TypeError);
         }
@@ -164,7 +165,7 @@ CallResult Access::expand_array(GcHeap &runtime, ConstValueHandle target, ConstV
         }
         return set_value(result, *target);
     }
-    auto *add_obj = fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*addition);
+    const auto *add_obj = fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*addition);
     if (!add_obj) {
         return set_exception(result, fiber::script::ExceptionKind::TypeError);
     }
@@ -255,7 +256,7 @@ CallResult Access::index_set(GcHeap &runtime, ConstValueHandle parent, ConstValu
             return set_exception(result, fiber::script::ExceptionKind::TypeError);
         }
         auto *arr = mutable_heap_ptr<fiber::script::GcArray>(parent);
-        if (!arr || idx < 0 || idx >= static_cast<std::int64_t>(arr->size)) {
+        if (!arr || idx < 0 || std::cmp_greater_equal(idx, arr->size)) {
             return set_exception(result, fiber::script::ExceptionKind::RangeError);
         }
         fiber::script::GcHeap *heap = &runtime.heap();
@@ -311,7 +312,7 @@ CallResult Access::prop_get(GcHeap &runtime, ConstValueHandle parent, ConstValue
         fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::String) {
         std::size_t len = 0;
         if (fiber::script::js_value_type(*parent) == fiber::script::JsNodeType::Array) {
-            auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*parent);
+            const auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*parent);
             len = arr ? arr->size : 0;
         } else if (!string_length(parent, len)) {
             return set_undefined(result);

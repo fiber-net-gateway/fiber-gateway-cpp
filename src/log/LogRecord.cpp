@@ -9,7 +9,7 @@
 namespace fiber::log {
 namespace {
 
-constexpr std::size_t kMaxChunkCapacity = 256 * 1024;
+constexpr std::size_t kMaxChunkCapacity = std::size_t{256} * 1024;
 
 } // namespace
 

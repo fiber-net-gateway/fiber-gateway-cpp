@@ -30,7 +30,7 @@ std::size_t encode_test_query(std::array<std::uint8_t, 512> &packet, std::uint16
     QueryOptions options;
     options.id = id;
     options.use_edns = false;
-    QuestionSpec question{name, type, dns_class};
+    QuestionSpec question{.name = name, .type = type, .dns_class = dns_class};
     auto encoded = fiber::dns::encode_query(options, question, packet.data(), packet.size());
     EXPECT_TRUE(encoded.has_value());
     return encoded.value_or(0);

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -94,7 +95,7 @@ std::string chain_to_string(fiber::mem::IoBufChain chain) {
 Task<fiber::common::IoResult<std::string>> read_body_to_string(fiber::http::HttpExchange &exchange) {
     std::string out;
     for (;;) {
-        auto chunk_result = co_await exchange.read_body(64 * 1024);
+        auto chunk_result = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!chunk_result) {
             co_return std::unexpected(chunk_result.error());
         }
@@ -273,7 +274,7 @@ Task<void> chat_handler(fiber::http::HttpExchange &exchange) {
 // Trailers-only error: response HEADERS carries grpc-status + END_STREAM.
 Task<void> stream_fail_handler(fiber::http::HttpExchange &exchange) {
     for (;;) {
-        auto chunk = co_await exchange.read_body(64 * 1024);
+        auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!chunk || chunk->complete()) {
             break;
         }
@@ -304,7 +305,7 @@ Task<void> stall_handler(fiber::http::HttpExchange &exchange) {
             .end_stream = false,
     });
     for (;;) {
-        auto chunk = co_await exchange.read_body(64 * 1024);
+        auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!chunk || chunk->complete()) {
             break; // read error (client RST) or unexpected END_STREAM
         }
@@ -315,7 +316,7 @@ Task<void> stall_handler(fiber::http::HttpExchange &exchange) {
 // caps the untrusted value instead of copying it whole into a std::string.
 Task<void> oversize_fail_handler(fiber::http::HttpExchange &exchange) {
     for (;;) {
-        auto chunk = co_await exchange.read_body(64 * 1024);
+        auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!chunk || chunk->complete()) {
             break;
         }
@@ -323,7 +324,7 @@ Task<void> oversize_fail_handler(fiber::http::HttpExchange &exchange) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("content-type", "application/grpc");
     headers.set("grpc-status", "5");
-    headers.set("grpc-message", std::string(16 * 1024, 'x'));
+    headers.set("grpc-message", std::string(static_cast<std::size_t>(16 * 1024), 'x'));
     (void) co_await exchange.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = 200,
@@ -690,8 +691,6 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
                 method = "StreamFail";
                 break;
             case Scenario::Cancel:
-                method = "Stall";
-                break;
             case Scenario::Deadline:
                 method = "Stall";
                 break;
@@ -745,7 +744,7 @@ struct ServerCtx {
         port = port_future.get();
         return server != nullptr && port != 0;
     }
-    void stop(fiber::event::EventLoop &loop) {
+    void stop(fiber::event::EventLoop &loop) const {
         if (server) {
             std::promise<void> done;
             auto future = done.get_future();
@@ -785,11 +784,11 @@ TEST(GrpcStreamTest, ServerStreaming) {
     ASSERT_TRUE(r.finish_ok);
     ASSERT_TRUE(r.status.ok());
     ASSERT_EQ(r.status.code, 0);
-    ASSERT_EQ(r.messages.size(), 3u);
+    ASSERT_EQ(r.messages.size(), 3U);
     EXPECT_EQ(r.messages[0], "stream 0");
     EXPECT_EQ(r.messages[1], "stream 1");
     EXPECT_EQ(r.messages[2], "stream 2");
-    ASSERT_EQ(r.counts.size(), 3u);
+    ASSERT_EQ(r.counts.size(), 3U);
     EXPECT_EQ(r.counts[0], 0);
     EXPECT_EQ(r.counts[1], 1);
     EXPECT_EQ(r.counts[2], 2);
@@ -800,9 +799,9 @@ TEST(GrpcStreamTest, ClientStreaming) {
     ASSERT_EQ(r.err, fiber::common::IoErr::None) << "transport error";
     ASSERT_TRUE(r.finish_ok);
     ASSERT_TRUE(r.status.ok());
-    ASSERT_EQ(r.messages.size(), 1u);
+    ASSERT_EQ(r.messages.size(), 1U);
     EXPECT_EQ(r.messages[0], "sum");
-    ASSERT_EQ(r.counts.size(), 1u);
+    ASSERT_EQ(r.counts.size(), 1U);
     EXPECT_EQ(r.counts[0], 3); // server counted the 3 requests
 }
 
@@ -811,7 +810,7 @@ TEST(GrpcStreamTest, BidiStreaming) {
     ASSERT_EQ(r.err, fiber::common::IoErr::None) << "transport error";
     ASSERT_TRUE(r.finish_ok);
     ASSERT_TRUE(r.status.ok());
-    ASSERT_EQ(r.messages.size(), 3u);
+    ASSERT_EQ(r.messages.size(), 3U);
     EXPECT_EQ(r.messages[0], "c0");
     EXPECT_EQ(r.messages[1], "c1");
     EXPECT_EQ(r.messages[2], "c2");
@@ -848,7 +847,7 @@ TEST(GrpcStreamTest, OversizeGrpcMessageTruncated) {
     ASSERT_EQ(r.err, fiber::common::IoErr::None);
     ASSERT_TRUE(r.finish_ok);
     EXPECT_EQ(r.status.code, 5);
-    constexpr std::size_t kCap = 8 * 1024;
+    constexpr std::size_t kCap = static_cast<std::size_t>(8 * 1024);
     EXPECT_EQ(r.status.message.size(), kCap);
     EXPECT_EQ(r.status.message, std::string(kCap, 'x'));
 }

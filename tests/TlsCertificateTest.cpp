@@ -131,13 +131,13 @@ TEST(TlsCertificateChainParse, PemBundle) {
     const std::string three = join_pems({certfix::kLeafRsaPem, certfix::kIntermediateRsaPem, certfix::kRootRsaPem});
     auto chain = TlsCertificateChain::parse_pem_bundle({three.data(), three.size()});
     ASSERT_TRUE(chain.has_value());
-    EXPECT_EQ(3u, chain->size());
+    EXPECT_EQ(3U, chain->size());
     EXPECT_FALSE(chain->empty());
 
     const std::string leaf_der = pem_block_der(certfix::kLeafRsaPem);
     ASSERT_EQ(leaf_der.size(), chain->leaf().der().size());
     EXPECT_EQ(0, std::memcmp(leaf_der.data(), chain->leaf().der().data(), leaf_der.size()));
-    EXPECT_EQ(2u, chain->intermediates().size());
+    EXPECT_EQ(2U, chain->intermediates().size());
 
     // Full capacity is fine.
     std::string full_pem = join_pems({certfix::kLeafRsaPem, certfix::kIntermediateRsaPem, certfix::kRootRsaPem});
@@ -167,7 +167,7 @@ TEST(TlsCertificateChainParse, FromDerList) {
     const std::span<const std::uint8_t> ders[] = {der_span(leaf), der_span(intermediate), der_span(root)};
     auto chain = TlsCertificateChain::from_der_list(ders);
     ASSERT_TRUE(chain.has_value());
-    EXPECT_EQ(3u, chain->size());
+    EXPECT_EQ(3U, chain->size());
 
     EXPECT_EQ(common::IoErr::Invalid, TlsCertificateChain::from_der_list({}).error());
 }
@@ -197,13 +197,13 @@ TEST(TlsCertificateValidity, FixtureAnchors) {
     ASSERT_TRUE(expired.has_value());
     v = expired->validity();
     ASSERT_TRUE(v.has_value());
-    EXPECT_LT(v->not_after_ms, certfix::kRefNowMs - 4 * certfix::kDayMs);
+    EXPECT_LT(v->not_after_ms, certfix::kRefNowMs - (4 * certfix::kDayMs));
 
     auto future = TlsCertificate::parse_der(der_span(pem_block_der(certfix::kLeafFuturePem)));
     ASSERT_TRUE(future.has_value());
     v = future->validity();
     ASSERT_TRUE(v.has_value());
-    EXPECT_GT(v->not_before_ms, certfix::kRefNowMs + 364 * certfix::kDayMs);
+    EXPECT_GT(v->not_before_ms, certfix::kRefNowMs + (364 * certfix::kDayMs));
 }
 
 TEST(TlsCertificateMatch, HostWildcardAndCase) {
@@ -245,14 +245,14 @@ TEST(TlsCertificateMatch, PrivateKeyPairing) {
         bool matches;
     };
     const Case cases[] = {
-            {certfix::kLeafRsaPem, certfix::kRsa2048KeyPem, true},
-            {certfix::kLeafRsaPem, certfix::kRsa1024KeyPem, false},
-            {certfix::kLeafEcP256Pem, certfix::kP256KeyPem, true},
-            {certfix::kLeafEcP256Pem, certfix::kP384KeyPem, false},
-            {certfix::kLeafEcP384Pem, certfix::kP384KeyPem, true},
-            {certfix::kCertP521Pem, certfix::kP521KeyPem, true},
-            {certfix::kLeafEd25519Pem, certfix::kEd25519KeyPem, true},
-            {certfix::kLeafEd25519Pem, certfix::kRsa2048KeyPem, false},
+            {.cert_pem = certfix::kLeafRsaPem, .key_pem = certfix::kRsa2048KeyPem, .matches = true},
+            {.cert_pem = certfix::kLeafRsaPem, .key_pem = certfix::kRsa1024KeyPem, .matches = false},
+            {.cert_pem = certfix::kLeafEcP256Pem, .key_pem = certfix::kP256KeyPem, .matches = true},
+            {.cert_pem = certfix::kLeafEcP256Pem, .key_pem = certfix::kP384KeyPem, .matches = false},
+            {.cert_pem = certfix::kLeafEcP384Pem, .key_pem = certfix::kP384KeyPem, .matches = true},
+            {.cert_pem = certfix::kCertP521Pem, .key_pem = certfix::kP521KeyPem, .matches = true},
+            {.cert_pem = certfix::kLeafEd25519Pem, .key_pem = certfix::kEd25519KeyPem, .matches = true},
+            {.cert_pem = certfix::kLeafEd25519Pem, .key_pem = certfix::kRsa2048KeyPem, .matches = false},
     };
     for (const Case &c: cases) {
         auto cert = TlsCertificate::parse_der(der_span(pem_block_der(c.cert_pem)));
@@ -285,7 +285,7 @@ TEST(TlsCertificateNames, SubjectIssuerLines) {
     char tiny[4];
     auto small = leaf->subject_line(tiny);
     ASSERT_TRUE(small.has_value());
-    EXPECT_EQ(0u, *small);
+    EXPECT_EQ(0U, *small);
     EXPECT_EQ('\0', tiny[0]);
 }
 

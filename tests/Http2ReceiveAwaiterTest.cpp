@@ -74,13 +74,15 @@ struct DeferredBodyAbort {
     static void run(DeferredBodyAbort *abort) noexcept { abort->state->abort(IoErr::Canceled); }
 };
 
-void on_stream_destroy(void *) noexcept {}
+void on_stream_destroy(void * /*unused*/) noexcept {}
 
-IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept { return IoErr::None; }
+IoErr on_header_block_start(void * /*unused*/, fiber::http::Http2HpackDecoder::Sink & /*unused*/) noexcept {
+    return IoErr::None;
+}
 
-IoErr on_header_block_complete(void *, bool) noexcept { return IoErr::None; }
+IoErr on_header_block_complete(void * /*unused*/, bool /*unused*/) noexcept { return IoErr::None; }
 
-IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept { return IoErr::None; }
+IoErr on_body(void * /*unused*/, fiber::mem::IoBuf && /*unused*/, bool /*unused*/) noexcept { return IoErr::None; }
 
 constexpr Http2Stream::Ops kStreamOps{
         .on_destroy = &on_stream_destroy,

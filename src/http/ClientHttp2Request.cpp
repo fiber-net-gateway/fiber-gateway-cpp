@@ -39,7 +39,7 @@ bool is_terminal_request_write_error(common::IoErr error) noexcept {
 } // namespace
 
 struct ClientHttp2Request::SendRequestHeaderOp {
-    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
+    static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
 
     SendRequestHeaderOp(const Http2RequestHead &head, bool end_stream) noexcept :
         method_(head.method), scheme_(head.scheme), authority_(head.authority), path_(head.path),
@@ -58,32 +58,35 @@ struct ClientHttp2Request::SendRequestHeaderOp {
 };
 
 struct ClientHttp2Request::SendRequestTrailerOp {
-    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
+    static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
 
     explicit SendRequestTrailerOp(const HttpHeaders &headers) noexcept : headers_(&headers) {}
 
     common::IoErr on_encode(const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
-                            Http2OutboundEncodeResult &result) noexcept;
+                            Http2OutboundEncodeResult &result) const noexcept;
 
     const HttpHeaders *headers_ = nullptr;
 };
 
 const Http2Stream::Ops &ClientHttp2Request::stream_ops() noexcept {
     static const Http2Stream::Ops kOps{
-            &ClientHttp2Request::destroy_owner,
-            &ClientHttp2Request::on_header_block_start,
-            &ClientHttp2Request::on_header_block_complete,
-            &ClientHttp2Request::on_body,
-            &ClientHttp2Request::on_stream_abort,
+            .on_destroy = &ClientHttp2Request::destroy_owner,
+            .on_header_block_start = &ClientHttp2Request::on_header_block_start,
+            .on_header_block_complete = &ClientHttp2Request::on_header_block_complete,
+            .on_body = &ClientHttp2Request::on_body,
+            .on_abort = &ClientHttp2Request::on_stream_abort,
     };
     return kOps;
 }
 
 const Http2HpackDecoder::Ops &ClientHttp2Request::decoder_ops() noexcept {
     static const Http2HpackDecoder::Ops kOps{
-            &ClientHttp2Request::on_indexed_field, &ClientHttp2Request::on_indexed_name,
-            &ClientHttp2Request::on_name_raw,      &ClientHttp2Request::on_name_huffman,
-            &ClientHttp2Request::on_value_raw,     &ClientHttp2Request::on_value_huffman,
+            .on_indexed_field = &ClientHttp2Request::on_indexed_field,
+            .on_indexed_name = &ClientHttp2Request::on_indexed_name,
+            .on_name_raw = &ClientHttp2Request::on_name_raw,
+            .on_name_huffman = &ClientHttp2Request::on_name_huffman,
+            .on_value_raw = &ClientHttp2Request::on_value_raw,
+            .on_value_huffman = &ClientHttp2Request::on_value_huffman,
     };
     return kOps;
 }
@@ -509,8 +512,7 @@ common::IoErr ClientHttp2Request::SendRequestHeaderOp::on_encode(const Http2Outb
     }
 
     if (headers_ != nullptr) {
-        for (auto it = headers_->begin(); it != headers_->end(); ++it) {
-            const auto &field = *it;
+        for (const auto &field: *headers_) {
             if (field.name_len == 0) {
                 continue;
             }
@@ -539,7 +541,7 @@ common::IoErr ClientHttp2Request::SendRequestHeaderOp::on_encode(const Http2Outb
 
 common::IoErr ClientHttp2Request::SendRequestTrailerOp::on_encode(const Http2OutboundEncodeRequest &req,
                                                                   Http2OutboundEncodeTarget &target,
-                                                                  Http2OutboundEncodeResult &result) noexcept {
+                                                                  Http2OutboundEncodeResult &result) const noexcept {
     Http2HeadersFrameEncoder frame_encoder({
             .stream_id = req.stream_id,
             .max_frame_size = req.max_frame_size,
@@ -552,8 +554,7 @@ common::IoErr ClientHttp2Request::SendRequestTrailerOp::on_encode(const Http2Out
     }
 
     if (headers_ != nullptr) {
-        for (auto it = headers_->begin(); it != headers_->end(); ++it) {
-            const auto &field = *it;
+        for (const auto &field: *headers_) {
             if (field.name_len == 0) {
                 continue;
             }
@@ -641,6 +642,9 @@ common::IoErr ClientHttp2Request::commit_regular_header(std::string_view name, s
     if (!value_copy.data() && !value.empty()) {
         return common::IoErr::NoMem;
     }
+    // The third argument intentionally passes data() as the stable-copy
+    // pointer (not a NUL-terminated C string); the size travels in the view.
+    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
     if (current_header_node_->head.headers.add_view(name_copy, value_copy, name_copy.data(), name_hash) == nullptr) {
         return common::IoErr::NoMem;
     }

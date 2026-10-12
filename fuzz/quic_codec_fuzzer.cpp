@@ -54,7 +54,7 @@ bool slice_equal(QuicSlice a, QuicSlice b) {
 // The output form of a parsed frame, or false for frames the encoder does
 // not produce from a parsed view (STREAM data is encoded by the send path,
 // not by quic_create_output_frame).
-bool to_output_frame(const QuicInputFrame &in, QuicOutputFrame &out, fiber::mem::IoBuf &crypto) {
+bool to_output_frame(const QuicInputFrame &in, QuicOutputFrame &out) {
     out.type = in.type;
     switch (in.type) {
         case QuicFrameType::Padding:
@@ -65,40 +65,32 @@ bool to_output_frame(const QuicInputFrame &in, QuicOutputFrame &out, fiber::mem:
             return true;
         case QuicFrameType::Ack:
         case QuicFrameType::AckEcn:
-            if (in.data.len > UINT32_MAX) {
-                return false;
-            }
             out.u.ack.largest = in.u.ack.largest;
             out.u.ack.delay = in.u.ack.delay;
             out.u.ack.range_count = in.u.ack.range_count;
             out.u.ack.first_range = in.u.ack.first_range;
-            out.u.ack.ranges = in.data.data;
-            out.u.ack.ranges_length = static_cast<std::uint32_t>(in.data.len);
             out.u.ack.ect0 = in.u.ack.ect0;
             out.u.ack.ect1 = in.u.ack.ect1;
             out.u.ack.ce = in.u.ack.ce;
-            return true;
+            return quic_output_frame_set_owned_data(out, in.data.data, in.data.len).has_value();
         case QuicFrameType::Crypto:
-            crypto = fiber::mem::IoBuf::allocate(in.data.len + 1);
-            FIBER_ASSERT(crypto.valid());
+            // Keep storage even for empty CRYPTO frames: the encoder requires
+            // a valid buffer, while the wire payload may have zero length.
+            out.data = fiber::mem::IoBuf::allocate(in.data.len + 1);
+            FIBER_ASSERT(out.data.valid());
             if (in.data.len != 0) {
-                std::memcpy(crypto.writable_data(), in.data.data, in.data.len);
+                std::memcpy(out.data.writable_data(), in.data.data, in.data.len);
             }
-            crypto.commit(in.data.len);
+            out.data.commit(in.data.len);
             out.u.crypto.offset = in.u.crypto.offset;
-            out.u.crypto.data = &crypto;
             return true;
         case QuicFrameType::NewToken:
-            out.u.new_token.data = in.data.data;
-            out.u.new_token.length = static_cast<std::uint32_t>(in.data.len);
-            return true;
+            return quic_output_frame_set_owned_data(out, in.data.data, in.data.len).has_value();
         case QuicFrameType::ConnectionClose:
         case QuicFrameType::ConnectionCloseApp:
             out.u.close.error_code = in.u.close.error_code;
             out.u.close.frame_type = in.u.close.frame_type;
-            out.u.close.reason = in.u.close.reason.data;
-            out.u.close.reason_length = static_cast<std::uint32_t>(in.u.close.reason.len);
-            return true;
+            return quic_output_frame_set_owned_data(out, in.u.close.reason.data, in.u.close.reason.len).has_value();
         case QuicFrameType::ResetStream:
             out.u.reset_stream = in.u.reset_stream;
             return true;
@@ -190,6 +182,7 @@ bool same_frame(const QuicInputFrame &a, const QuicInputFrame &b) {
             return a.u.streams_blocked.limit == b.u.streams_blocked.limit &&
                    a.u.streams_blocked.bidirectional == b.u.streams_blocked.bidirectional;
         case QuicFrameType::NewConnectionId:
+            // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison) decode oracle; frames are value-initialized
             return std::memcmp(&a.u.new_connection_id, &b.u.new_connection_id, sizeof(a.u.new_connection_id)) == 0;
         case QuicFrameType::RetireConnectionId:
             return a.u.retire_connection_id.sequence_number == b.u.retire_connection_id.sequence_number;
@@ -224,8 +217,7 @@ void frames(std::uint8_t selector, const std::uint8_t *data, std::size_t size) {
         }
 
         QuicOutputFrame out{};
-        fiber::mem::IoBuf crypto;
-        if (!to_output_frame(frame, out, crypto)) {
+        if (!to_output_frame(frame, out)) {
             continue;
         }
         auto counted = quic_create_output_frame(nullptr, out);
@@ -384,7 +376,7 @@ void address_token(const std::uint8_t *data, std::size_t size) {
     const std::uint64_t now = kTokenNow + (in.u8() & 0x7f);
     const std::span<const std::uint8_t> token = in.bytes(in.remaining());
 
-    auto checked = quic_validate_address_token(kTokenKey, peer, now, {token.data(), token.size()});
+    auto checked = quic_validate_address_token(kTokenKey, peer, now, {.data = token.data(), .len = token.size()});
     if (checked && checked->status == QuicAddressTokenValidationStatus::Valid) {
         touch(checked->original_destination_connection_id.data(), checked->original_destination_connection_id.size());
     }
@@ -425,7 +417,7 @@ void retry(const std::uint8_t *data, std::size_t size) {
     spec.original_dcid = odcid;
     spec.dcid = dcid;
     spec.scid = scid;
-    spec.token = {rest.data(), std::min<std::size_t>(rest.size(), 512)};
+    spec.token = {.data = rest.data(), .len = std::min<std::size_t>(rest.size(), 512)};
     std::array<std::uint8_t, 1024> out{};
     QuicWriteCursor writer(out.data(), out.size());
     auto built = quic_create_retry_packet(spec, writer);

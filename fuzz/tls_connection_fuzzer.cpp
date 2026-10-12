@@ -46,7 +46,7 @@ bool init_cipher(TlsRecordCipher &cipher, TlsCipherSuiteId suite, TlsRecordProte
 TlsSecret fixed_secret(std::uint8_t seed, std::size_t len) {
     std::array<std::uint8_t, 48> bytes{};
     for (std::size_t i = 0; i < len; ++i) {
-        bytes[i] = static_cast<std::uint8_t>(seed + i * 7);
+        bytes[i] = static_cast<std::uint8_t>(seed + (i * 7));
     }
     return TlsSecret::from_bytes({bytes.data(), len});
 }

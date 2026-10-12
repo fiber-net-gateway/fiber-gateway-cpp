@@ -20,7 +20,7 @@ using fiber::net::IpAddress;
 
 DnsCacheKey shared_key() {
     constexpr std::string_view name = "shared-cache2.example";
-    return {name, fiber::dns::dns_cache_hash(name)};
+    return {.normalized_name = name, .hash = fiber::dns::dns_cache_hash(name)};
 }
 
 DetachedTask write_record(SharedDnsCache2 *cache, std::promise<IoErr> *done) {
@@ -115,7 +115,7 @@ TEST(SharedDnsCache2Test, BoundEventLoopRemovesExpiredEntries) {
     auto count_future = count_done.get_future();
     fiber::async::spawn(group.at(0), [&]() { return read_entry_count(&cache, &count_done); });
     ASSERT_EQ(count_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
-    EXPECT_EQ(count_future.get(), 0u);
+    EXPECT_EQ(count_future.get(), 0U);
 
     std::promise<void> shutdown_done;
     auto shutdown_future = shutdown_done.get_future();
@@ -135,9 +135,9 @@ TEST(SharedDnsCache2Test, UpsertWorksWithoutCurrentEventLoop) {
     constexpr std::string_view address_name = "no-loop-address.example";
     constexpr std::string_view cname_name = "no-loop-cname.example";
     constexpr std::string_view nxdomain_name = "no-loop-nxdomain.example";
-    const DnsCacheKey address_key{address_name, fiber::dns::dns_cache_hash(address_name)};
-    const DnsCacheKey cname_key{cname_name, fiber::dns::dns_cache_hash(cname_name)};
-    const DnsCacheKey nxdomain_key{nxdomain_name, fiber::dns::dns_cache_hash(nxdomain_name)};
+    const DnsCacheKey address_key{.normalized_name = address_name, .hash = fiber::dns::dns_cache_hash(address_name)};
+    const DnsCacheKey cname_key{.normalized_name = cname_name, .hash = fiber::dns::dns_cache_hash(cname_name)};
+    const DnsCacheKey nxdomain_key{.normalized_name = nxdomain_name, .hash = fiber::dns::dns_cache_hash(nxdomain_name)};
     const auto now = std::chrono::steady_clock::now();
     const IpAddress address = IpAddress::v4({8, 8, 4, 4});
     ASSERT_EQ(cache.upsert_address_set(address_key, now, fiber::net::IpFamily::V4, &address, 1,
@@ -192,7 +192,7 @@ TEST(SharedDnsCache2Test, CallerSuppliedNowDrivesExpiry) {
     DnsCacheOut out{};
     ASSERT_EQ(cache.lookup(shared_key(), now + std::chrono::milliseconds(1), out), IoErr::None);
     EXPECT_EQ(out.kind, DnsCacheOutKind::Miss);
-    EXPECT_EQ(cache.entry_count(), 0u);
+    EXPECT_EQ(cache.entry_count(), 0U);
 
     std::promise<void> shutdown_done;
     auto shutdown_future = shutdown_done.get_future();

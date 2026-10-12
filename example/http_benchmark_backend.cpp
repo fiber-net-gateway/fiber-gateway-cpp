@@ -1,11 +1,12 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
-#include <signal.h>
 #include <string_view>
 #include <sys/socket.h>
 #include <vector>
@@ -25,8 +26,8 @@
 namespace {
 
 constexpr std::size_t kBody1kSize = 1024;
-constexpr std::size_t kBody64kSize = 64 * 1024;
-constexpr std::size_t kBody1mSize = 1024 * 1024;
+constexpr std::size_t kBody64kSize = static_cast<const std::size_t>(64 * 1024);
+constexpr std::size_t kBody1mSize = static_cast<const std::size_t>(1024 * 1024);
 
 const std::array<std::uint8_t, kBody1kSize> kBody1k = [] {
     std::array<std::uint8_t, kBody1kSize> body{};
@@ -96,9 +97,9 @@ fiber::async::Task<void> echo_body(fiber::http::HttpExchange &exchange) {
     }
 
     for (;;) {
-        auto read_result = co_await exchange.read_body(64 * 1024);
+        auto read_result = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!read_result) {
-            exchange.abort(read_result.error());
+            (void) exchange.abort(read_result.error());
             co_return;
         }
         bool complete = read_result->complete();
@@ -112,7 +113,7 @@ fiber::async::Task<void> echo_body(fiber::http::HttpExchange &exchange) {
 fiber::async::Task<void> discard_body(fiber::http::HttpExchange &exchange) {
     auto discard_result = co_await exchange.discard_body();
     if (!discard_result) {
-        exchange.abort(discard_result.error());
+        (void) exchange.abort(discard_result.error());
         co_return;
     }
     (void) co_await send_header(exchange, 204, nullptr, fiber::http::HttpBodySpec::None(), true);
@@ -151,7 +152,7 @@ fiber::async::Task<void> handle_request(fiber::http::HttpExchange &exchange) {
         co_return;
     }
     if (path == "/fault/close") {
-        exchange.abort(fiber::common::IoErr::Canceled);
+        (void) exchange.abort(fiber::common::IoErr::Canceled);
         co_return;
     }
     if (path == "/fault/partial") {
@@ -160,7 +161,7 @@ fiber::async::Task<void> handle_request(fiber::http::HttpExchange &exchange) {
         if (header_result) {
             (void) co_await exchange.write_all(kBody1k.data(), kBody1k.size(), false);
         }
-        exchange.abort(fiber::common::IoErr::Canceled);
+        (void) exchange.abort(fiber::common::IoErr::Canceled);
         co_return;
     }
 
@@ -199,7 +200,7 @@ int main(int argc, char **argv) {
     fiber::net::SocketAddress address(fiber::net::IpAddress::loopback_v4(), port);
     server_options.address = address;
     server_options.listen = listen_options;
-    auto *endpoint = server.add_endpoint<fiber::http::Http2Endpoint>(server_options);
+    (void) server.add_endpoint<fiber::http::Http2Endpoint>(server_options);
     auto bind_result = server.start();
     if (!bind_result) {
         std::cerr << "bind failed: " << fiber::common::io_err_name(bind_result.error()) << '\n';

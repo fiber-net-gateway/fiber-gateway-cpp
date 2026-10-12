@@ -23,7 +23,7 @@ using fiber::quic::QuicConnection;
 using fiber::quic::QuicLocalStreamGate;
 using fiber::quic::QuicStreamType;
 
-void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+void destroy_test_stream(void * /*unused*/, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
 fiber::quic::QuicStream::Lease make_test_stream() noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
@@ -33,11 +33,11 @@ fiber::quic::QuicStream::Lease make_test_stream() noexcept {
 // The gate is an observer like any other owner: it only learns about the
 // connection through the Ops hooks, so the tests wire them the way
 // HTTP/3 connection owners do.
-void forward_state_change(void *owner, QuicConnection &) noexcept {
+void forward_state_change(void *owner, QuicConnection & /*unused*/) noexcept {
     static_cast<QuicLocalStreamGate *>(owner)->on_state_change();
 }
 
-void forward_capacity_change(void *owner, QuicConnection &) noexcept {
+void forward_capacity_change(void *owner, QuicConnection & /*unused*/) noexcept {
     static_cast<QuicLocalStreamGate *>(owner)->on_capacity_change();
 }
 

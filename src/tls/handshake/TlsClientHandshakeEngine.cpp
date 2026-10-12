@@ -155,6 +155,11 @@ TlsClientHandshakeEngine::TlsClientHandshakeEngine(const TlsClientConfig &config
         // and the QUIC layer seals them itself.
         if (cfg_.quic != nullptr) {
             auto early_secret = tls_client_early_secret(*sched_, hello_);
+            // early_.offered_ext implies psk_offered_, which implies session != nullptr
+            // (both derive from the same null check); the analyzer cannot track the
+            // member-carried dataflow.
+            // NOLINTBEGIN(clang-analyzer-core.NullDereference)
+            // NOLINTBEGIN(clang-analyzer-core.NonNullParamChecker)
             if (!early_secret.has_value() || !cfg_.quic->set_secret(cfg_.quic->ctx, TlsQuicLevel::EarlyData, true,
                                                                     session->suite, early_secret->bytes())) {
                 fail_local(TlsAlertDesc::InternalError);
@@ -164,6 +169,8 @@ TlsClientHandshakeEngine::TlsClientHandshakeEngine(const TlsClientConfig &config
             fail_local(TlsAlertDesc::InternalError);
             return;
         }
+        // NOLINTEND(clang-analyzer-core.NonNullParamChecker)
+        // NOLINTEND(clang-analyzer-core.NullDereference)
     }
     if (early_.offered_ext) {
         // RFC 8446 D.4 / BoringSSL do_enter_early_data: when early data is
@@ -200,8 +207,8 @@ common::IoResult<TlsClientHandshakeEngine::Event> TlsClientHandshakeEngine::feed
     return pump();
 }
 
-common::IoResult<TlsClientHandshakeEngine::Event>
-TlsClientHandshakeEngine::feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept {
+common::IoResult<TlsClientHandshakeEngine::Event> TlsClientHandshakeEngine::feed_quic(TlsQuicLevel level,
+                                                                                      mem::IoBufChain &bytes) noexcept {
     FIBER_ASSERT(!out_.done);
     if (!ctx_.provide_quic(level, bytes)) {
         return std::unexpected(common::IoErr::NoMem);
@@ -325,15 +332,23 @@ void TlsClientHandshakeEngine::handle_first_message(TlsHandshakeType type,
         // A 1.2 negotiation kills any PSK/0-RTT offer at the read point;
         // the 1.2 sub-flow never sees the early window.
         early_.closed = true;
-        Tls12ClientHandshake::Mount mount{ctx_, cfg_, hello_, out_, {scratch_.data(), scratch_.size()}};
+        Tls12ClientHandshake::Mount mount{
+                .ctx = ctx_, .cfg = cfg_, .hello = hello_, .out = out_, .scratch = {scratch_.data(), scratch_.size()}};
         flow_.emplace<Tls12ClientHandshake>(mount);
         std::get<Tls12ClientHandshake>(flow_).start(sh, body);
         return;
     }
 
-    Tls13ClientHandshake::Mount mount{ctx_,         cfg_,     session_, hello_,
-                                      sched_,       early_,   out_,     {scratch_.data(), scratch_.size()},
-                                      psk_offered_, ccs_sent_};
+    Tls13ClientHandshake::Mount mount{.ctx = ctx_,
+                                      .cfg = cfg_,
+                                      .session = session_,
+                                      .hello = hello_,
+                                      .sched = sched_,
+                                      .early = early_,
+                                      .out = out_,
+                                      .scratch = {scratch_.data(), scratch_.size()},
+                                      .psk_offered = psk_offered_,
+                                      .ccs_sent = ccs_sent_};
     flow_.emplace<Tls13ClientHandshake>(mount);
     Tls13ClientHandshake &sub = std::get<Tls13ClientHandshake>(flow_);
     if (tls_is_hello_retry_request(sh.random)) {

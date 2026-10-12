@@ -18,10 +18,10 @@ int parse_grpc_status(std::string_view s) noexcept {
             return -1;
         }
         const unsigned digit = static_cast<unsigned>(c - '0');
-        if (v > (0x7fffffffu - digit) / 10u) {
+        if (v > (0x7fffffffU - digit) / 10U) {
             return -1;
         }
-        v = v * 10u + digit;
+        v = v * 10U + digit;
     }
     return static_cast<int>(v);
 }
@@ -33,7 +33,7 @@ void assign_view(std::string &dst, std::string_view src) { dst.assign(src.data()
 } // namespace
 
 GrpcClient::GrpcClient(event::EventLoop &loop, Options options) noexcept :
-    loop_(&loop), conn_(loop, std::move(options.h2)), peer_addr_(std::move(options.peer_addr)), tcp_(options.tcp) {
+    loop_(&loop), conn_(loop, options.h2), peer_addr_(options.peer_addr), tcp_(options.tcp) {
     assign_view(authority_, options.authority);
     assign_view(scheme_, options.scheme);
     if (options.tls) {
@@ -114,7 +114,7 @@ GrpcStream GrpcClient::open_stream(std::string_view service, std::string_view me
                                    GrpcStream::Options options) noexcept(false) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(state_ == State::Connected);
-    return GrpcStream(conn_, authority_, scheme_, service, method, pool, options);
+    return {conn_, authority_, scheme_, service, method, pool, options};
 }
 
 } // namespace fiber::nacos::detail::grpc

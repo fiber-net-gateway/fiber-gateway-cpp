@@ -32,7 +32,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }

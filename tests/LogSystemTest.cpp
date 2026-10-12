@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -102,7 +103,7 @@ private:
 
 std::string read_file(const std::string &path) {
     std::ifstream input(path, std::ios::binary);
-    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
 std::size_t count_occurrences(std::string_view text, std::string_view needle) {
@@ -235,9 +236,9 @@ private:
 } // namespace
 
 TEST(LogBacklogTest, AppliesDropNewestAndWakesBlockedAdmissionOnClose) {
-    auto make_record = []() {
+    auto make_record = [func = __func__]() {
         return fiber::log::OwnedLogRecord::create("backlog.test", nullptr, 0, fiber::log::LogLevel::Info, __FILE__,
-                                                  __LINE__, __func__, 0, 0);
+                                                  __LINE__, func, 0, 0);
     };
 
     fiber::log::OwnedLogRecord *drop_first = make_record();
@@ -251,8 +252,8 @@ TEST(LogBacklogTest, AppliesDropNewestAndWakesBlockedAdmissionOnClose) {
     });
     EXPECT_TRUE(dropping.admit(*drop_first));
     EXPECT_FALSE(dropping.admit(*drop_second));
-    EXPECT_EQ(dropping.stats().queued_records, 1u);
-    EXPECT_EQ(dropping.stats().dropped_records, 1u);
+    EXPECT_EQ(dropping.stats().queued_records, 1U);
+    EXPECT_EQ(dropping.stats().dropped_records, 1U);
     dropping.release(record_size, false);
     delete drop_first;
     delete drop_second;
@@ -346,23 +347,23 @@ TEST(LogSystemTest, CompleteMessageHasNoConfiguredSizeLimit) {
     fiber::log::LogConfigBuilder builder;
     auto output_id = builder.add_file_appender({.name = "complete_output", .path = output.path()});
     ASSERT_TRUE(output_id);
-    ASSERT_TRUE(builder.set_async_options({.backlog_capacity = 64 * 1024}));
+    ASSERT_TRUE(builder.set_async_options({.backlog_capacity = std::size_t{64} * 1024}));
     ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
     auto config = builder.finish();
     ASSERT_TRUE(config);
     ASSERT_TRUE(fiber::log::LoggerManager::global().initialize(std::move(*config)));
 
     std::string message = R"({"event":"large","content":")";
-    message.append(2 * 1024 * 1024, 'x');
+    message.append(std::size_t{2} * 1024 * 1024, 'x');
     message.append(R"("})");
     ASSERT_TRUE(fiber::log::log_complete_message(LOG_TEST_OTHER.get(), fiber::log::LogLevel::Info, __FILE__, __LINE__,
                                                  __func__, message));
     fiber::log::LoggerManager::global().flush();
 
     const fiber::log::LogQueueStats stats = fiber::log::LoggerManager::global().queue_stats();
-    EXPECT_EQ(stats.queued_records, 0u);
-    EXPECT_GT(stats.peak_queued_bytes, 64u * 1024u);
-    EXPECT_EQ(stats.dropped_records, 0u);
+    EXPECT_EQ(stats.queued_records, 0U);
+    EXPECT_GT(stats.peak_queued_bytes, 64U * 1024U);
+    EXPECT_EQ(stats.dropped_records, 0U);
 
     fiber::log::LoggerManager::global().shutdown();
     const std::string content = read_file(output.path());
@@ -405,19 +406,19 @@ TEST(LogSystemTest, CompilesHierarchyIntoPerLevelAppenderArrays) {
     ASSERT_TRUE(fiber::log::LoggerManager::global().initialize(std::move(*config)));
 
     EXPECT_EQ(&LOG_TEST_AUTH.get(), &LOG_TEST_AUTH_DUP.get());
-    EXPECT_EQ(LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Debug).count, 0u);
-    EXPECT_EQ(LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Info).count, 3u);
-    EXPECT_EQ(LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Error).count, 4u);
+    EXPECT_EQ(LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Debug).count, 0U);
+    EXPECT_EQ(LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Info).count, 3U);
+    EXPECT_EQ(LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Error).count, 4U);
     const auto &info_targets = LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Info);
     const auto &warn_targets = LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Warn);
     const auto &error_targets = LOG_TEST_AUTH.get().targets(fiber::log::LogLevel::Error);
     EXPECT_EQ(info_targets.first + info_targets.count, warn_targets.first);
     EXPECT_EQ(warn_targets.first + warn_targets.count, error_targets.first);
-    EXPECT_EQ(LOG_TEST_HTTP.get().targets(fiber::log::LogLevel::Debug).count, 2u);
-    EXPECT_EQ(LOG_TEST_GATEWAY2.get().targets(fiber::log::LogLevel::Debug).count, 0u);
-    EXPECT_EQ(LOG_TEST_GATEWAY2.get().targets(fiber::log::LogLevel::Info).count, 1u);
-    EXPECT_EQ(LOG_TEST_ISOLATED.get().targets(fiber::log::LogLevel::Debug).count, 1u);
-    EXPECT_EQ(LOG_TEST_ISOLATED.get().targets(fiber::log::LogLevel::Error).count, 1u);
+    EXPECT_EQ(LOG_TEST_HTTP.get().targets(fiber::log::LogLevel::Debug).count, 2U);
+    EXPECT_EQ(LOG_TEST_GATEWAY2.get().targets(fiber::log::LogLevel::Debug).count, 0U);
+    EXPECT_EQ(LOG_TEST_GATEWAY2.get().targets(fiber::log::LogLevel::Info).count, 1U);
+    EXPECT_EQ(LOG_TEST_ISOLATED.get().targets(fiber::log::LogLevel::Debug).count, 1U);
+    EXPECT_EQ(LOG_TEST_ISOLATED.get().targets(fiber::log::LogLevel::Error).count, 1U);
 
     LOG(LOG_TEST_AUTH, INFO) << "auth-info";
     LOG(LOG_TEST_HTTP, DEBUG) << "http-debug";
@@ -437,7 +438,7 @@ TEST(LogSystemTest, CompilesHierarchyIntoPerLevelAppenderArrays) {
     EXPECT_NE(gateway_content.find("http-debug"), std::string::npos);
     EXPECT_EQ(gateway_content.find("isolated-info"), std::string::npos);
     EXPECT_NE(all_content.find("other-info"), std::string::npos);
-    EXPECT_EQ(count_occurrences(all_content, "auth-info"), 1u);
+    EXPECT_EQ(count_occurrences(all_content, "auth-info"), 1U);
     EXPECT_EQ(error_content.find("auth-info"), std::string::npos);
     EXPECT_NE(error_content.find("auth-error"), std::string::npos);
 
@@ -490,10 +491,7 @@ TEST(LogSystemTest, DisabledAndConditionalMacrosDoNotEvaluateMessages) {
     VLOG(LOG_TEST_MACRO, 2) << "verbose " << ++message_calls;
 
     int else_branch = 0;
-    if (false)
-        LOG(LOG_TEST_MACRO, INFO) << "unreachable";
-    else
-        else_branch = 1;
+    else_branch = 1;
 
     EXPECT_EQ(condition_calls, 2);
     EXPECT_EQ(message_calls, 2);
@@ -519,7 +517,7 @@ TEST(LogSystemTest, EscapesControlCharactersWithoutTruncatingLongMessages) {
     ASSERT_TRUE(config);
     ASSERT_TRUE(fiber::log::LoggerManager::global().initialize(std::move(*config)));
 
-    const std::string long_message(256 * 1024, 'x');
+    const std::string long_message(std::size_t{256} * 1024, 'x');
     LOG(LOG_TEST_OTHER, INFO) << "alpha\nbeta\r\t";
     LOG(LOG_TEST_OTHER, INFO) << fiber::log::quoted("alpha\"beta\\gamma\n");
     LOG(LOG_TEST_OTHER, INFO) << long_message;
@@ -547,7 +545,7 @@ TEST(LogSystemTest, RawAppendPreservesBytesAndDiscardCancelsTheRecord) {
     auto &manager = fiber::log::LoggerManager::global();
     ASSERT_TRUE(manager.initialize(std::move(*config)));
 
-    std::string raw = "audit_json={\"control\":\"";
+    std::string raw = R"(audit_json={"control":")";
     raw.push_back('\x7f');
     raw.append("\"}");
     {
@@ -561,7 +559,7 @@ TEST(LogSystemTest, RawAppendPreservesBytesAndDiscardCancelsTheRecord) {
         line.discard();
     }
     manager.flush();
-    EXPECT_EQ(manager.appender_stats(*output_id).written_records, 1u);
+    EXPECT_EQ(manager.appender_stats(*output_id).written_records, 1U);
     manager.shutdown();
 
     const std::string content = read_file(output.path());
@@ -633,7 +631,7 @@ TEST(LogSystemTest, SecureFileAppenderRecoversTailAndEnforcesMode) {
     ASSERT_TRUE(config);
     auto &manager = fiber::log::LoggerManager::global();
     ASSERT_TRUE(manager.initialize(std::move(*config)));
-    EXPECT_EQ(manager.appender_stats(*output_id).active_file_bytes, 9u);
+    EXPECT_EQ(manager.appender_stats(*output_id).active_file_bytes, 9U);
     manager.shutdown();
 
     EXPECT_EQ(read_file(output.path()), "complete\n");
@@ -687,7 +685,7 @@ TEST(LogSystemTest, FormatsOnceAndFlushesAllAppenderBuffersOnWriterThread) {
     auto buffered_id = builder.add_file_appender({
             .name = "buffered_output",
             .path = buffered_output.path(),
-            .buffer_size = 32 * 1024,
+            .buffer_size = static_cast<std::size_t>(32 * 1024),
             .flush_interval = 1s,
     });
     ASSERT_TRUE(direct_id);
@@ -705,8 +703,8 @@ TEST(LogSystemTest, FormatsOnceAndFlushesAllAppenderBuffersOnWriterThread) {
     const fiber::log::AppenderStats direct_stats = manager.appender_stats(*direct_id);
     const fiber::log::AppenderStats buffered_stats = manager.appender_stats(*buffered_id);
     const fiber::log::LogQueueStats queue_stats = manager.queue_stats();
-    EXPECT_EQ(direct_stats.written_records, 2u);
-    EXPECT_EQ(buffered_stats.written_records, 2u);
+    EXPECT_EQ(direct_stats.written_records, 2U);
+    EXPECT_EQ(buffered_stats.written_records, 2U);
     EXPECT_EQ(direct_stats.writer_thread_id, queue_stats.writer_thread_id);
     EXPECT_EQ(buffered_stats.writer_thread_id, queue_stats.writer_thread_id);
     EXPECT_NE(queue_stats.writer_thread_id, current_thread_id());
@@ -725,8 +723,10 @@ TEST(LogSystemTest, DedicatedTimerFlushesLowTrafficBuffer) {
     ASSERT_TRUE(output.valid());
 
     fiber::log::LogConfigBuilder builder;
-    auto output_id = builder.add_file_appender(
-            {.name = "timer_buffered", .path = output.path(), .buffer_size = 32 * 1024, .flush_interval = 20ms});
+    auto output_id = builder.add_file_appender({.name = "timer_buffered",
+                                                .path = output.path(),
+                                                .buffer_size = static_cast<std::size_t>(32 * 1024),
+                                                .flush_interval = 20ms});
     ASSERT_TRUE(output_id);
     ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
     auto config = builder.finish();
@@ -744,8 +744,10 @@ TEST(LogSystemTest, ProducerThreadExitDoesNotOwnTheFileBuffer) {
     ASSERT_TRUE(output.valid());
 
     fiber::log::LogConfigBuilder builder;
-    auto output_id = builder.add_file_appender(
-            {.name = "thread_buffered", .path = output.path(), .buffer_size = 32 * 1024, .flush_interval = 1s});
+    auto output_id = builder.add_file_appender({.name = "thread_buffered",
+                                                .path = output.path(),
+                                                .buffer_size = static_cast<std::size_t>(32 * 1024),
+                                                .flush_interval = 1s});
     ASSERT_TRUE(output_id);
     ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
     auto config = builder.finish();
@@ -811,19 +813,20 @@ TEST(LogSystemTest, RollsByRecordSizeAndRetainsNewestArchives) {
     ASSERT_TRUE(manager.initialize(std::move(*config)));
 
     for (int record = 0; record < 4; ++record) {
-        LOG(LOG_TEST_REOPEN, INFO) << "roll-record=[" << record << "] " << std::string(7800, 'a' + record);
+        LOG(LOG_TEST_REOPEN, INFO) << "roll-record=[" << record << "] "
+                                   << std::string(7800, static_cast<char>('a' + record));
     }
     manager.flush();
 
     const fiber::log::AppenderStats stats = manager.appender_stats(*output_id);
-    EXPECT_EQ(stats.rotations, 3u);
-    EXPECT_GT(stats.active_file_bytes, 0u);
-    EXPECT_EQ(stats.rotation_errors, 0u);
-    EXPECT_EQ(stats.retention_errors, 0u);
+    EXPECT_EQ(stats.rotations, 3U);
+    EXPECT_GT(stats.active_file_bytes, 0U);
+    EXPECT_EQ(stats.rotation_errors, 0U);
+    EXPECT_EQ(stats.retention_errors, 0U);
     manager.shutdown();
 
     const std::vector<std::string> files = list_output_log_files(output);
-    ASSERT_EQ(files.size(), 3u);
+    ASSERT_EQ(files.size(), 3U);
     EXPECT_NE(std::find(files.begin(), files.end(), output.log_path()), files.end());
     EXPECT_NE(
             std::find_if(files.begin(), files.end(), [](const std::string &path) { return path.ends_with(".000002"); }),
@@ -834,9 +837,9 @@ TEST(LogSystemTest, RollsByRecordSizeAndRetainsNewestArchives) {
 
     const std::string content = read_files(files);
     EXPECT_EQ(content.find("roll-record=[0]"), std::string::npos);
-    EXPECT_EQ(count_occurrences(content, "roll-record=[1]"), 1u);
-    EXPECT_EQ(count_occurrences(content, "roll-record=[2]"), 1u);
-    EXPECT_EQ(count_occurrences(content, "roll-record=[3]"), 1u);
+    EXPECT_EQ(count_occurrences(content, "roll-record=[1]"), 1U);
+    EXPECT_EQ(count_occurrences(content, "roll-record=[2]"), 1U);
+    EXPECT_EQ(count_occurrences(content, "roll-record=[3]"), 1U);
 }
 
 TEST(LogSystemTest, ConcurrentProducersPreserveCompleteRecordsAndUseOneWriter) {
@@ -850,7 +853,7 @@ TEST(LogSystemTest, ConcurrentProducersPreserveCompleteRecordsAndUseOneWriter) {
             .path = output.log_path(),
             .rotation =
                     fiber::log::FileRotationOptions{
-                            .max_file_size = 16 * 1024,
+                            .max_file_size = static_cast<std::uint64_t>(16 * 1024),
                             .archive_name = "{base}.{seq}",
                             .max_archives = 64,
                     },
@@ -865,6 +868,7 @@ TEST(LogSystemTest, ConcurrentProducersPreserveCompleteRecordsAndUseOneWriter) {
     constexpr int kThreads = 4;
     constexpr int kRecordsPerThread = 50;
     std::vector<std::thread> threads;
+    threads.reserve(kThreads);
     for (int thread = 0; thread < kThreads; ++thread) {
         threads.emplace_back([thread]() {
             for (int record = 0; record < kRecordsPerThread; ++record) {
@@ -877,7 +881,7 @@ TEST(LogSystemTest, ConcurrentProducersPreserveCompleteRecordsAndUseOneWriter) {
         thread.join();
     }
     manager.flush();
-    EXPECT_GT(manager.appender_stats(*output_id).rotations, 0u);
+    EXPECT_GT(manager.appender_stats(*output_id).rotations, 0U);
     EXPECT_EQ(manager.appender_stats(*output_id).writer_thread_id, manager.queue_stats().writer_thread_id);
     manager.shutdown();
 
@@ -886,7 +890,7 @@ TEST(LogSystemTest, ConcurrentProducersPreserveCompleteRecordsAndUseOneWriter) {
     for (int thread = 0; thread < kThreads; ++thread) {
         for (int record = 0; record < kRecordsPerThread; ++record) {
             const std::string marker = "[thread=" + std::to_string(thread) + ";record=" + std::to_string(record) + "]";
-            EXPECT_EQ(count_occurrences(content, marker), 1u) << marker;
+            EXPECT_EQ(count_occurrences(content, marker), 1U) << marker;
         }
     }
 }
@@ -911,6 +915,7 @@ TEST(LogSystemTest, MultipleThreadsWriteCompleteLongRecordsToConsolePipe) {
     constexpr int kRecordsPerThread = 20;
     constexpr std::size_t kPayloadSize = 6000;
     std::vector<std::thread> threads;
+    threads.reserve(kThreads);
     for (int thread = 0; thread < kThreads; ++thread) {
         threads.emplace_back([thread]() {
             const std::string payload(kPayloadSize, static_cast<char>('a' + thread));

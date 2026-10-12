@@ -91,7 +91,7 @@ private:
 struct NacosClientOptions {
     std::chrono::milliseconds connect_timeout{3000};
     std::chrono::milliseconds request_timeout{3000};
-    std::size_t max_auth_response_bytes = 64 * 1024;
+    std::size_t max_auth_response_bytes = static_cast<std::size_t>(64 * 1024);
     std::chrono::milliseconds retry_initial_delay{1000};
     std::chrono::milliseconds retry_max_delay{30000};
 };

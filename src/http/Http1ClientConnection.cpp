@@ -251,7 +251,7 @@ Http1ClientConnection::connect_impl(std::optional<net::SocketAddress> peer,
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    peer_addr_ = std::move(connected_peer);
+    peer_addr_ = connected_peer;
     transport_ = std::move(transport);
     fd_loop_ = loop_;
     state_ = State::ConnectedIdle;
@@ -438,12 +438,12 @@ void Http1ClientConnection::on_io_awaiter_destroyed() noexcept {
 
 Http1ClientConnection::IoAwaiter Http1ClientConnection::wait_transport_read(IoTask task) noexcept {
     assert_active_loop();
-    return IoAwaiter(*this, reader_, std::move(task));
+    return {*this, reader_, std::move(task)};
 }
 
 Http1ClientConnection::IoAwaiter Http1ClientConnection::wait_transport_write(IoTask task) noexcept {
     assert_active_loop();
-    return IoAwaiter(*this, writer_, std::move(task));
+    return {*this, writer_, std::move(task)};
 }
 
 } // namespace fiber::http

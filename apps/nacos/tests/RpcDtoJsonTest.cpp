@@ -197,7 +197,7 @@ TEST(NacosDtoJsonTest, NamingServiceInfoNestedRoundTrip) {
     const auto &service = response.service_info.value();
     ASSERT_TRUE(service.name.is_present());
     EXPECT_EQ(service.name.value(), "service");
-    ASSERT_EQ(service.hosts.size(), 1u);
+    ASSERT_EQ(service.hosts.size(), 1U);
     EXPECT_EQ(service.hosts[0].port, 8080);
     ASSERT_TRUE(service.hosts[0].metadata.is_present());
     ASSERT_NE(service.hosts[0].metadata.value().find("zone"), nullptr);
@@ -255,7 +255,7 @@ TEST(NacosDtoJsonTest, ReflectionDecoderHandlesNestedWireContainers) {
                         pool, request, parser),
                   ParseStatus::Done);
         EXPECT_FALSE(request.listen);
-        ASSERT_EQ(request.config_listen_contexts.size(), 1u);
+        ASSERT_EQ(request.config_listen_contexts.size(), 1U);
         const auto &context = request.config_listen_contexts[0];
         ASSERT_TRUE(context.group.is_present());
         EXPECT_EQ(context.group.value(), "g");
@@ -271,7 +271,7 @@ TEST(NacosDtoJsonTest, ReflectionDecoderHandlesNestedWireContainers) {
                         R"("tenant":"t"}],"success":true})",
                         pool, response, parser),
                   ParseStatus::Done);
-        ASSERT_EQ(response.changed_configs.size(), 1u);
+        ASSERT_EQ(response.changed_configs.size(), 1U);
         ASSERT_TRUE(response.changed_configs[0].tenant.is_present());
         EXPECT_EQ(response.changed_configs[0].tenant.value(), "t");
     }

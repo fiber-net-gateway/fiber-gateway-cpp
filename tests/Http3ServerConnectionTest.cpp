@@ -1,3 +1,5 @@
+#include <cstddef>
+
 #include "Http3ConnectionTestSupport.h"
 #include "LoopTestSupport.h"
 
@@ -810,7 +812,7 @@ TEST(Http3ServerConnectionTest, ServerRequestExposesParsedContentLength) {
 
         ASSERT_EQ(result.handler_status, std::future_status::ready);
         ASSERT_TRUE(result.snapshot.body_spec.is_content_length());
-        EXPECT_EQ(result.snapshot.body_spec.content_length(), 5u);
+        EXPECT_EQ(result.snapshot.body_spec.content_length(), 5U);
     });
 }
 
@@ -894,7 +896,7 @@ TEST(Http3ServerConnectionTest, ServerReadBodyReturnsFinWithLastData) {
         Http3BodyReadOutcome outcome = run_http3_request_body(request);
 
         ASSERT_TRUE(outcome.body_spec.is_content_length());
-        EXPECT_EQ(outcome.body_spec.content_length(), 5u);
+        EXPECT_EQ(outcome.body_spec.content_length(), 5U);
         EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
         EXPECT_EQ(outcome.first_body, "hello");
         EXPECT_TRUE(outcome.first_complete);
@@ -919,7 +921,7 @@ TEST(Http3ServerConnectionTest, ServerReadBodyReturnsDelayedFinSeparately) {
         Http3BodyReadOutcome outcome = run_http3_request_body(request, true);
 
         ASSERT_TRUE(outcome.body_spec.is_content_length());
-        EXPECT_EQ(outcome.body_spec.content_length(), 5u);
+        EXPECT_EQ(outcome.body_spec.content_length(), 5U);
         EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
         EXPECT_EQ(outcome.first_body, "hello");
         EXPECT_FALSE(outcome.first_complete);
@@ -936,13 +938,14 @@ TEST(Http3ServerConnectionTest, ServerReadBodyReturnsFinWithFullProxyChunk) {
                 {":method", "POST"}, {":scheme", "https"},        {":authority", "example.com"},
                 {":path", "/body"},  {"content-length", "65536"},
         };
-        const std::string body(64 * 1024, 'x');
+        const std::string body(std::size_t{64} * 1024, 'x');
 
         std::vector<std::uint8_t> request;
         append_frame(request, headers_frame(request_headers));
         append_frame(request, data_frame(body));
 
-        Http3BodyReadOutcome outcome = run_http3_request_body(request, false, 64 * 1024, 128 * 1024);
+        Http3BodyReadOutcome outcome = run_http3_request_body(request, false, static_cast<std::size_t>(64 * 1024),
+                                                              static_cast<std::size_t>(128 * 1024));
 
         ASSERT_TRUE(outcome.body_spec.is_content_length());
         EXPECT_EQ(outcome.body_spec.content_length(), body.size());

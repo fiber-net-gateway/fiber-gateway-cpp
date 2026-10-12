@@ -37,7 +37,7 @@ struct Http3ServerOptions {
     // Budget for reading one request body chunk.
     std::chrono::seconds body_timeout{60};
     // Request-header arena sizing for the large path.
-    std::size_t header_large_size = 32 * 1024;
+    std::size_t header_large_size = static_cast<std::size_t>(32 * 1024);
     std::uint64_t ack_delay_exponent = 3;
     // Advertise SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 9220).
     bool enable_connect_protocol = false;

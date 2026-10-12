@@ -291,7 +291,9 @@ struct ServerMaterial {
 
     [[nodiscard]] TlsServerConfig config() const {
         TlsServerConfig cfg;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
         cfg.chain = &*chain;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
         cfg.key = &*key;
         cfg.alpn = alpn;
         cfg.now_unix_ms = certfix::kRefNowMs;
@@ -527,7 +529,7 @@ struct Synthetic12Pair {
 Synthetic12Pair make_synthetic_12_pair(TlsCipherSuiteId suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256) {
     std::array<std::uint8_t, 48> master_bytes{};
     for (std::size_t i = 0; i < master_bytes.size(); ++i) {
-        master_bytes[i] = static_cast<std::uint8_t>(i * 5 + 1);
+        master_bytes[i] = static_cast<std::uint8_t>((i * 5) + 1);
     }
     TlsSecret master = TlsSecret::from_bytes(master_bytes);
     std::array<std::uint8_t, 32> client_random{};
@@ -608,11 +610,11 @@ TEST(TlsConnectionTest, LargePayloadSplitsIntoRecords13) {
 
         std::vector<std::uint8_t> big(40000);
         for (std::size_t i = 0; i < big.size(); ++i) {
-            big[i] = static_cast<std::uint8_t>(i * 7 + 3);
+            big[i] = static_cast<std::uint8_t>((i * 7) + 3);
         }
         WireFeeder server_feeds;
         const std::vector<std::uint8_t> wire = connection_wire(client, big);
-        EXPECT_LE(3u, count_records(wire)); // 40000 > 2 × 16384
+        EXPECT_LE(3U, count_records(wire)); // 40000 > 2 × 16384
         ASSERT_TRUE(server_feeds.feed(server, wire));
         EXPECT_EQ(big, read_all(server));
         EXPECT_FALSE(server.failed());
@@ -629,7 +631,7 @@ TEST(TlsConnectionTest, TakeMovesPlaintextZeroCopy13) {
 
         std::vector<std::uint8_t> big(40000);
         for (std::size_t i = 0; i < big.size(); ++i) {
-            big[i] = static_cast<std::uint8_t>(i * 7 + 3);
+            big[i] = static_cast<std::uint8_t>((i * 7) + 3);
         }
         WireFeeder server_feeds;
         ASSERT_TRUE(server_feeds.feed(server, connection_wire(client, big)));
@@ -641,11 +643,11 @@ TEST(TlsConnectionTest, TakeMovesPlaintextZeroCopy13) {
         IoBufChain sink;
         std::size_t n = 0;
         ASSERT_EQ(ReadStatus::Ok, server.take(123, sink, n));
-        ASSERT_EQ(123u, n);
+        ASSERT_EQ(123U, n);
         ASSERT_EQ(big.size() - 123, server.pending_plaintext());
         ASSERT_EQ(ReadStatus::Ok, server.take(big.size(), sink, n));
         ASSERT_EQ(big.size() - 123, n);
-        EXPECT_EQ(0u, server.pending_plaintext());
+        EXPECT_EQ(0U, server.pending_plaintext());
         EXPECT_EQ(big, chain_bytes(sink));
 
         // Empty and no terminal yet: NeedMore.
@@ -658,7 +660,7 @@ TEST(TlsConnectionTest, TakeMovesPlaintextZeroCopy13) {
         ASSERT_TRUE(client.close_notify().has_value());
         ASSERT_TRUE(server_feeds.feed(server, chain_bytes(client.take_output())));
         EXPECT_EQ(ReadStatus::Ok, server.take(64, empty_sink, n));
-        EXPECT_EQ(4u, n);
+        EXPECT_EQ(4U, n);
         EXPECT_EQ(ReadStatus::PeerClosed, server.take(64, empty_sink, n));
     });
 }
@@ -679,14 +681,14 @@ TEST(TlsConnectionTest, CloseNotifyBothDirections13) {
         WireFeeder server_feeds;
         WireFeeder client_feeds;
         const std::vector<std::uint8_t> wire = chain_bytes(client.take_output());
-        EXPECT_EQ(2u, count_records(wire)); // app data + close_notify
+        EXPECT_EQ(2U, count_records(wire)); // app data + close_notify
         ASSERT_TRUE(server_feeds.feed(server, wire));
         EXPECT_FALSE(server.failed());
         EXPECT_EQ(bye, read_all(server));
         std::size_t n = 0;
         std::array<std::uint8_t, 8> scratch{};
         EXPECT_EQ(ReadStatus::PeerClosed, server.read(scratch.data(), scratch.size(), n));
-        EXPECT_EQ(0u, n);
+        EXPECT_EQ(0U, n);
         EXPECT_TRUE(server.peer_closed());
         // Writing after the PEER closed stays legal (half-close semantics are
         // the glue's call); our own close_notify is idempotent success.
@@ -709,9 +711,9 @@ TEST(TlsConnectionTest, EmptyWriteEmitsOneZeroLengthRecord13) {
 
         WireFeeder server_feeds;
         const std::vector<std::uint8_t> wire = connection_wire(client, std::span<const std::uint8_t>{});
-        EXPECT_EQ(1u, count_records(wire));
+        EXPECT_EQ(1U, count_records(wire));
         const std::size_t len = (static_cast<std::size_t>(wire[3]) << 8) | wire[4];
-        EXPECT_EQ(17u, len); // tag(16) + inner type(1)
+        EXPECT_EQ(17U, len); // tag(16) + inner type(1)
         ASSERT_TRUE(server_feeds.feed(server, wire));
         EXPECT_TRUE(read_all(server).empty()); // nothing delivered, nothing failed
         EXPECT_FALSE(server.failed());
@@ -742,7 +744,7 @@ TEST(TlsConnectionTest, KeyUpdateRequestedRoundTrip13) {
         const std::vector<std::uint8_t> resp{'r', 'e', 's', 'p'};
         ASSERT_TRUE(server.write(resp).has_value());
         const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
-        EXPECT_EQ(2u, count_records(flight));
+        EXPECT_EQ(2U, count_records(flight));
         ASSERT_TRUE(client_feeds.feed(client, flight));
         EXPECT_FALSE(client.failed());
         EXPECT_EQ(resp, read_all(client)); // proves the client's read side rotated in step
@@ -775,7 +777,7 @@ TEST(TlsConnectionTest, KeyUpdateNotRequestedKeepsPeerWriteKeys13) {
         const std::vector<std::uint8_t> msg{'o', 'k'};
         ASSERT_TRUE(server.write(msg).has_value());
         const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
-        EXPECT_EQ(1u, count_records(flight));
+        EXPECT_EQ(1U, count_records(flight));
         ASSERT_TRUE(client_feeds.feed(client, flight));
         EXPECT_EQ(msg, read_all(client));
     });
@@ -942,10 +944,10 @@ TEST(TlsConnectionTest, EngineLeftoverFeedsConnection) {
         ASSERT_TRUE(drive_pair(client, server, &tail));
 
         IoBufChain leftover = server.take_inbound_leftover();
-        ASSERT_EQ(3u, leftover.readable_bytes());
+        ASSERT_EQ(3U, leftover.readable_bytes());
         const std::vector<std::uint8_t> leftover_bytes = chain_bytes(leftover);
         EXPECT_EQ(tail, leftover_bytes);
-        EXPECT_EQ(0u, server.take_inbound_leftover().readable_bytes()); // second take is empty
+        EXPECT_EQ(0U, server.take_inbound_leftover().readable_bytes()); // second take is empty
 
         TlsConnectedState client_state = client.take_state();
         TlsConnectedState server_state = server.take_state();
@@ -1072,7 +1074,7 @@ TEST(TlsConnectionTest, RecordsBeyondOneBatchAllDeliver13) {
         std::vector<std::uint8_t> expected;
         std::vector<std::uint8_t> wire;
         for (std::size_t i = 0; i < 3 * fiber::tls::kTlsRecordBatchMax + 5; ++i) {
-            const std::vector<std::uint8_t> piece(i % 7 + 1, static_cast<std::uint8_t>('a' + i % 26));
+            const std::vector<std::uint8_t> piece((i % 7) + 1, static_cast<std::uint8_t>('a' + (i % 26)));
             append_bytes(wire, craft_13_record(states.client, TlsContentType::ApplicationData, piece));
             append_bytes(expected, piece);
         }
@@ -1095,7 +1097,7 @@ TEST(TlsConnectionTest, DeliveredPlaintextIsAViewOfTheWireBuffer13) {
 
         std::vector<std::uint8_t> payload(5000);
         for (std::size_t i = 0; i < payload.size(); ++i) {
-            payload[i] = static_cast<std::uint8_t>(i * 13 + 1);
+            payload[i] = static_cast<std::uint8_t>((i * 13) + 1);
         }
         const std::vector<std::uint8_t> wire = craft_13_record(states.client, TlsContentType::ApplicationData, payload);
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
@@ -1106,7 +1108,7 @@ TEST(TlsConnectionTest, DeliveredPlaintextIsAViewOfTheWireBuffer13) {
         buf.commit(wire.size());
         std::array<TlsRecordSpan, fiber::tls::kTlsRecordBatchMax> batch{};
         const TlsFrameResult framed = fiber::tls::tls_frame_records({buf.readable_data(), buf.readable()}, batch);
-        ASSERT_EQ(1u, framed.count);
+        ASSERT_EQ(1U, framed.count);
         server.on_records(buf, {batch.data(), framed.count});
         const std::uint8_t *record_payload = buf.readable_data() + fiber::tls::kTlsRecordHeaderSize;
         buf = IoBuf{}; // the glue lets go of the wire buffer
@@ -1271,7 +1273,7 @@ TEST(TlsConnectionTest, Synthetic12AppAndCloseNotifyBothWays) {
         // preserved) — this exercises the sealed-1.2-alert decode on receive.
         ASSERT_TRUE(client.close_notify().has_value());
         const std::vector<std::uint8_t> close_wire = chain_bytes(client.take_output());
-        ASSERT_EQ(1u, count_records(close_wire));
+        ASSERT_EQ(1U, count_records(close_wire));
         EXPECT_EQ(kTypeAlert, close_wire[0]); // 1.2 preserves the record type
         ASSERT_TRUE(server_feeds.feed(server, close_wire));
         EXPECT_TRUE(server.peer_closed());
@@ -1298,7 +1300,7 @@ TEST(TlsConnectionTest, WireCutAnywhereReassembles12) {
             TlsConnection client(TlsConnectionRole::Client, std::move(sender.client));
             std::vector<std::uint8_t> payload(700);
             for (std::size_t i = 0; i < payload.size(); ++i) {
-                payload[i] = static_cast<std::uint8_t>(i * 7 + 5);
+                payload[i] = static_cast<std::uint8_t>((i * 7) + 5);
             }
             std::vector<std::uint8_t> wire;
             std::size_t off = 0;

@@ -82,7 +82,7 @@ std::expected<MessageTrace, RecordError> MessageTrace::create(CatClient &client,
         if (!generated) {
             return std::unexpected(generated.error());
         }
-        generated_id.emplace(std::move(*generated));
+        generated_id.emplace(*generated);
         options.context.message_id = generated_id->view();
     }
 

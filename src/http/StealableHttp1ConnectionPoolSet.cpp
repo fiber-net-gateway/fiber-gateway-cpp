@@ -140,6 +140,9 @@ class StealableHttp1ConnectionPoolSet::State : public common::NonCopyable, publi
 public:
     State(AcquireAwaiter &awaiter, std::coroutine_handle<> handle) noexcept :
         awaiter_(&awaiter), set_(awaiter.set_), caller_loop_(awaiter.caller_loop_), handle_(handle),
+        // AcquireAwaiter always carries an engaged key (ctor invariant); the
+        // checker cannot track an optional across objects.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         key_(*awaiter.key_), local_fallback_(std::move(awaiter.local_fallback_)), home_slot_(awaiter.home_slot_),
         cursor_(awaiter.cursor_) {
         FIBER_ASSERT(set_ != nullptr);
@@ -475,7 +478,7 @@ StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore &home_core
 
 StealableHttp1ConnectionPoolSet::Lease::Lease(Lease &&other) noexcept :
     kind_(other.kind_), local_(std::move(other.local_)), entry_(other.entry_), home_core_(other.home_core_),
-    key_(std::move(other.key_)), journey_(other.journey_) {
+    key_(other.key_), journey_(other.journey_) {
     other.kind_ = Kind::Empty;
     other.entry_ = nullptr;
     other.home_core_ = nullptr;
@@ -492,7 +495,7 @@ StealableHttp1ConnectionPoolSet::Lease &StealableHttp1ConnectionPoolSet::Lease::
     local_ = std::move(other.local_);
     entry_ = other.entry_;
     home_core_ = other.home_core_;
-    key_ = std::move(other.key_);
+    key_ = other.key_;
     journey_ = other.journey_;
     other.kind_ = Kind::Empty;
     other.entry_ = nullptr;
@@ -818,6 +821,8 @@ bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::prepare() noexcept {
 bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::advance_to_candidate() noexcept {
     FIBER_ASSERT(home_slot_ != nullptr);
     while (cursor_ != home_slot_) {
+        // key_ engaged is an AcquireAwaiter ctor invariant.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         if (target_shard().hint.probe(*key_).may_have()) {
             return true;
         }
@@ -828,7 +833,7 @@ bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::advance_to_candidate() noe
 
 StealableHttp1ConnectionPoolSet::AcquireAwaiter
 StealableHttp1ConnectionPoolSet::acquire(const HttpConnectionGroupKey &key) noexcept {
-    return AcquireAwaiter(*this, key);
+    return {*this, key};
 }
 
 StealableHttp1ConnectionPoolSet::Shard &StealableHttp1ConnectionPoolSet::current_shard() noexcept {

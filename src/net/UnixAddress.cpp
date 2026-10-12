@@ -1,5 +1,6 @@
 #include <fiber/net/UnixAddress.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <sys/un.h>
@@ -14,15 +15,11 @@ constexpr size_t kSunPathOffset = offsetof(sockaddr_un, sun_path);
 
 UnixAddress::UnixAddress(UnixAddressKind kind, std::string value) : kind_(kind), value_(std::move(value)) {}
 
-UnixAddress UnixAddress::filesystem(std::string path) {
-    return UnixAddress(UnixAddressKind::Filesystem, std::move(path));
-}
+UnixAddress UnixAddress::filesystem(std::string path) { return {UnixAddressKind::Filesystem, std::move(path)}; }
 
-UnixAddress UnixAddress::abstract(std::string bytes) {
-    return UnixAddress(UnixAddressKind::Abstract, std::move(bytes));
-}
+UnixAddress UnixAddress::abstract(std::string bytes) { return {UnixAddressKind::Abstract, std::move(bytes)}; }
 
-UnixAddress UnixAddress::unnamed() { return UnixAddress(UnixAddressKind::Unnamed, {}); }
+UnixAddress UnixAddress::unnamed() { return {UnixAddressKind::Unnamed, {}}; }
 
 UnixAddressKind UnixAddress::kind() const noexcept { return kind_; }
 
@@ -64,6 +61,8 @@ bool UnixAddress::to_sockaddr(sockaddr_storage &out, socklen_t &len) const noexc
     return false;
 }
 
+// Abstract-namespace path builds a std::string that may throw bad_alloc; fatal by house policy.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 bool UnixAddress::from_sockaddr(const sockaddr *addr, socklen_t len, UnixAddress &out) noexcept {
     if (!addr || addr->sa_family != AF_UNIX) {
         return false;
@@ -73,9 +72,7 @@ bool UnixAddress::from_sockaddr(const sockaddr *addr, socklen_t len, UnixAddress
     }
     const auto *un = reinterpret_cast<const sockaddr_un *>(addr);
     size_t path_len = len > kSunPathOffset ? static_cast<size_t>(len - kSunPathOffset) : 0;
-    if (path_len > sizeof(un->sun_path)) {
-        path_len = sizeof(un->sun_path);
-    }
+    path_len = std::min(path_len, sizeof(un->sun_path));
     if (path_len == 0) {
         out = UnixAddress::unnamed();
         return true;

@@ -4,6 +4,9 @@ include(cmake/SelectToolchain.cmake)
 
 project(fiber)
 
+# Export compile_commands.json in every build tree (clang-tidy via ./run_tidy.sh).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(FIBER_DEPS_DIR "${CMAKE_CURRENT_LIST_DIR}/temp/_deps" CACHE PATH "Shared deps download directory")
 set(FETCHCONTENT_BASE_DIR "${FIBER_DEPS_DIR}" CACHE PATH "FetchContent base directory")
 option(FIBER_FETCH_DEPS "Allow CMake to download third-party dependencies" ON)
@@ -216,6 +219,11 @@ if(FIBER_BUILD_TESTS)
         endif()
 
         enable_testing()
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if (Python3_Interpreter_FOUND)
+            add_test(NAME fiber_run_tidy_check COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/tests/RunTidyTest.py")
+        endif()
         file(GLOB FIBER_TEST_SOURCES CONFIGURE_DEPENDS
             "${CMAKE_CURRENT_LIST_DIR}/tests/*Test.cpp")
         list(SORT FIBER_TEST_SOURCES)

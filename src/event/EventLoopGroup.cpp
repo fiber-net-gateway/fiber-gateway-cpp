@@ -1,7 +1,7 @@
 #include <fiber/event/EventLoopGroup.h>
 
+#include <csignal>
 #include <pthread.h>
-#include <signal.h>
 
 #include <fiber/async/Signal.h>
 #include <fiber/common/Assert.h>

@@ -49,11 +49,26 @@ struct SuiteSpec {
     switch (suite) {
         case QuicCryptoSuite::InitialAes128GcmSha256:
         case QuicCryptoSuite::Aes128GcmSha256:
-            return {EVP_aead_aes_128_gcm(), EVP_sha256(), 16, 32, 16, false};
+            return {.aead = EVP_aead_aes_128_gcm(),
+                    .digest = EVP_sha256(),
+                    .key_len = 16,
+                    .secret_len = 32,
+                    .hp_len = 16,
+                    .hp_chacha20 = false};
         case QuicCryptoSuite::Aes256GcmSha384:
-            return {EVP_aead_aes_256_gcm(), EVP_sha384(), 32, 48, 32, false};
+            return {.aead = EVP_aead_aes_256_gcm(),
+                    .digest = EVP_sha384(),
+                    .key_len = 32,
+                    .secret_len = 48,
+                    .hp_len = 32,
+                    .hp_chacha20 = false};
         case QuicCryptoSuite::ChaCha20Poly1305Sha256:
-            return {EVP_aead_chacha20_poly1305(), EVP_sha256(), 32, 32, 32, true};
+            return {.aead = EVP_aead_chacha20_poly1305(),
+                    .digest = EVP_sha256(),
+                    .key_len = 32,
+                    .secret_len = 32,
+                    .hp_len = 32,
+                    .hp_chacha20 = true};
     }
     return {};
 }
@@ -69,21 +84,29 @@ struct SuiteSpec {
 
     const std::size_t label_len = std::strlen(label);
     constexpr std::size_t prefix_len = sizeof(kTls13LabelPrefix) - 1;
-    if (prefix_len + label_len > 0xffU) {
+    // info carries fixed label/context rooms below; enforcing their capacity
+    // here is what makes the fixed-size stack buffer sound.
+    constexpr std::size_t kMaxLabelLen = 32;
+    constexpr std::size_t kMaxContextLen = 32;
+    if (prefix_len + label_len > 0xffU || label_len > kMaxLabelLen || context_len > kMaxContextLen) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::uint8_t info[2 + 1 + prefix_len + 32 + 1 + 32]{};
+    std::uint8_t info[2 + 1 + prefix_len + kMaxLabelLen + 1 + kMaxContextLen]{};
     std::size_t offset = 0;
     info[offset++] = static_cast<std::uint8_t>((out_len >> 8U) & 0xffU);
     info[offset++] = static_cast<std::uint8_t>(out_len & 0xffU);
     info[offset++] = static_cast<std::uint8_t>(prefix_len + label_len);
     std::memcpy(info + offset, kTls13LabelPrefix, prefix_len);
     offset += prefix_len;
+    // The HKDF info structure length-prefixes label and context; neither
+    // copy is meant to be null-terminated.
+    // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
     std::memcpy(info + offset, label, label_len);
     offset += label_len;
     info[offset++] = static_cast<std::uint8_t>(context_len);
     if (context_len != 0) {
+        // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
         std::memcpy(info + offset, context, context_len);
         offset += context_len;
     }
@@ -571,7 +594,7 @@ common::IoResult<QuicSlice> quic_decrypt_aead_payload(const QuicPacketHeader &pa
                            packet.ciphertext, packet.ciphertext_len, packet.packet_data, *header_len)) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    return QuicSlice{plaintext, plaintext_len};
+    return QuicSlice{.data = plaintext, .len = plaintext_len};
 }
 
 std::uint64_t quic_confidentiality_limit(QuicCryptoSuite suite) noexcept {

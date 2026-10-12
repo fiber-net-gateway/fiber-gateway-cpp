@@ -85,7 +85,7 @@ struct ParkTask {
         }
     }
 
-    void start() { handle_.resume(); }
+    void start() const { handle_.resume(); }
 
     std::coroutine_handle<promise_type> handle_{};
 };
@@ -113,6 +113,7 @@ ParkTask park_twice(TestWaiter **slot, std::chrono::steady_clock::time_point dea
 } // namespace
 
 TEST(WaitAwaiterTest, CompleteResumesOnceAndDetaches) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoop loop;
     TestWaiter *slot = nullptr;
     Outcome outcome;
@@ -142,9 +143,11 @@ TEST(WaitAwaiterTest, CompleteResumesOnceAndDetaches) {
     ASSERT_TRUE(outcome.value.has_value());
     EXPECT_EQ(*outcome.value, IoErr::ConnReset);
     EXPECT_EQ(outcome.resumes, 1);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(WaitAwaiterTest, DeadlineCompletesWithTimedOut) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoop loop;
     TestWaiter *slot = nullptr;
     Outcome outcome;
@@ -163,6 +166,7 @@ TEST(WaitAwaiterTest, DeadlineCompletesWithTimedOut) {
     EXPECT_EQ(*outcome.value, IoErr::TimedOut);
     EXPECT_EQ(outcome.resumes, 1);
     EXPECT_EQ(slot, nullptr);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 // The reason resumes go through the loop's cancellable local defer queue rather
@@ -201,6 +205,7 @@ TEST(WaitAwaiterTest, DestroyingAwaiterRetractsAQueuedResume) {
 // already has. Re-arming would restart it, and would trip the loop's
 // one-entry-per-timer invariant.
 TEST(WaitAwaiterTest, ReParkingKeepsTheRunningDeadline) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoop loop;
     TestWaiter *slot = nullptr;
     Outcome outcome;
@@ -229,4 +234,5 @@ TEST(WaitAwaiterTest, ReParkingKeepsTheRunningDeadline) {
     ASSERT_TRUE(outcome.value.has_value());
     EXPECT_EQ(*outcome.value, IoErr::TimedOut);
     EXPECT_EQ(slot, nullptr);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }

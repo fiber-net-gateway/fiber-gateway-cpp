@@ -15,7 +15,7 @@ TEST(ArrayTest, PushPopSetGet) {
 
     EXPECT_TRUE(fiber::script::gc_array_push(&heap, arr, JsValue::make_integer(1)));
     EXPECT_TRUE(fiber::script::gc_array_push(&heap, arr, JsValue::make_integer(2)));
-    ASSERT_EQ(arr->size, 2u);
+    ASSERT_EQ(arr->size, 2U);
 
     const JsValue *v0 = fiber::script::gc_array_get(arr, 0);
     ASSERT_NE(v0, nullptr);
@@ -29,7 +29,7 @@ TEST(ArrayTest, PushPopSetGet) {
     EXPECT_EQ(js_value_int64(*v1), 5);
 
     EXPECT_TRUE(fiber::script::gc_array_set(&heap, arr, 3, JsValue::make_integer(7)));
-    EXPECT_EQ(arr->size, 4u);
+    EXPECT_EQ(arr->size, 4U);
     const JsValue *v2 = fiber::script::gc_array_get(arr, 2);
     ASSERT_NE(v2, nullptr);
     EXPECT_EQ(js_value_type(*v2), JsNodeType::Undefined);
@@ -38,7 +38,7 @@ TEST(ArrayTest, PushPopSetGet) {
     EXPECT_TRUE(fiber::script::gc_array_pop(arr, &popped));
     EXPECT_EQ(js_value_type(popped), JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(popped), 7);
-    EXPECT_EQ(arr->size, 3u);
+    EXPECT_EQ(arr->size, 3U);
 
     EXPECT_EQ(fiber::script::gc_array_get(arr, 9), nullptr);
 }
@@ -67,10 +67,10 @@ TEST(ArrayTest, InsertRemove) {
     EXPECT_TRUE(fiber::script::gc_array_remove(arr, 1, &removed));
     EXPECT_EQ(js_value_type(removed), JsNodeType::Integer);
     EXPECT_EQ(js_value_int64(removed), 2);
-    EXPECT_EQ(arr->size, 2u);
+    EXPECT_EQ(arr->size, 2U);
 
     EXPECT_TRUE(fiber::script::gc_array_insert(&heap, arr, 10, JsValue::make_integer(4)));
-    EXPECT_EQ(arr->size, 3u);
+    EXPECT_EQ(arr->size, 3U);
     const JsValue *v3 = fiber::script::gc_array_get(arr, 2);
     ASSERT_NE(v3, nullptr);
     EXPECT_EQ(js_value_int64(*v3), 4);
