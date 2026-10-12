@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -80,7 +81,7 @@ std::vector<std::string> corpus(std::size_t scale) {
 
 // ---- gzip drivers ----
 
-constexpr std::size_t kMaxOutChunk = 64 * 1024;
+constexpr std::size_t kMaxOutChunk = std::size_t{64} * 1024;
 
 class ScopedEncoder {
 public:
@@ -134,7 +135,7 @@ std::string drive_write_all(GzipEncoder &enc, std::string_view input, std::size_
             consumed += step->consumed;
             take -= step->consumed;
             if (step->status == EncodeStatus::NeedInput) {
-                EXPECT_EQ(take, 0u);
+                EXPECT_EQ(take, 0U);
                 break;
             }
             EXPECT_EQ(step->status, EncodeStatus::NeedOutput);
@@ -286,12 +287,14 @@ void *operator new(std::size_t size) {
 
 void *operator new[](std::size_t size) { return operator new(size); }
 
-void *operator new(std::size_t size, const std::nothrow_t &) noexcept {
+void *operator new(std::size_t size, const std::nothrow_t & /*unused*/) noexcept {
     ++g_thread_allocations;
     return std::malloc(size ? size : 1);
 }
 
-void *operator new[](std::size_t size, const std::nothrow_t &) noexcept { return operator new(size, std::nothrow); }
+void *operator new[](std::size_t size, const std::nothrow_t & /*unused*/) noexcept {
+    return operator new(size, std::nothrow);
+}
 
 void *operator new(std::size_t size, std::align_val_t alignment) {
     ++g_thread_allocations;
@@ -304,7 +307,7 @@ void *operator new(std::size_t size, std::align_val_t alignment) {
 
 void *operator new[](std::size_t size, std::align_val_t alignment) { return operator new(size, alignment); }
 
-void *operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept {
+void *operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t & /*unused*/) noexcept {
     ++g_thread_allocations;
     void *ptr = nullptr;
     if (::posix_memalign(&ptr, static_cast<std::size_t>(alignment), size ? size : 1) != 0) {
@@ -313,22 +316,26 @@ void *operator new(std::size_t size, std::align_val_t alignment, const std::noth
     return ptr;
 }
 
-void *operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept {
+void *operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t & /*unused*/) noexcept {
     return operator new(size, alignment, std::nothrow);
 }
 
 void operator delete(void *ptr) noexcept { std::free(ptr); }
-void operator delete(void *ptr, std::size_t) noexcept { std::free(ptr); }
-void operator delete(void *ptr, const std::nothrow_t &) noexcept { std::free(ptr); }
-void operator delete(void *ptr, std::align_val_t) noexcept { std::free(ptr); }
-void operator delete(void *ptr, std::size_t, std::align_val_t) noexcept { std::free(ptr); }
-void operator delete(void *ptr, std::align_val_t, const std::nothrow_t &) noexcept { std::free(ptr); }
+void operator delete(void *ptr, std::size_t /*unused*/) noexcept { std::free(ptr); }
+void operator delete(void *ptr, const std::nothrow_t & /*unused*/) noexcept { std::free(ptr); }
+void operator delete(void *ptr, std::align_val_t /*unused*/) noexcept { std::free(ptr); }
+void operator delete(void *ptr, std::size_t /*unused*/, std::align_val_t /*unused*/) noexcept { std::free(ptr); }
+void operator delete(void *ptr, std::align_val_t /*unused*/, const std::nothrow_t & /*unused*/) noexcept {
+    std::free(ptr);
+}
 void operator delete[](void *ptr) noexcept { std::free(ptr); }
-void operator delete[](void *ptr, std::size_t) noexcept { std::free(ptr); }
-void operator delete[](void *ptr, const std::nothrow_t &) noexcept { std::free(ptr); }
-void operator delete[](void *ptr, std::align_val_t) noexcept { std::free(ptr); }
-void operator delete[](void *ptr, std::size_t, std::align_val_t) noexcept { std::free(ptr); }
-void operator delete[](void *ptr, std::align_val_t, const std::nothrow_t &) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, std::size_t /*unused*/) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, const std::nothrow_t & /*unused*/) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, std::align_val_t /*unused*/) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, std::size_t /*unused*/, std::align_val_t /*unused*/) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, std::align_val_t /*unused*/, const std::nothrow_t & /*unused*/) noexcept {
+    std::free(ptr);
+}
 
 #endif
 
@@ -361,14 +368,14 @@ TEST(GzipEncoderTest, HeaderFieldsFollowLevelAndPlatform) {
         int level;
         std::uint8_t xfl;
     };
-    const LevelXfl specs[] = {{1, 4}, {6, 0}, {9, 2}};
+    const LevelXfl specs[] = {{.level = 1, .xfl = 4}, {.level = 6, .xfl = 0}, {.level = 9, .xfl = 2}};
     for (const LevelXfl &spec: specs) {
         const std::string member = gzip_stream(pool, spec.level, {std::string_view("")}, false, 4096, 4096, false, 1);
-        ASSERT_GE(member.size(), 18u);
-        EXPECT_EQ(static_cast<std::uint8_t>(member[0]), 0x1fu);
-        EXPECT_EQ(static_cast<std::uint8_t>(member[1]), 0x8bu);
-        EXPECT_EQ(static_cast<std::uint8_t>(member[2]), 8u); // CM = deflate
-        EXPECT_EQ(static_cast<std::uint8_t>(member[3]), 0u); // FLG: no extras
+        ASSERT_GE(member.size(), 18U);
+        EXPECT_EQ(static_cast<std::uint8_t>(member[0]), 0x1fU);
+        EXPECT_EQ(static_cast<std::uint8_t>(member[1]), 0x8bU);
+        EXPECT_EQ(static_cast<std::uint8_t>(member[2]), 8U); // CM = deflate
+        EXPECT_EQ(static_cast<std::uint8_t>(member[3]), 0U); // FLG: no extras
         EXPECT_EQ(member.substr(4, 4), std::string("\x00\x00\x00\x00", 4)); // MTIME = 0
         EXPECT_EQ(static_cast<std::uint8_t>(member[8]), spec.xfl) << "level " << spec.level;
         EXPECT_EQ(static_cast<std::uint8_t>(member[9]), expect_os);
@@ -380,7 +387,7 @@ TEST(GzipEncoderTest, EmptyStreamFinishIsEmptyMember) {
     for (int level: {1, 5, 9}) {
         const std::string member = gzip_stream(pool, level, {std::string_view("")}, false, 4096, 4096, false, 1);
         EXPECT_EQ(member, reference_gzip("", level));
-        ASSERT_EQ(member.size(), 20u); // 10 header + 2 final empty block + 8 trailer
+        ASSERT_EQ(member.size(), 20U); // 10 header + 2 final empty block + 8 trailer
         EXPECT_EQ(member.substr(10), std::string("\x03\x00", 2) + std::string(8, '\x00'));
         EXPECT_TRUE(gunzip_incremental(member, 4096).empty());
     }
@@ -389,8 +396,9 @@ TEST(GzipEncoderTest, EmptyStreamFinishIsEmptyMember) {
 TEST(GzipEncoderTest, TrailerCarriesCrcAndLittleEndianIsize) {
     BufPool pool;
     const std::string input = json_payload(50000) + utf8_payload(1000);
-    const std::string member = gzip_stream(pool, 6, {input}, false, 1u << 30, 64 * 1024, false, 1);
-    ASSERT_GE(member.size(), 18u);
+    const std::string member =
+            gzip_stream(pool, 6, {input}, false, 1U << 30, static_cast<std::size_t>(64 * 1024), false, 1);
+    ASSERT_GE(member.size(), 18U);
     const std::string trailer = member.substr(member.size() - 8);
     const std::uint32_t crc = fiber::util::Crc32::compute(input);
     const std::uint32_t isize = static_cast<std::uint32_t>(input.size());
@@ -410,7 +418,7 @@ TEST(GzipEncoderTest, MatchesUpstreamAtEveryLevel) {
     BufPool pool;
     for (int level = 1; level <= 9; ++level) {
         for (const std::string &input: corpus(60000)) {
-            ASSERT_EQ(gzip_stream(pool, level, {input}, false, 1u << 30, 64 * 1024, false, 1),
+            ASSERT_EQ(gzip_stream(pool, level, {input}, false, 1U << 30, std::size_t{64} * 1024, false, 1),
                       reference_gzip(input, level))
                     << "level " << level << " size " << input.size();
         }
@@ -421,8 +429,8 @@ TEST(GzipEncoderTest, OutputIndependentOfSlicing) {
     BufPool pool;
     const std::string input = json_payload(90000) + random_bytes(40000, 3) + utf8_payload(20000);
     const std::string reference = reference_gzip(input, 6);
-    for (std::size_t in_chunk: {1u, 2u, 3u, 7u, 4096u}) {
-        for (std::size_t out_chunk: {1u, 2u, 5u, 6u, 7u, 16 * 1024u}) {
+    for (std::size_t in_chunk: {1U, 2U, 3U, 7U, 4096U}) {
+        for (std::size_t out_chunk: {1U, 2U, 5U, 6U, 7U, 16 * 1024U}) {
             ASSERT_EQ(gzip_stream(pool, 6, {input}, false, in_chunk, out_chunk, false, 1), reference)
                     << "in " << in_chunk << " out " << out_chunk;
         }
@@ -436,9 +444,13 @@ TEST(GzipEncoderTest, FlushSequencesMatchUpstreamByteForByte) {
     const std::string b = random_bytes(5000, 61);
     const std::string c = utf8_payload(10000);
     for (int level: {1, 6, 9}) {
-        const std::string ours = gzip_stream(pool, level, {a, b, c}, true, 8192, 16 * 1024, false, 5);
-        ASSERT_EQ(ours, reference_gzip_sequence(level, {a, b, c}, true, 16 * 1024)) << "level " << level;
-        ASSERT_EQ(gunzip_incremental(ours, 16384), a + b + c);
+        const std::string ours =
+                gzip_stream(pool, level, {a, b, c}, true, 8192, static_cast<std::size_t>(16 * 1024), false, 5);
+        ASSERT_EQ(ours, reference_gzip_sequence(level, {a, b, c}, true, std::size_t{16} * 1024)) << "level " << level;
+        std::string expected = a;
+        expected += b;
+        expected += c;
+        ASSERT_EQ(gunzip_incremental(ours, 16384), expected);
     }
 }
 
@@ -451,8 +463,8 @@ TEST(GzipEncoderTest, EmptyWriteDoesNotStartTheStream) {
     std::array<std::uint8_t, 64> buf{};
     const auto step = enc->write({}, {buf.data(), buf.size()});
     ASSERT_TRUE(step.has_value());
-    EXPECT_EQ(step->consumed, 0u);
-    EXPECT_EQ(step->written, 0u);
+    EXPECT_EQ(step->consumed, 0U);
+    EXPECT_EQ(step->written, 0U);
     EXPECT_EQ(step->status, EncodeStatus::NeedInput);
 
     const std::string rest =
@@ -467,7 +479,7 @@ TEST(GzipEncoderTest, VirginFlushProducesNothingAndStartsNoHeader) {
     std::array<std::uint8_t, 64> buf{};
     const auto step = enc->flush({buf.data(), buf.size()});
     ASSERT_TRUE(step.has_value());
-    EXPECT_EQ(step->written, 0u);
+    EXPECT_EQ(step->written, 0U);
     EXPECT_EQ(step->status, EncodeStatus::Flushed);
 
     const std::string rest = drive_write_all(*enc, "data", 4096, 4096, false, 1) + drive_finish(*enc, 4096, false, 1);
@@ -483,8 +495,8 @@ TEST(GzipEncoderTest, ZeroOutputSpanIsLegal) {
     ASSERT_TRUE(step.has_value());
     // The wrapper contract: with no output room nothing is consumed either;
     // the caller resubmits the input once space exists.
-    EXPECT_EQ(step->consumed, 0u);
-    EXPECT_EQ(step->written, 0u);
+    EXPECT_EQ(step->consumed, 0U);
+    EXPECT_EQ(step->written, 0U);
     EXPECT_EQ(step->status, EncodeStatus::NeedOutput);
 
     const std::string rest = drive_write_all(*enc, "hello", 4096, 4096, false, 1) + drive_finish(*enc, 4096, false, 1);
@@ -496,7 +508,7 @@ TEST(GzipEncoderTest, HeaderCompletesAcrossTinyOutputs) {
     ScopedEncoder enc(pool, 1);
     ASSERT_TRUE(static_cast<bool>(enc));
     const std::string head = drive_write_all(*enc, "abc", 4096, 1, false, 1);
-    ASSERT_EQ(head.size(), 10u); // header only; the core holds "abc" back
+    ASSERT_EQ(head.size(), 10U); // header only; the core holds "abc" back
     ASSERT_EQ(drive_finish(*enc, 4096, false, 1), reference_gzip("abc", 1).substr(10));
 }
 
@@ -530,14 +542,14 @@ TEST(GzipEncoderTest, FlushCompletesPartiallySentHeader) {
     std::array<std::uint8_t, 16> buf{};
     const auto step = enc->write({reinterpret_cast<const std::uint8_t *>("body"), 4}, {buf.data(), 5});
     ASSERT_TRUE(step.has_value());
-    EXPECT_EQ(step->written, 5u); // first five header bytes
-    EXPECT_EQ(step->consumed, 0u);
+    EXPECT_EQ(step->written, 5U); // first five header bytes
+    EXPECT_EQ(step->consumed, 0U);
     EXPECT_EQ(step->status, EncodeStatus::NeedOutput);
 
     // With no input accepted yet, flush only finishes the header (the wrapper
     // suppresses virgin markers); the caller must still resubmit "body".
     const std::string completed = drive_flush(*enc, 4096, false, 1);
-    ASSERT_EQ(completed.size(), 5u); // header bytes 5..9: MTIME zeros, XFL=4, OS
+    ASSERT_EQ(completed.size(), 5U); // header bytes 5..9: MTIME zeros, XFL=4, OS
     EXPECT_EQ(completed, std::string("\x00\x00\x00\x04\x03", 5));
 
     const std::string rest = drive_write_all(*enc, "body", 4096, 4096, false, 1) + drive_finish(*enc, 4096, false, 1);
@@ -556,7 +568,7 @@ TEST(GzipEncoderTest, RepeatedFinishIsIdempotentAndGuardsFollow) {
     std::array<std::uint8_t, 16> buf{};
     const auto again = enc->finish({buf.data(), buf.size()});
     ASSERT_TRUE(again.has_value());
-    EXPECT_EQ(again->written, 0u);
+    EXPECT_EQ(again->written, 0U);
     EXPECT_EQ(again->status, EncodeStatus::Finished);
 
     const auto write_late = enc->write({reinterpret_cast<const std::uint8_t *>("x"), 1}, {buf.data(), buf.size()});
@@ -639,7 +651,7 @@ TEST(GzipEncoderTest, SteadyStateOpsAllocateNothing) {
     BufPool pool;
     ScopedEncoder enc(pool, 6);
     ASSERT_TRUE(static_cast<bool>(enc));
-    std::array<std::uint8_t, 16 * 1024> out_buf{};
+    std::array<std::uint8_t, static_cast<size_t>(16 * 1024)> out_buf{};
     const std::string chunk = json_payload(4096);
 
     // Warm up every internal path, including a window slide (> 64 KiB total).
@@ -668,8 +680,8 @@ TEST(GzipEncoderTest, SteadyStateOpsAllocateNothing) {
             }
         }
     }
-    EXPECT_GT(written_total, 0u);
-    EXPECT_EQ(g_thread_allocations, 0u) << "steady-state write/flush allocated";
+    EXPECT_GT(written_total, 0U);
+    EXPECT_EQ(g_thread_allocations, 0U) << "steady-state write/flush allocated";
 }
 
 // ---- extended acceptance test (run once per migration acceptance) ----
@@ -692,12 +704,12 @@ TEST(GzipEncoderExtendedTest, IsizeWrapsModulo2To32AndCrcMatches) {
         }
     }
     const std::string batch = repeat_pattern(300000, period);
-    const std::uint64_t target = (1ull << 32) + 65536;
+    const std::uint64_t target = (1ULL << 32) + 65536;
 
     fiber::util::Crc32 crc;
     std::uint64_t fed = 0;
-    std::array<std::uint8_t, 64 * 1024> out_buf{};
-    std::array<std::uint8_t, 64 * 1024> decode_buf{};
+    std::array<std::uint8_t, static_cast<size_t>(64 * 1024)> out_buf{};
+    std::array<std::uint8_t, static_cast<size_t>(64 * 1024)> decode_buf{};
     std::string expected;
     expected.reserve(decode_buf.size());
 
@@ -753,7 +765,7 @@ TEST(GzipEncoderExtendedTest, IsizeWrapsModulo2To32AndCrcMatches) {
     ASSERT_EQ(inflate.total_out(), target);
 
     // Trailer: CRC32 of all input and ISIZE = total mod 2^32.
-    ASSERT_GE(tail.size(), 8u);
+    ASSERT_GE(tail.size(), 8U);
     const std::string_view trailer{tail.data() + tail.size() - 8, 8};
     const std::uint32_t crc_expected = crc.value();
     const std::uint32_t isize_expected = static_cast<std::uint32_t>(target); // 65536

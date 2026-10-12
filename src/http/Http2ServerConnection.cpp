@@ -9,13 +9,15 @@ namespace fiber::http {
 Http2ServerConnection::Http2ServerConnection(event::EventLoop &loop, Http2Connection::Options options,
                                              ServerRequestFactory &request_factory,
                                              std::chrono::milliseconds idle_timeout) noexcept :
-    loop_(&loop), request_factory_(&request_factory), conn_(std::move(options), this, connection_ops()),
-    close_gate_(loop, conn_), idle_timeout_(idle_timeout) {
+    loop_(&loop), request_factory_(&request_factory), conn_(options, this, connection_ops()), close_gate_(loop, conn_),
+    idle_timeout_(idle_timeout) {
     FIBER_ASSERT(idle_timeout_ >= std::chrono::milliseconds::zero());
 }
 
 const Http2Connection::Ops &Http2ServerConnection::connection_ops() noexcept {
-    static const Http2Connection::Ops ops{&create_peer_stream, &on_state_change, &on_capacity_change};
+    static const Http2Connection::Ops ops{.create_peer_stream = &create_peer_stream,
+                                          .on_state_change = &on_state_change,
+                                          .on_capacity_change = &on_capacity_change};
     return ops;
 }
 
@@ -32,7 +34,7 @@ void Http2ServerConnection::on_state_change(void *ctx, Http2Connection &connecti
     }
 }
 
-void Http2ServerConnection::on_capacity_change(void *ctx, Http2Connection &) noexcept {
+void Http2ServerConnection::on_capacity_change(void *ctx, Http2Connection & /*unused*/) noexcept {
     static_cast<Http2ServerConnection *>(ctx)->sync_idle_timer();
 }
 

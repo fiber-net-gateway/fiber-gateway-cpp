@@ -21,15 +21,15 @@ namespace fiber::compression {
 
 // ---- fixed stream parameters ----
 inline constexpr std::uint32_t kDeflateWBits = 15;
-inline constexpr std::uint32_t kDeflateWSize = 1u << kDeflateWBits; // 32768
+inline constexpr std::uint32_t kDeflateWSize = 1U << kDeflateWBits; // 32768
 inline constexpr std::uint32_t kDeflateWMask = kDeflateWSize - 1;
-inline constexpr std::uint64_t kDeflateWindowSize = 2ull * kDeflateWSize; // 65536
+inline constexpr std::uint64_t kDeflateWindowSize = 2ULL * kDeflateWSize; // 65536
 inline constexpr std::uint32_t kDeflateMemLevel = 8;
 inline constexpr std::uint32_t kDeflateHashBits = kDeflateMemLevel + 7; // 15
-inline constexpr std::uint32_t kDeflateHashSize = 1u << kDeflateHashBits;
+inline constexpr std::uint32_t kDeflateHashSize = 1U << kDeflateHashBits;
 inline constexpr std::uint32_t kDeflateHashMask = kDeflateHashSize - 1;
 inline constexpr std::uint32_t kDeflateHashShift = (kDeflateHashBits + kDeflateMinMatch - 1) / kDeflateMinMatch; // 5
-inline constexpr std::uint32_t kDeflateLitBufSize = 1u << (kDeflateMemLevel + 6); // 16384
+inline constexpr std::uint32_t kDeflateLitBufSize = 1U << (kDeflateMemLevel + 6); // 16384
 inline constexpr std::uint32_t kDeflatePendingBufSize = kDeflateLitBufSize * 4; // 65536
 // Symbols are accumulated into the tail of the pending buffer (three bytes
 // each); the block is flushed before the two regions overlap.
@@ -102,8 +102,8 @@ struct DeflateState {
 
     // ---- Huffman trees ----
     DeflateCtData dyn_ltree[kDeflateHeapSize]; // literal and length codes
-    DeflateCtData dyn_dtree[2 * kDeflateDCodes + 1]; // distance codes
-    DeflateCtData bl_tree[2 * kDeflateBCodes + 1]; // Huffman tree for bit lengths
+    DeflateCtData dyn_dtree[(2 * kDeflateDCodes) + 1]; // distance codes
+    DeflateCtData bl_tree[(2 * kDeflateBCodes) + 1]; // Huffman tree for bit lengths
     DeflateTreeDesc l_desc;
     DeflateTreeDesc d_desc;
     DeflateTreeDesc bl_desc;
@@ -133,18 +133,20 @@ struct DeflateState {
     std::uint32_t high_water = 0; // highest window position written+zeroed
     bool slid = false; // whether the window was slid once
 
-    [[nodiscard]] const std::uint8_t *sym_buf() const noexcept { return pending_buf + kDeflateLitBufSize; }
-    [[nodiscard]] std::uint8_t *sym_buf() noexcept { return pending_buf + kDeflateLitBufSize; }
+    // Interior pointer into pending_buf; const-ness of the state deliberately
+    // does not propagate to the shared pending buffer (the tally fast paths
+    // write through it), so a const overload would differ only in return type.
+    [[nodiscard]] std::uint8_t *sym_buf() const noexcept { return pending_buf + kDeflateLitBufSize; }
 
     [[nodiscard]] bool finish_started() const noexcept { return status == DeflateStreamStatus::FinishStarted; }
 };
 
 // Rank of a flush op, for duplicate-op suppression (zlib RANK: 2*f with the
 // f > 4 adjustment dropped because Finish is the largest op we support).
-inline constexpr int deflate_rank(int flush) noexcept { return 2 * flush; }
+constexpr int deflate_rank(int flush) noexcept { return 2 * flush; }
 
 // One of the 30 distance codes (zlib d_code).
-inline constexpr unsigned deflate_d_code(std::uint32_t dist) noexcept {
+constexpr unsigned deflate_d_code(std::uint32_t dist) noexcept {
     return dist < 256 ? kDeflateDistCode[dist] : kDeflateDistCode[256 + (dist >> 7)];
 }
 

@@ -115,7 +115,7 @@ AccessLogScriptExtension::resolve_constant(std::string_view namespace_name, std:
 }
 
 AbiResult AccessLogScriptExtension::field_fn(void *userdata, const HostCallFrame &frame) noexcept {
-    auto *field = static_cast<const FieldRef *>(userdata);
+    const auto *field = static_cast<const FieldRef *>(userdata);
     auto *base = static_cast<fiber::http_script::ScriptExchangeCtx *>(frame.attach);
     auto *ctx = static_cast<AccessLogEvalContext *>(base);
     if (field == nullptr || ctx == nullptr) {

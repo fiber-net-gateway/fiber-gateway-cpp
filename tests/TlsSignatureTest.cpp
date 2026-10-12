@@ -83,21 +83,21 @@ TEST(TlsPrivateKeyParse, PemFormatsAndKinds) {
         TlsKeyKind kind;
     };
     const Case cases[] = {
-            {certfix::kRsa2048KeyPem, TlsKeyKind::Rsa}, // PKCS#8
-            {certfix::kRsa1024KeyPem, TlsKeyKind::Rsa}, // PKCS#8
-            {certfix::kP256KeyPem, TlsKeyKind::Ec}, // PKCS#8
-            {certfix::kP384KeyPem, TlsKeyKind::Ec}, // PKCS#8
-            {certfix::kP521KeyPem, TlsKeyKind::Ec}, // PKCS#8
-            {certfix::kEd25519KeyPem, TlsKeyKind::Ed25519}, // PKCS#8
-            {certfix::kRsa2048KeyPkcs1Pem, TlsKeyKind::Rsa}, // traditional PKCS#1
-            {certfix::kP256KeySec1Pem, TlsKeyKind::Ec}, // traditional sec1
+            {.pem = certfix::kRsa2048KeyPem, .kind = TlsKeyKind::Rsa}, // PKCS#8
+            {.pem = certfix::kRsa1024KeyPem, .kind = TlsKeyKind::Rsa}, // PKCS#8
+            {.pem = certfix::kP256KeyPem, .kind = TlsKeyKind::Ec}, // PKCS#8
+            {.pem = certfix::kP384KeyPem, .kind = TlsKeyKind::Ec}, // PKCS#8
+            {.pem = certfix::kP521KeyPem, .kind = TlsKeyKind::Ec}, // PKCS#8
+            {.pem = certfix::kEd25519KeyPem, .kind = TlsKeyKind::Ed25519}, // PKCS#8
+            {.pem = certfix::kRsa2048KeyPkcs1Pem, .kind = TlsKeyKind::Rsa}, // traditional PKCS#1
+            {.pem = certfix::kP256KeySec1Pem, .kind = TlsKeyKind::Ec}, // traditional sec1
     };
     for (const Case &c: cases) {
         auto key = TlsPrivateKey::parse_pem(pem_span(c.pem));
         ASSERT_TRUE(key.has_value()) << "parse failed";
         EXPECT_FALSE(key->empty());
         EXPECT_EQ(c.kind, key->key_kind());
-        EXPECT_GT(key->max_signature_len(), 0u);
+        EXPECT_GT(key->max_signature_len(), 0U);
     }
 }
 
@@ -128,16 +128,16 @@ TEST(TlsPrivateKeyParse, MoveTransfersOwnership) {
     auto len = moved.sign(TlsSignatureScheme::RsaPssRsaeSha256, TlsProtocolVersion::Tls13, as_span(sigvec::kContentA),
                           out);
     ASSERT_TRUE(len.has_value());
-    EXPECT_GT(*len, 0u);
+    EXPECT_GT(*len, 0U);
 }
 
 TEST(TlsPrivateKeyApi, MaxSignatureLen) {
     auto rsa = TlsPrivateKey::parse_pem(pem_span(certfix::kRsa2048KeyPem));
     ASSERT_TRUE(rsa.has_value());
-    EXPECT_EQ(256u, rsa->max_signature_len()); // 2048-bit modulus
+    EXPECT_EQ(256U, rsa->max_signature_len()); // 2048-bit modulus
     auto ed = TlsPrivateKey::parse_pem(pem_span(certfix::kEd25519KeyPem));
     ASSERT_TRUE(ed.has_value());
-    EXPECT_EQ(64u, ed->max_signature_len());
+    EXPECT_EQ(64U, ed->max_signature_len());
 }
 
 // ---------------------------------------------------------------------------
@@ -170,36 +170,36 @@ struct KeySupport {
 // TLS 1.3 requires the scheme's exact EC curve while TLS 1.2 accepts any EC
 // curve for any ECDSA scheme (the 1.2 scheme id carries no curve semantics).
 const KeySupport kKeyMatrix[] = {
-        {certfix::kRsa2048KeyPem,
-         certfix::kLeafRsaPem,
-         TlsKeyKind::Rsa,
-         {true, true, true, false, false, false, false, true, true, true},
-         {false, false, false, false, false, false, false, true, true, true}},
-        {certfix::kRsa1024KeyPem,
-         certfix::kCertRsa1024Pem,
-         TlsKeyKind::Rsa,
-         {true, true, true, false, false, false, false, true, true, false},
-         {false, false, false, false, false, false, false, true, true, false}},
-        {certfix::kP256KeyPem,
-         certfix::kLeafEcP256Pem,
-         TlsKeyKind::Ec,
-         {false, false, false, true, true, true, false, false, false, false},
-         {false, false, false, true, false, false, false, false, false, false}},
-        {certfix::kP384KeyPem,
-         certfix::kLeafEcP384Pem,
-         TlsKeyKind::Ec,
-         {false, false, false, true, true, true, false, false, false, false},
-         {false, false, false, false, true, false, false, false, false, false}},
-        {certfix::kP521KeyPem,
-         certfix::kCertP521Pem,
-         TlsKeyKind::Ec,
-         {false, false, false, true, true, true, false, false, false, false},
-         {false, false, false, false, false, true, false, false, false, false}},
-        {certfix::kEd25519KeyPem,
-         certfix::kLeafEd25519Pem,
-         TlsKeyKind::Ed25519,
-         {false, false, false, false, false, false, true, false, false, false},
-         {false, false, false, false, false, false, true, false, false, false}},
+        {.key_pem = certfix::kRsa2048KeyPem,
+         .cert_pem = certfix::kLeafRsaPem,
+         .kind = TlsKeyKind::Rsa,
+         .tls12 = {true, true, true, false, false, false, false, true, true, true},
+         .tls13 = {false, false, false, false, false, false, false, true, true, true}},
+        {.key_pem = certfix::kRsa1024KeyPem,
+         .cert_pem = certfix::kCertRsa1024Pem,
+         .kind = TlsKeyKind::Rsa,
+         .tls12 = {true, true, true, false, false, false, false, true, true, false},
+         .tls13 = {false, false, false, false, false, false, false, true, true, false}},
+        {.key_pem = certfix::kP256KeyPem,
+         .cert_pem = certfix::kLeafEcP256Pem,
+         .kind = TlsKeyKind::Ec,
+         .tls12 = {false, false, false, true, true, true, false, false, false, false},
+         .tls13 = {false, false, false, true, false, false, false, false, false, false}},
+        {.key_pem = certfix::kP384KeyPem,
+         .cert_pem = certfix::kLeafEcP384Pem,
+         .kind = TlsKeyKind::Ec,
+         .tls12 = {false, false, false, true, true, true, false, false, false, false},
+         .tls13 = {false, false, false, false, true, false, false, false, false, false}},
+        {.key_pem = certfix::kP521KeyPem,
+         .cert_pem = certfix::kCertP521Pem,
+         .kind = TlsKeyKind::Ec,
+         .tls12 = {false, false, false, true, true, true, false, false, false, false},
+         .tls13 = {false, false, false, false, false, true, false, false, false, false}},
+        {.key_pem = certfix::kEd25519KeyPem,
+         .cert_pem = certfix::kLeafEd25519Pem,
+         .kind = TlsKeyKind::Ed25519,
+         .tls12 = {false, false, false, false, false, false, true, false, false, false},
+         .tls13 = {false, false, false, false, false, false, true, false, false, false}},
 };
 
 TEST(TlsSignatureSupport, SchemeKeyMatrix) {
@@ -227,9 +227,9 @@ TEST(TlsSignatureSupport, SchemeKeyMatrix) {
 TEST(TlsSignatureSupport, DefaultViewSupportsNothing) {
     const TlsPublicKeyView view;
     EXPECT_TRUE(view.empty());
-    for (std::size_t i = 0; i < std::size(kSchemeOrder); ++i) {
-        EXPECT_FALSE(view.supports(kSchemeOrder[i], TlsProtocolVersion::Tls12));
-        EXPECT_FALSE(view.supports(kSchemeOrder[i], TlsProtocolVersion::Tls13));
+    for (auto i: kSchemeOrder) {
+        EXPECT_FALSE(view.supports(i, TlsProtocolVersion::Tls12));
+        EXPECT_FALSE(view.supports(i, TlsProtocolVersion::Tls13));
     }
     // Verify with the empty view reports the mismatch instead of asserting.
     auto res = tls_verify(TlsSignatureScheme::RsaPssRsaeSha256, TlsProtocolVersion::Tls13, view,
@@ -332,8 +332,7 @@ TEST(TlsSignatureRoundtrip, SignThenVerifyEverySupportedPair) {
         ASSERT_FALSE(view.empty());
 
         std::array<std::uint8_t, 512> out{};
-        for (std::size_t i = 0; i < std::size(kSchemeOrder); ++i) {
-            const TlsSignatureScheme scheme = kSchemeOrder[i];
+        for (auto scheme: kSchemeOrder) {
             for (const TlsProtocolVersion version: {TlsProtocolVersion::Tls12, TlsProtocolVersion::Tls13}) {
                 if (!key->supports(scheme, version)) {
                     continue;

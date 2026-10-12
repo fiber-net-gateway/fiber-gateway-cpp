@@ -300,7 +300,7 @@ private:
     void post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry);
     void cancel(TimerEntry &entry);
     void cancel_quiesced(TimerEntry &entry);
-    void cancel(DeferEntry &entry);
+    void cancel(DeferEntry &entry) const;
 
     MpscQueue<NotifyEntry *> notify_queue_;
     NotifyNode *pending_notify_ = nullptr;

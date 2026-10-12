@@ -23,6 +23,8 @@ Follow existing C++23 style: 4-space indentation, braces on the same line, and n
 
 Do not spend time repeatedly formatting code while implementing a task. Once the task is complete, run `./format_code.sh` to apply the repository-wide formatting rules.
 
+Static analysis: run `./run_tidy.sh` (clang-tidy 20.x, changed files by default; `-a` for everything, `-f` to auto-fix) against a configured build tree. Selecting any header checks all project translation units available in that tree, covering indirect includes as well. The check set and every disable are documented in `.clang-tidy` / `feature/clang-tidy-rollout.md`. All project code (`src/`, `include/`, `example/`, `apps/`, `tests/`, `fuzz/`) is at zero warnings and enforced as errors; fuzz requires its own build tree. Never "fix" a by-value coroutine parameter flagged by `performance-unnecessary-value-param` by turning it into a reference — the value must live in the coroutine frame across `co_await`; suppress with a commented `NOLINT` instead.
+
 Design state and member variables to be minimal and explicit. Prefer establishing required invariants at construction or initialization boundaries and assert there, instead of carrying nullable members and repeatedly checking `!= nullptr` at every use site. Push nullability checks to the edges when possible, and keep steady-state execution paths simple.
 
 Do not use C++ exceptions in this project. Do not write `throw`, and prefer `noexcept` for internal callback-style functions and other code paths that are required to be non-throwing by design.

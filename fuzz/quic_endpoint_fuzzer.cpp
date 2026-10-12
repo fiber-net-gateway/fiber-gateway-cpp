@@ -73,7 +73,7 @@ struct Tracker {
     std::size_t count = 0;
 };
 
-void destroy_connection(void *, QuicConnection &connection) noexcept { delete &connection; }
+void destroy_connection(void * /*unused*/, QuicConnection &connection) noexcept { delete &connection; }
 
 QuicConnection::Lease create_connection(void *owner, QuicUdpEndpoint &endpoint,
                                         const QuicConnection::Options &options) noexcept {
@@ -130,7 +130,10 @@ struct Server {
         admission.address_validation_key_set = true;
         admission.address_validation_key = kTokenKey;
         // Rate limits are time based; disabled so an input replays the same.
-        admission.stateless_response_limits = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+        admission.stateless_response_limits = {.stateless_reset = {.endpoint_per_second = 0, .peer_per_second = 0},
+                                               .version_negotiation = {.endpoint_per_second = 0, .peer_per_second = 0},
+                                               .retry = {.endpoint_per_second = 0, .peer_per_second = 0},
+                                               .invalid_token_close = {.endpoint_per_second = 0, .peer_per_second = 0}};
         admission.connection_owner = &tracker;
         admission.create_connection = create_connection;
         auto ok = endpoint.init(endpoint_options, admission);
@@ -142,6 +145,7 @@ struct Server {
     fiber::async::Task<void> teardown() {
         for (std::size_t i = 0; i < tracker.count; ++i) {
             QuicConnection &connection = *tracker.leases[i];
+            // NOLINTNEXTLINE(bugprone-branch-clone) same call, but the arms guard distinct terminal states
             if (!connection.terminal_closing()) {
                 connection.close_immediately();
             } else if (!connection.closed()) {
@@ -245,7 +249,7 @@ QuicSlice initial_token(std::uint8_t kind, const fiber::net::SocketAddress &peer
             minted = quic_create_address_token(kTokenKey, peer, now - 60, QuicAddressTokenKind::Retry, &odcid);
             break;
         case 5:
-            return {kGarbage, sizeof(kGarbage)};
+            return {.data = kGarbage, .len = sizeof(kGarbage)};
         default:
             return {};
     }

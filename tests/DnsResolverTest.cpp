@@ -224,7 +224,7 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<s
     if (!bind_result) {
         port_promise->set_value(0);
         outcome.err = bind_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -232,7 +232,7 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<s
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -241,7 +241,7 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<s
         auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
         if (!recv_result) {
             outcome.err = recv_result.error();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
         ++outcome.recv_count;
@@ -249,7 +249,7 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<s
         auto type_result = parse_question_type(buf.data(), recv_result->size);
         if (!type_result) {
             outcome.err = type_result.error();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
 
@@ -265,21 +265,21 @@ DetachedTask run_dual_stack_server(fiber::event::EventLoop *loop, std::promise<s
         }
         if (!echo_question_name(buf.data(), recv_result->size, response)) {
             outcome.err = IoErr::Invalid;
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
 
         auto send_result = co_await socket.send_to(response.data(), response.size(), recv_result->peer, 2s);
         if (!send_result) {
             outcome.err = send_result.error();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
     }
 
     outcome.err = IoErr::None;
     socket.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache2 *cache, std::uint16_t port,
@@ -448,7 +448,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop, std::promise<std
     if (!bind_result) {
         port_promise->set_value(0);
         outcome.err = bind_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -456,7 +456,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop, std::promise<std
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -464,7 +464,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop, std::promise<std
     auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     ++outcome.recv_count;
@@ -472,7 +472,7 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop, std::promise<std
     auto type_result = parse_question_type(buf.data(), recv_result->size);
     if (!type_result) {
         outcome.err = type_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -493,20 +493,20 @@ DetachedTask run_multi_v4_server(fiber::event::EventLoop *loop, std::promise<std
     }
     if (!echo_question_name(buf.data(), recv_result->size, response)) {
         outcome.err = IoErr::Invalid;
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
     auto send_result = co_await socket.send_to(response.data(), response.size(), recv_result->peer, 2s);
     if (!send_result) {
         outcome.err = send_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
     outcome.err = IoErr::None;
     socket.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_cached_many_dual_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache2 *cache,
@@ -515,14 +515,14 @@ DetachedTask run_cached_many_dual_resolve(fiber::event::EventLoop *loop, fiber::
     constexpr std::string_view host = "many-dual.example";
     std::array<fiber::net::IpAddress, 10> v4{};
     std::array<fiber::net::IpAddress, 10> v6{};
-    for (std::uint8_t i = 0; i < v4.size(); ++i) {
+    for (std::size_t i = 0; i < v4.size(); ++i) {
         v4[i] = fiber::net::IpAddress::v4({192, 0, 2, static_cast<std::uint8_t>(i + 1)});
         std::array<std::uint8_t, 16> bytes{0x20, 0x01, 0x0d, 0xb8};
         bytes.back() = static_cast<std::uint8_t>(i + 1);
         v6[i] = fiber::net::IpAddress::v6(bytes);
     }
 
-    const fiber::dns::DnsCacheKey key{host, fiber::dns::dns_cache_hash(host)};
+    const fiber::dns::DnsCacheKey key{.normalized_name = host, .hash = fiber::dns::dns_cache_hash(host)};
     const auto now = loop->now();
     const auto expire_at = now + 60s;
     outcome.err = cache->upsert_address_set(key, now, fiber::net::IpFamily::V4, v4.data(), v4.size(), expire_at);
@@ -603,18 +603,18 @@ TEST(DnsResolverTest, ResolvesDualStackInPreferredOrder) {
 
     EXPECT_EQ(outcomes.first.err, IoErr::None);
     EXPECT_EQ(outcomes.first.status, ResolveStatus::Success);
-    ASSERT_EQ(outcomes.first.records.size(), 2u);
+    ASSERT_EQ(outcomes.first.records.size(), 2U);
     EXPECT_EQ(outcomes.first.records[0], "2001:db8::1");
     EXPECT_EQ(outcomes.first.records[1], "1.1.1.1");
 
     EXPECT_EQ(outcomes.second.err, IoErr::None);
     EXPECT_EQ(outcomes.second.status, ResolveStatus::Success);
-    ASSERT_EQ(outcomes.second.records.size(), 2u);
+    ASSERT_EQ(outcomes.second.records.size(), 2U);
     EXPECT_EQ(outcomes.second.records[0], "1.1.1.1");
     EXPECT_EQ(outcomes.second.records[1], "2001:db8::1");
 
     EXPECT_EQ(server_outcome.err, IoErr::None);
-    EXPECT_EQ(server_outcome.recv_count, 2u);
+    EXPECT_EQ(server_outcome.recv_count, 2U);
 
     shutdown_cache(group.at(0), cache);
     group.stop();
@@ -653,10 +653,10 @@ TEST(DnsResolverTest, ReturnsSuccessWhenOneFamilyHasNoData) {
 
     EXPECT_EQ(outcome.err, IoErr::None);
     EXPECT_EQ(outcome.status, ResolveStatus::Success);
-    ASSERT_EQ(outcome.records.size(), 1u);
+    ASSERT_EQ(outcome.records.size(), 1U);
     EXPECT_EQ(outcome.records[0], "9.9.9.9");
     EXPECT_EQ(server_outcome.err, IoErr::None);
-    EXPECT_EQ(server_outcome.recv_count, 2u);
+    EXPECT_EQ(server_outcome.recv_count, 2U);
 
     shutdown_cache(group.at(0), cache);
     group.stop();
@@ -694,7 +694,7 @@ TEST(DnsResolverTest, DoesNotMaskFamilyErrorWithOtherFamilyNoData) {
     const ServerOutcome server_outcome = server_future.get();
     EXPECT_EQ(outcome.err, IoErr::Invalid);
     EXPECT_EQ(server_outcome.err, IoErr::None);
-    EXPECT_EQ(server_outcome.recv_count, 2u);
+    EXPECT_EQ(server_outcome.recv_count, 2U);
 
     shutdown_cache(group.at(0), cache);
     group.stop();
@@ -735,11 +735,11 @@ TEST(DnsResolverTest, TruncatesExcessRecordsInSingleFamily) {
 
     EXPECT_EQ(outcome.err, IoErr::None);
     EXPECT_EQ(outcome.status, ResolveStatus::Success);
-    ASSERT_EQ(outcome.records.size(), 16u);
+    ASSERT_EQ(outcome.records.size(), 16U);
     EXPECT_EQ(outcome.records.front(), "192.0.2.1");
     EXPECT_EQ(outcome.records.back(), "192.0.2.16");
     EXPECT_EQ(server_outcome.err, IoErr::None);
-    EXPECT_EQ(server_outcome.recv_count, 1u);
+    EXPECT_EQ(server_outcome.recv_count, 1U);
 
     shutdown_cache(group.at(0), cache);
     group.stop();
@@ -760,7 +760,7 @@ TEST(DnsResolverTest, TruncatesDualStackResultWithoutDroppingAFamily) {
     const AddressOutcome outcome = future.get();
     EXPECT_EQ(outcome.err, IoErr::None);
     EXPECT_EQ(outcome.status, ResolveStatus::Success);
-    ASSERT_EQ(outcome.records.size(), 16u);
+    ASSERT_EQ(outcome.records.size(), 16U);
     std::size_t v4_count = 0;
     std::size_t v6_count = 0;
     for (std::size_t i = 0; i < outcome.records.size(); ++i) {
@@ -772,8 +772,8 @@ TEST(DnsResolverTest, TruncatesDualStackResultWithoutDroppingAFamily) {
             ++v4_count;
         }
     }
-    EXPECT_EQ(v4_count, 8u);
-    EXPECT_EQ(v6_count, 8u);
+    EXPECT_EQ(v4_count, 8U);
+    EXPECT_EQ(v6_count, 8U);
 
     shutdown_cache(group.at(0), cache);
     group.stop();
@@ -795,7 +795,7 @@ TEST(DnsResolverTest, LiteralBypassAndEndpointPortMapping) {
     EXPECT_EQ(outcome.err, IoErr::None);
     EXPECT_EQ(outcome.status, ResolveStatus::Success);
     EXPECT_EQ(outcome.canonical, "127.0.0.1");
-    ASSERT_EQ(outcome.endpoints.size(), 1u);
+    ASSERT_EQ(outcome.endpoints.size(), 1U);
     EXPECT_EQ(outcome.endpoints[0], "127.0.0.1:8443");
 
     shutdown_cache(group.at(0), cache);

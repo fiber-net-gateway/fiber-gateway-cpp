@@ -180,11 +180,8 @@ bool resolve_request_target(const fiber::http::HttpExchange &exchange, const run
 bool should_skip_request_header(const runtime::LocationRuntime &location,
                                 const fiber::http::HttpHeaders &request_headers,
                                 const fiber::http::HttpHeaders::HeaderField &field) noexcept {
-    if (should_skip_proxy_request_header(request_headers, field) ||
-        location.skip_headers.get(field.lowcase_view(), field.name_hash)) {
-        return true;
-    }
-    return false;
+    return should_skip_proxy_request_header(request_headers, field) ||
+           location.skip_headers.get(field.lowcase_view(), field.name_hash);
 }
 
 void apply_http3_alt_svc(const runtime::ListenerRuntime &listener, fiber::http::HttpHeaders &headers) {
@@ -401,10 +398,12 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, fiber::http::HttpResp
     const bool has_content_length =
             !no_response_body &&
             parse_decimal(upstream_head->headers.get("content-length", kContentLengthHash), response_content_length);
-    const fiber::http::HttpBodySpec response_body =
-            no_response_body ? fiber::http::HttpBodySpec::None()
-                             : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)
-                                                   : fiber::http::HttpBodySpec::Auto());
+    fiber::http::HttpBodySpec response_body = fiber::http::HttpBodySpec::Auto();
+    if (no_response_body) {
+        response_body = fiber::http::HttpBodySpec::None();
+    } else if (has_content_length) {
+        response_body = fiber::http::HttpBodySpec::ContentLength(response_content_length);
+    }
     auto response_header_result = co_await response.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = upstream_head->status_code,
@@ -469,6 +468,8 @@ run_proxy_request(fiber::http::HttpExchange &exchange, fiber::http::HttpResponse
 
     const auto reuse_policy = location.reuse_connection ? upstream::ConnectionReusePolicy::Pooled
                                                         : upstream::ConnectionReusePolicy::Transient;
+    // connection_key is populated by make_peer_runtime before the peer escapes RuntimeBuilder.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto acquired_result = co_await upstream::acquire_and_connect(pool, dns, *peer.connection_key,
                                                                   location.connect_timeout, reuse_policy);
     if (!acquired_result) {

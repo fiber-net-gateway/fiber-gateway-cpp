@@ -139,7 +139,7 @@ std::size_t DnsCache2::next_power_of_two(std::size_t value) noexcept {
 
 std::string_view DnsCache2::entry_name(const CacheEntry &entry) noexcept {
     const char *data = reinterpret_cast<const char *>(&entry) + sizeof(CacheEntry);
-    return std::string_view(data, entry.name_length);
+    return {data, entry.name_length};
 }
 
 net::IpAddress *DnsCache2::address_records(AddressSet &set) noexcept {
@@ -178,7 +178,7 @@ DnsCache2::CacheEntry *DnsCache2::find_entry(DnsCacheKey key) const noexcept {
 DnsCache2::AddressSet *DnsCache2::allocate_address_set(const net::IpAddress *addresses, std::uint16_t count,
                                                        TimePoint expire_at) noexcept {
     const std::size_t records_offset = align_up(sizeof(AddressSet), alignof(net::IpAddress));
-    const std::size_t allocation_size = records_offset + static_cast<std::size_t>(count) * sizeof(net::IpAddress);
+    const std::size_t allocation_size = records_offset + (static_cast<std::size_t>(count) * sizeof(net::IpAddress));
     if (allocation_size > std::numeric_limits<std::uint32_t>::max()) {
         return nullptr;
     }

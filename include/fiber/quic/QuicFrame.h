@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <fiber/common/IntrusiveList.h>
+
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -69,12 +71,6 @@ struct QuicSlice {
     [[nodiscard]] bool empty() const noexcept { return len == 0; }
 };
 
-struct QuicOutputFrameDataBlock {
-    std::uint8_t *data = nullptr;
-    std::size_t len = 0;
-    std::uint32_t refs = 1;
-};
-
 struct QuicPaddingFrame {
     std::uint64_t length = 1;
 };
@@ -119,9 +115,6 @@ struct QuicOutputAckFrame {
     std::uint64_t delay = 0;
     std::uint64_t range_count = 0;
     std::uint64_t first_range = 0;
-    const std::uint8_t *ranges = nullptr;
-    std::uint32_t ranges_length = 0;
-    QuicOutputFrameDataBlock *owned_ranges = nullptr;
     std::uint64_t ect0 = 0;
     std::uint64_t ect1 = 0;
     std::uint64_t ce = 0;
@@ -129,13 +122,6 @@ struct QuicOutputAckFrame {
 
 struct QuicOutputCryptoFrame {
     std::uint64_t offset = 0;
-    mem::IoBuf *data = nullptr;
-};
-
-struct QuicOutputNewTokenFrame {
-    const std::uint8_t *data = nullptr;
-    std::uint32_t length = 0;
-    QuicOutputFrameDataBlock *owned = nullptr;
 };
 
 struct QuicOutputStreamFrame {
@@ -149,9 +135,6 @@ struct QuicOutputStreamFrame {
 struct QuicOutputCloseFrame {
     std::uint64_t error_code = 0;
     std::uint64_t frame_type = 0;
-    const std::uint8_t *reason = nullptr;
-    std::uint32_t reason_length = 0;
-    QuicOutputFrameDataBlock *owned_reason = nullptr;
 };
 
 struct QuicOutputMaxStreamsFrame {
@@ -250,6 +233,9 @@ struct QuicInputFrame {
 struct QuicOutputFrame {
     QuicOutputFrame() noexcept : u{} {}
 
+    // Reset only after removal from the sending lists or frame pool.
+    void reset() noexcept;
+
     QuicFrameType type = QuicFrameType::Padding;
     QuicPath *path = nullptr;
     std::uint64_t packet_number = 0;
@@ -271,7 +257,6 @@ struct QuicOutputFrame {
         QuicPaddingFrame padding;
         QuicOutputAckFrame ack;
         QuicOutputCryptoFrame crypto;
-        QuicOutputNewTokenFrame new_token;
         QuicOutputStreamFrame stream;
         QuicOutputCloseFrame close;
         QuicResetStreamFrame reset_stream;
@@ -288,36 +273,15 @@ struct QuicOutputFrame {
         QuicPathChallengeFrame path_response;
     } u;
 
-    QuicOutputFrame *next = nullptr;
-    QuicOutputFrame *prev = nullptr;
-    bool queued = false;
+    // Owned ACK ranges, CRYPTO bytes, NEW_TOKEN bytes, or CONNECTION_CLOSE reason.
+    // STREAM payload remains in the stream send buffer.
+    mem::IoBuf data{};
+
+    // Shared by the sending lists and pool free list; membership is exclusive.
+    common::IntrusiveListHook hook{};
 };
 
-class QuicOutputFrameQueue {
-public:
-    [[nodiscard]] bool empty() const noexcept { return head_ == nullptr; }
-    [[nodiscard]] QuicOutputFrame *front() noexcept { return head_; }
-    [[nodiscard]] const QuicOutputFrame *front() const noexcept { return head_; }
-    [[nodiscard]] QuicOutputFrame *back() noexcept { return tail_; }
-    [[nodiscard]] const QuicOutputFrame *back() const noexcept { return tail_; }
-    [[nodiscard]] QuicOutputFrame *next_of(QuicOutputFrame &frame) noexcept { return frame.next; }
-    [[nodiscard]] const QuicOutputFrame *next_of(const QuicOutputFrame &frame) const noexcept { return frame.next; }
-    [[nodiscard]] QuicOutputFrame *prev_of(QuicOutputFrame &frame) noexcept { return frame.prev; }
-    [[nodiscard]] const QuicOutputFrame *prev_of(const QuicOutputFrame &frame) const noexcept { return frame.prev; }
-
-    void push_front(QuicOutputFrame &frame) noexcept;
-    void push_back(QuicOutputFrame &frame) noexcept;
-    void insert_after(QuicOutputFrame &position, QuicOutputFrame &frame) noexcept;
-    void erase(QuicOutputFrame &frame) noexcept;
-    void erase_after(QuicOutputFrame *prev, QuicOutputFrame &frame) noexcept;
-    [[nodiscard]] QuicOutputFrame *pop_front() noexcept;
-    [[nodiscard]] QuicOutputFrame *pop_back() noexcept;
-    void prepend_all(QuicOutputFrameQueue &source) noexcept;
-
-private:
-    QuicOutputFrame *head_ = nullptr;
-    QuicOutputFrame *tail_ = nullptr;
-};
+using QuicOutputFrameList = common::IntrusiveList<QuicOutputFrame, offsetof(QuicOutputFrame, hook)>;
 
 inline constexpr std::size_t kQuicOutputFramePoolMaxCached = 1024;
 
@@ -333,7 +297,7 @@ public:
     [[nodiscard]] std::size_t cached_count() const noexcept { return cached_count_; }
 
 private:
-    QuicOutputFrame *free_head_ = nullptr;
+    QuicOutputFrameList free_frames_{};
     std::size_t cached_count_ = 0;
 };
 
@@ -349,8 +313,6 @@ struct QuicInputFrameParseResult {
 
 [[nodiscard]] common::IoResult<void> quic_output_frame_set_owned_data(QuicOutputFrame &frame, const std::uint8_t *data,
                                                                       std::size_t len) noexcept;
-void quic_output_frame_retain_data(QuicOutputFrame &frame) noexcept;
-void quic_output_frame_release_data(QuicOutputFrame &frame) noexcept;
 [[nodiscard]] bool quic_output_frame_ack_eliciting(QuicFrameType type) noexcept;
 [[nodiscard]] bool quic_output_frame_retransmittable_on_loss(QuicFrameType type) noexcept;
 

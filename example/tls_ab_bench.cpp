@@ -11,12 +11,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <future>
 #include <memory>
-#include <signal.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -43,7 +44,7 @@ namespace {
 using fiber::async::DetachedTask;
 using namespace std::chrono_literals;
 
-constexpr std::size_t kReadCap = 64 * 1024;
+constexpr std::size_t kReadCap = static_cast<std::size_t>(64 * 1024);
 constexpr auto kInfinite = std::chrono::milliseconds::max();
 
 const char kSelfSignedCertPem[] = R"(-----BEGIN CERTIFICATE-----
@@ -103,7 +104,7 @@ std::string make_temp_path(const char *tag) {
     path.push_back('_');
     path.append(std::to_string(static_cast<long>(::getpid())));
     path.push_back('_');
-    path.append(std::to_string(static_cast<long>(::random())));
+    path.append(std::to_string(::random()));
     path.append(".pem");
     return path;
 }
@@ -170,8 +171,11 @@ struct Workload {
 };
 
 const Workload kWorkloads[] = {
-        {"bulk64k", 65536, 0, 256ULL << 20}, {"bulk16k", 16384, 0, 256ULL << 20}, {"h2", 9, 16375, 128ULL << 20},
-        {"small1k", 1024, 0, 64ULL << 20},   {"tiny64", 64, 0, 16ULL << 20},
+        {.name = "bulk64k", .node_a = 65536, .node_b = 0, .default_total = 256ULL << 20},
+        {.name = "bulk16k", .node_a = 16384, .node_b = 0, .default_total = 256ULL << 20},
+        {.name = "h2", .node_a = 9, .node_b = 16375, .default_total = 128ULL << 20},
+        {.name = "small1k", .node_a = 1024, .node_b = 0, .default_total = 64ULL << 20},
+        {.name = "tiny64", .node_a = 64, .node_b = 0, .default_total = 16ULL << 20},
 };
 
 std::size_t group_bytes(const Workload &wl) { return wl.node_a + wl.node_b; }
@@ -405,7 +409,8 @@ int main(int argc, char **argv) {
     }
     auto pair = make_bench_pair(cert.path, key.path);
     if (!pair) {
-        std::fprintf(stderr, "credential error: %s\n", fiber::common::io_err_name(pair.error()).data());
+        const std::string_view err = fiber::common::io_err_name(pair.error());
+        std::fprintf(stderr, "credential error: %.*s\n", static_cast<int>(err.size()), err.data());
         return 1;
     }
 
@@ -446,8 +451,9 @@ int main(int argc, char **argv) {
         }
         const fiber::common::IoErr hs_err = client_hs_future.get();
         if (hs_err != fiber::common::IoErr::None || client == nullptr) {
-            std::fprintf(stderr, "run %d: client handshake failed: %s\n", run,
-                         fiber::common::io_err_name(hs_err).data());
+            const std::string_view err = fiber::common::io_err_name(hs_err);
+            std::fprintf(stderr, "run %d: client handshake failed: %.*s\n", run, static_cast<int>(err.size()),
+                         err.data());
             return 1;
         }
 
@@ -463,10 +469,13 @@ int main(int argc, char **argv) {
         if (writer_future.wait_for(60s) != std::future_status::ready) {
             std::fprintf(stderr, "run %d: writer timeout\n", run);
             ok = false;
-        } else if (writer_future.get() != fiber::common::IoErr::None) {
-            std::fprintf(stderr, "run %d: writer failed: %s\n", run,
-                         fiber::common::io_err_name(writer_future.get()).data());
-            ok = false;
+        } else {
+            const fiber::common::IoErr writer_err = writer_future.get();
+            if (writer_err != fiber::common::IoErr::None) {
+                const std::string_view err = fiber::common::io_err_name(writer_err);
+                std::fprintf(stderr, "run %d: writer failed: %.*s\n", run, static_cast<int>(err.size()), err.data());
+                ok = false;
+            }
         }
         if (ok && reader_future.wait_for(60s) != std::future_status::ready) {
             std::fprintf(stderr, "run %d: reader timeout\n", run);
@@ -481,10 +490,13 @@ int main(int argc, char **argv) {
         if (server_future.wait_for(10s) != std::future_status::ready) {
             std::fprintf(stderr, "run %d: server timeout\n", run);
             ok = false;
-        } else if (server_future.get() != fiber::common::IoErr::None) {
-            std::fprintf(stderr, "run %d: server failed: %s\n", run,
-                         fiber::common::io_err_name(server_future.get()).data());
-            ok = false;
+        } else {
+            const fiber::common::IoErr server_err = server_future.get();
+            if (server_err != fiber::common::IoErr::None) {
+                const std::string_view err = fiber::common::io_err_name(server_err);
+                std::fprintf(stderr, "run %d: server failed: %.*s\n", run, static_cast<int>(err.size()), err.data());
+                ok = false;
+            }
         }
 
         std::promise<void> close_done;

@@ -251,9 +251,9 @@ private:
     }
 
     std::uint8_t find_free_slot() const noexcept {
-        for (std::uint8_t i = 0; i < attempts_.size(); ++i) {
+        for (std::size_t i = 0; i < attempts_.size(); ++i) {
             if (!attempts_[i].has_value()) {
-                return i;
+                return static_cast<std::uint8_t>(i);
             }
         }
         FIBER_ASSERT(false);
@@ -279,8 +279,7 @@ private:
         }
 
         const std::uint8_t slot = find_free_slot();
-        attempts_[slot].emplace(*this, slot, candidate);
-        Attempt &attempt = *attempts_[slot];
+        Attempt &attempt = attempts_[slot].emplace(*this, slot, candidate);
         common::IoErr attach_error = attempt.efd.attach(*fd_result);
         if (attach_error != common::IoErr::None) {
             ::close(*fd_result);
@@ -401,6 +400,9 @@ private:
             return;
         }
 
+        // Engaged-ness is guarded by the has_value() early-return above; the
+        // checker cannot track an optional through container indexing.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         Attempt &attempt = *attempts_[slot];
         common::IoErr connect_error = finish_connect(attempt.efd.fd());
         if (connect_error == common::IoErr::None) {
@@ -444,6 +446,8 @@ private:
         FIBER_ASSERT(waiting_);
         FIBER_ASSERT(slot < attempts_.size());
         FIBER_ASSERT(attempts_[slot].has_value());
+        // Engaged-ness asserted above; invisible to the optional checker.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         Attempt &winner = *attempts_[slot];
         const std::uint8_t candidate = winner.candidate;
         const int fd = winner.efd.release_fd();

@@ -9,7 +9,9 @@
 
 #include "DeflateState.h"
 
+#include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace fiber::compression {
 
@@ -88,13 +90,13 @@ void bi_windup(DeflateState &s) noexcept {
 
 // Initialize a new block.
 void init_block(DeflateState &s) noexcept {
-    for (int n = 0; n < static_cast<int>(kDeflateLCodes); n++) {
+    for (unsigned n = 0; n < kDeflateLCodes; n++) {
         s.dyn_ltree[n].freq = 0;
     }
-    for (int n = 0; n < static_cast<int>(kDeflateDCodes); n++) {
+    for (unsigned n = 0; n < kDeflateDCodes; n++) {
         s.dyn_dtree[n].freq = 0;
     }
-    for (int n = 0; n < static_cast<int>(kDeflateBCodes); n++) {
+    for (unsigned n = 0; n < kDeflateBCodes; n++) {
         s.bl_tree[n].freq = 0;
     }
 
@@ -160,7 +162,7 @@ void gen_bitlen(DeflateState &s, DeflateTreeDesc *desc) noexcept {
     std::uint16_t f; // frequency
     int overflow = 0; // number of elements with bit length too large
 
-    for (bits = 0; bits <= static_cast<int>(kDeflateMaxBits); bits++) {
+    for (bits = 0; std::cmp_less_equal(bits, kDeflateMaxBits); bits++) {
         s.bl_count[bits] = 0;
     }
 
@@ -168,7 +170,7 @@ void gen_bitlen(DeflateState &s, DeflateTreeDesc *desc) noexcept {
     // the case of the bit length tree).
     tree[s.heap[s.heap_max]].len = 0; // root of the heap
 
-    for (h = s.heap_max + 1; h < static_cast<int>(kDeflateHeapSize); h++) {
+    for (h = s.heap_max + 1; std::cmp_less(h, kDeflateHeapSize); h++) {
         n = s.heap[h];
         bits = tree[tree[n].dad].len + 1;
         if (bits > max_length) {
@@ -469,7 +471,7 @@ void compress_block(DeflateState &s, const DeflateCtData *ltree, const DeflateCt
             } else {
                 // Here, lc is the match length - MIN_MATCH.
                 code = kDeflateLengthCode[lc];
-                send_code(s, static_cast<int>(code) + kDeflateLiterals + 1, ltree); // length code
+                send_code(s, static_cast<int>(code) + static_cast<int>(kDeflateLiterals) + 1, ltree); // length code
                 extra = kDeflateExtraLBits[code];
                 if (extra != 0) {
                     lc -= static_cast<int>(kDeflateBaseLength[code]);
@@ -546,9 +548,7 @@ void deflate_tr_flush_block(DeflateState &s, const std::uint8_t *buf, std::uint6
     // Determine the best encoding. Compute the block lengths in bytes.
     opt_lenb = (s.opt_len + 3 + 7) >> 3;
     static_lenb = (s.static_len + 3 + 7) >> 3;
-    if (static_lenb <= opt_lenb) {
-        opt_lenb = static_lenb;
-    }
+    opt_lenb = std::min(opt_lenb, static_lenb);
 
     if (stored_len + 4 <= opt_lenb && buf != nullptr) {
         // 4: two words for the lengths. The buf test is only necessary if

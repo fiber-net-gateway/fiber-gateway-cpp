@@ -26,7 +26,7 @@ struct SchemeInfo {
     TlsSignatureScheme scheme;
     int pkey_type; // EVP_PKEY_RSA | EVP_PKEY_EC | EVP_PKEY_ED25519
     int curve_nid; // checked in TLS 1.3 only; 0 = any/no curve constraint
-    const EVP_MD *(*digest)(void);
+    const EVP_MD *(*digest)();
     bool is_rsa_pss;
     bool tls12_ok;
     bool tls13_ok;
@@ -34,16 +34,76 @@ struct SchemeInfo {
 
 constexpr SchemeInfo kSchemeTable[] = {
         // rsa_pkcs1_*: TLS 1.2 only (never signs a 1.3 handshake).
-        {TlsSignatureScheme::RsaPkcs1Sha256, EVP_PKEY_RSA, 0, &EVP_sha256, false, true, false},
-        {TlsSignatureScheme::RsaPkcs1Sha384, EVP_PKEY_RSA, 0, &EVP_sha384, false, true, false},
-        {TlsSignatureScheme::RsaPkcs1Sha512, EVP_PKEY_RSA, 0, &EVP_sha512, false, true, false},
-        {TlsSignatureScheme::EcdsaSecp256r1Sha256, EVP_PKEY_EC, NID_X9_62_prime256v1, &EVP_sha256, false, true, true},
-        {TlsSignatureScheme::EcdsaSecp384r1Sha384, EVP_PKEY_EC, NID_secp384r1, &EVP_sha384, false, true, true},
-        {TlsSignatureScheme::EcdsaSecp521r1Sha512, EVP_PKEY_EC, NID_secp521r1, &EVP_sha512, false, true, true},
-        {TlsSignatureScheme::Ed25519, EVP_PKEY_ED25519, 0, nullptr, false, true, true},
-        {TlsSignatureScheme::RsaPssRsaeSha256, EVP_PKEY_RSA, 0, &EVP_sha256, true, true, true},
-        {TlsSignatureScheme::RsaPssRsaeSha384, EVP_PKEY_RSA, 0, &EVP_sha384, true, true, true},
-        {TlsSignatureScheme::RsaPssRsaeSha512, EVP_PKEY_RSA, 0, &EVP_sha512, true, true, true},
+        {.scheme = TlsSignatureScheme::RsaPkcs1Sha256,
+         .pkey_type = EVP_PKEY_RSA,
+         .curve_nid = 0,
+         .digest = &EVP_sha256,
+         .is_rsa_pss = false,
+         .tls12_ok = true,
+         .tls13_ok = false},
+        {.scheme = TlsSignatureScheme::RsaPkcs1Sha384,
+         .pkey_type = EVP_PKEY_RSA,
+         .curve_nid = 0,
+         .digest = &EVP_sha384,
+         .is_rsa_pss = false,
+         .tls12_ok = true,
+         .tls13_ok = false},
+        {.scheme = TlsSignatureScheme::RsaPkcs1Sha512,
+         .pkey_type = EVP_PKEY_RSA,
+         .curve_nid = 0,
+         .digest = &EVP_sha512,
+         .is_rsa_pss = false,
+         .tls12_ok = true,
+         .tls13_ok = false},
+        {.scheme = TlsSignatureScheme::EcdsaSecp256r1Sha256,
+         .pkey_type = EVP_PKEY_EC,
+         .curve_nid = NID_X9_62_prime256v1,
+         .digest = &EVP_sha256,
+         .is_rsa_pss = false,
+         .tls12_ok = true,
+         .tls13_ok = true},
+        {.scheme = TlsSignatureScheme::EcdsaSecp384r1Sha384,
+         .pkey_type = EVP_PKEY_EC,
+         .curve_nid = NID_secp384r1,
+         .digest = &EVP_sha384,
+         .is_rsa_pss = false,
+         .tls12_ok = true,
+         .tls13_ok = true},
+        {.scheme = TlsSignatureScheme::EcdsaSecp521r1Sha512,
+         .pkey_type = EVP_PKEY_EC,
+         .curve_nid = NID_secp521r1,
+         .digest = &EVP_sha512,
+         .is_rsa_pss = false,
+         .tls12_ok = true,
+         .tls13_ok = true},
+        {.scheme = TlsSignatureScheme::Ed25519,
+         .pkey_type = EVP_PKEY_ED25519,
+         .curve_nid = 0,
+         .digest = nullptr,
+         .is_rsa_pss = false,
+         .tls12_ok = true,
+         .tls13_ok = true},
+        {.scheme = TlsSignatureScheme::RsaPssRsaeSha256,
+         .pkey_type = EVP_PKEY_RSA,
+         .curve_nid = 0,
+         .digest = &EVP_sha256,
+         .is_rsa_pss = true,
+         .tls12_ok = true,
+         .tls13_ok = true},
+        {.scheme = TlsSignatureScheme::RsaPssRsaeSha384,
+         .pkey_type = EVP_PKEY_RSA,
+         .curve_nid = 0,
+         .digest = &EVP_sha384,
+         .is_rsa_pss = true,
+         .tls12_ok = true,
+         .tls13_ok = true},
+        {.scheme = TlsSignatureScheme::RsaPssRsaeSha512,
+         .pkey_type = EVP_PKEY_RSA,
+         .curve_nid = 0,
+         .digest = &EVP_sha512,
+         .is_rsa_pss = true,
+         .tls12_ok = true,
+         .tls13_ok = true},
 };
 
 const SchemeInfo *scheme_info(TlsSignatureScheme scheme) noexcept {
@@ -72,7 +132,7 @@ bool pkey_supports(const void *impl, TlsSignatureScheme scheme, TlsProtocolVersi
     // RSASSA-PSS needs emLen >= hLen + sLen + 2; both are the hash size in
     // TLS, so 1024-bit RSA is too small for SHA-512 (the reason this check
     // exists at all — test credentials).
-    if (info->is_rsa_pss && static_cast<std::size_t>(EVP_PKEY_size(pkey)) < 2u * EVP_MD_size(info->digest()) + 2u) {
+    if (info->is_rsa_pss && static_cast<std::size_t>(EVP_PKEY_size(pkey)) < 2U * EVP_MD_size(info->digest()) + 2U) {
         return false;
     }
     if (version >= TlsProtocolVersion::Tls13) {

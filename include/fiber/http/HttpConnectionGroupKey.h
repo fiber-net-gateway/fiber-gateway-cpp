@@ -41,7 +41,7 @@ public:
     make(std::string_view host, std::uint16_t port, Scheme scheme,
          std::optional<net::IpAddress> ip = std::nullopt) noexcept;
 
-    [[nodiscard]] std::string_view host() const noexcept { return std::string_view(host_.data(), host_size_); }
+    [[nodiscard]] std::string_view host() const noexcept { return {host_.data(), host_size_}; }
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
     [[nodiscard]] Scheme scheme() const noexcept { return scheme_; }
     [[nodiscard]] bool has_ip() const noexcept { return has_ip_; }

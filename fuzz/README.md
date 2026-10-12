@@ -44,6 +44,10 @@ cmake --build build-fuzz -j
   uninstrumented so coverage feedback stays on our code.
 - `FIBER_USE_LIBCXX=OFF`: distribution libFuzzer runtimes are commonly built
   against libstdc++ and fail to link into a libc++ build.
+- If the system libstdc++ is too old for C++23 (GCC < 13), build with
+  `-DFIBER_USE_LIBCXX=ON` instead and let the libstdc++-built runtime resolve
+  against the real libstdc++:
+  `-DCMAKE_EXE_LINKER_FLAGS='-Wl,--no-as-needed -lstdc++'`.
 - Use a separate `FETCHCONTENT_BASE_DIR` (or a fresh checkout) if another
   build tree shares `temp/_deps`: the dependency *build* directories live
   there and differently-flagged trees overwrite each other.

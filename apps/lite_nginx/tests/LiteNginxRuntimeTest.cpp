@@ -169,7 +169,7 @@ public:
 
     [[nodiscard]] std::string read() const {
         std::ifstream input(path_, std::ios::binary);
-        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     }
 
 private:
@@ -283,6 +283,7 @@ std::string recv_until_close(int fd) {
     std::string out;
     std::array<char, 4096> buf{};
     for (;;) {
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test thread, no lock held
         const ssize_t rc = ::recv(fd, buf.data(), buf.size(), 0);
         if (rc <= 0) {
             return out;
@@ -438,6 +439,7 @@ std::string recv_until_contains(int fd, std::string_view expected) {
     std::string out;
     std::array<char, 4096> buf{};
     while (out.find(expected) == std::string::npos) {
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test thread, no lock held
         const ssize_t rc = ::recv(fd, buf.data(), buf.size(), 0);
         if (rc <= 0) {
             break;
@@ -462,6 +464,7 @@ bool socket_readable(int fd, std::chrono::milliseconds timeout) {
 
 std::string recv_available(int fd) {
     std::array<char, 4096> buf{};
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test thread, no lock held
     const ssize_t rc = ::recv(fd, buf.data(), buf.size(), MSG_DONTWAIT);
     return rc > 0 ? std::string(buf.data(), static_cast<std::size_t>(rc)) : std::string{};
 }
@@ -1062,11 +1065,8 @@ public:
             ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
             std::string request = read_http_request(client);
-            if (!consume(first_request_, request)) {
-                publish(false);
-            } else if (!send_all(client, first_response_)) {
-                publish(false);
-            } else if (!consume(second_request_, read_http_request(client))) {
+            if (!consume(first_request_, request) || !send_all(client, first_response_) ||
+                !consume(second_request_, read_http_request(client))) {
                 publish(false);
             } else {
                 char byte = 0;
@@ -1535,7 +1535,7 @@ fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, 
             outcome.content_encoding = std::string((*header_result)->headers.get("content-encoding"));
             outcome.content_length = std::string((*header_result)->headers.get("content-length"));
             while (!outcome.body_complete) {
-                auto body_result = co_await exchange.read_body(64 * 1024, 2s);
+                auto body_result = co_await exchange.read_body(std::size_t{64} * 1024, 2s);
                 if (!body_result) {
                     outcome.error = body_result.error();
                     break;
@@ -1580,7 +1580,7 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
     fiber::http::Http3Client::Options client_options;
     client_options.tls.trust_store = trust_store->get();
     client_options.tls.verify_peer = true;
-    fiber::http::Http3Client client(*endpoint, std::move(client_options));
+    fiber::http::Http3Client client(*endpoint, client_options);
 
     auto endpoint_started = endpoint->start();
     if (!endpoint_started) {
@@ -1628,7 +1628,7 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
             }
         }
         while (outcome.error == fiber::common::IoErr::None && !outcome.body_complete) {
-            auto body_result = co_await exchange.read_body(64 * 1024, 2s);
+            auto body_result = co_await exchange.read_body(std::size_t{64} * 1024, 2s);
             if (!body_result) {
                 outcome.error = body_result.error();
                 break;
@@ -1943,7 +1943,7 @@ http {
 
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
-    ASSERT_EQ(runtime->listeners.size(), 1u);
+    ASSERT_EQ(runtime->listeners.size(), 1U);
     EXPECT_TRUE(runtime->listeners[0].tls);
     EXPECT_TRUE(runtime->listeners[0].http3);
     EXPECT_EQ(runtime->listeners[0].http3_alt_svc, "h3=\":8443\"; ma=86400");
@@ -1977,21 +1977,21 @@ http {
 
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
-    ASSERT_EQ(runtime->servers.size(), 1u);
-    ASSERT_EQ(runtime->servers[0].locations.size(), 2u);
+    ASSERT_EQ(runtime->servers.size(), 1U);
+    ASSERT_EQ(runtime->servers[0].locations.size(), 2U);
 
     const auto &buffered = runtime->servers[0].locations[0];
     EXPECT_TRUE(buffered.buffering.enabled());
-    EXPECT_EQ(buffered.buffering.buffer_size, 128u * 1024u);
-    EXPECT_EQ(buffered.buffering.low_water, 32u * 1024u);
+    EXPECT_EQ(buffered.buffering.buffer_size, 128U * 1024U);
+    EXPECT_EQ(buffered.buffering.low_water, 32U * 1024U);
     EXPECT_EQ(buffered.read_timeout, std::chrono::seconds(60));
     EXPECT_EQ(buffered.send_timeout, std::chrono::seconds(60));
-    EXPECT_EQ(buffered.client_max_body_size, 2u * 1024u * 1024u);
+    EXPECT_EQ(buffered.client_max_body_size, 2U * 1024U * 1024U);
 
     const auto &stream = runtime->servers[0].locations[1];
     EXPECT_FALSE(stream.buffering.enabled());
-    EXPECT_EQ(stream.buffering.low_water, 0u);
-    EXPECT_EQ(stream.client_max_body_size, 0u);
+    EXPECT_EQ(stream.buffering.low_water, 0U);
+    EXPECT_EQ(stream.client_max_body_size, 0U);
 }
 
 TEST(LiteNginxRuntimeTest, CompilesAccessLogInheritance) {
@@ -2014,15 +2014,15 @@ http {
     ASSERT_TRUE(config.has_value()) << config.error().message;
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
-    ASSERT_EQ(runtime->access_logs.size(), 2u);
-    EXPECT_EQ(runtime->access_log, 0u);
+    ASSERT_EQ(runtime->access_logs.size(), 2U);
+    EXPECT_EQ(runtime->access_log, 0U);
     EXPECT_EQ(runtime->access_logs[0].logger_name, "http.access");
     EXPECT_TRUE(runtime->access_logs[0].template_script != nullptr);
-    ASSERT_EQ(runtime->servers.size(), 1u);
+    ASSERT_EQ(runtime->servers.size(), 1U);
     EXPECT_EQ(runtime->servers[0].access_log, fiber::lite_nginx::runtime::kDisabledAccessLog);
-    ASSERT_EQ(runtime->servers[0].locations.size(), 2u);
+    ASSERT_EQ(runtime->servers[0].locations.size(), 2U);
     EXPECT_EQ(runtime->servers[0].locations[0].access_log, fiber::lite_nginx::runtime::kDisabledAccessLog);
-    EXPECT_EQ(runtime->servers[0].locations[1].access_log, 1u);
+    EXPECT_EQ(runtime->servers[0].locations[1].access_log, 1U);
     EXPECT_EQ(runtime->access_logs[1].logger_name, "location.access");
     EXPECT_TRUE(runtime->access_logs[1].template_script != nullptr);
 }
@@ -2258,7 +2258,7 @@ http {
         FAIL() << "upstream was not connected; downstream response: " << response;
     }
 
-    linger reset_on_close{1, 0};
+    linger reset_on_close{.l_onoff = 1, .l_linger = 0};
     ASSERT_EQ(::setsockopt(client, SOL_SOCKET, SO_LINGER, &reset_on_close, sizeof(reset_on_close)), 0);
     ::close(client);
 
@@ -2340,7 +2340,7 @@ http {
     // One upstream accept for two proxied requests: the second rode the stolen connection.
     EXPECT_EQ(upstream.accept_count(), 1);
 
-    linger reset_on_close{1, 0};
+    linger reset_on_close{.l_onoff = 1, .l_linger = 0};
     ASSERT_EQ(::setsockopt(client, SOL_SOCKET, SO_LINGER, &reset_on_close, sizeof(reset_on_close)), 0);
     ::close(client);
 
@@ -3294,13 +3294,15 @@ http {
     ASSERT_TRUE(config.has_value()) << config.error().message;
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
-    ASSERT_EQ(runtime->upstreams.size(), 1u);
-    ASSERT_EQ(runtime->upstreams[0].peers.size(), 1u);
+    ASSERT_EQ(runtime->upstreams.size(), 1U);
+    ASSERT_EQ(runtime->upstreams[0].peers.size(), 1U);
     const auto &key = runtime->upstreams[0].peers[0].connection_key;
     ASSERT_TRUE(key.has_value());
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT_TRUE guard is opaque to the checker
     EXPECT_EQ(key->host(), "backend.test");
     EXPECT_EQ(key->scheme(), fiber::http::HttpConnectionGroupKey::Scheme::Https);
     EXPECT_FALSE(key->has_ip());
+    // NOLINTEND(bugprone-unchecked-optional-access)
 
     RuntimeHarness harness(*runtime, nameserver.resolver_config());
     int client = connect_client(harness.port());
@@ -3312,7 +3314,7 @@ http {
 
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
     EXPECT_NE(response.find("\r\n\r\nsecure"), std::string::npos) << response;
-    EXPECT_GE(nameserver.query_count(), 1u);
+    EXPECT_GE(nameserver.query_count(), 1U);
     EXPECT_EQ(upstream.server_name(), "backend.test");
     // Named upstreams keep the upstream name as the default Host.
     EXPECT_EQ(upstream.host_header(), "backend");
@@ -3337,7 +3339,7 @@ http {
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_FALSE(runtime.has_value());
     EXPECT_NE(runtime.error().message.find("IP literal"), std::string::npos) << runtime.error().message;
-    EXPECT_EQ(runtime.error().location.line, 6u);
+    EXPECT_EQ(runtime.error().location.line, 6U);
 }
 
 TEST(LiteNginxRuntimeTest, ProxiesDirectHttpsTargetOverTls) {
@@ -3379,7 +3381,7 @@ http {
 
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
     EXPECT_NE(response.find("\r\n\r\nsecure"), std::string::npos) << response;
-    EXPECT_GE(nameserver.query_count(), 1u);
+    EXPECT_GE(nameserver.query_count(), 1U);
     EXPECT_EQ(upstream.server_name(), "backend.test");
     // A direct target's default Host is the proxy_pass host.
     EXPECT_EQ(upstream.host_header(), "backend.test");
@@ -3403,7 +3405,7 @@ http {
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_FALSE(runtime.has_value());
     EXPECT_NE(runtime.error().message.find("IP literal"), std::string::npos) << runtime.error().message;
-    EXPECT_EQ(runtime.error().location.line, 8u);
+    EXPECT_EQ(runtime.error().location.line, 8U);
 }
 
 TEST(LiteNginxRuntimeTest, ReusesConnectionsWithStealOff) {
@@ -3516,9 +3518,9 @@ http {
 
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
-    EXPECT_EQ(runtime->connection_pool.keepalive_size, 4u);
-    EXPECT_EQ(runtime->connection_pool.max_idle_total, 128u);
-    EXPECT_EQ(runtime->connection_pool.initial_group_capacity, 8u);
+    EXPECT_EQ(runtime->connection_pool.keepalive_size, 4U);
+    EXPECT_EQ(runtime->connection_pool.max_idle_total, 128U);
+    EXPECT_EQ(runtime->connection_pool.initial_group_capacity, 8U);
 }
 
 TEST(LiteNginxRuntimeTest, PoolsDirectProxyPassTargetsByDefault) {
@@ -3785,7 +3787,7 @@ http {
     const auto &gzip = runtime->servers[0].locations[0].gzip;
     EXPECT_TRUE(gzip.enabled);
     EXPECT_EQ(gzip.compression_level, 2);
-    EXPECT_EQ(gzip.min_length, 1u);
+    EXPECT_EQ(gzip.min_length, 1U);
 
     RuntimeHarness harness(*runtime);
     const int client = connect_client(harness.port());
@@ -3927,7 +3929,7 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
     std::promise<Http3GzipOutcome> client_promise;
     auto client_future = client_promise.get_future();
     const fiber::net::SocketAddress server_addr = server_endpoint->local_addr();
-    const std::string cert_path = cert.path();
+    const std::string &cert_path = cert.path();
     fiber::async::spawn(group.at(0), [&]() {
         return run_http3_gzip_client(&client_endpoint, &server_addr, &cert_path, &client_promise);
     });
@@ -4044,7 +4046,7 @@ http {
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
     ASSERT_TRUE(runtime->script_library != nullptr);
-    ASSERT_EQ(runtime->servers[0].locations.size(), 1u);
+    ASSERT_EQ(runtime->servers[0].locations.size(), 1U);
     ASSERT_TRUE(runtime->servers[0].locations[0].script != nullptr);
 
     RuntimeHarness harness(*runtime);
@@ -4252,7 +4254,7 @@ http {
 
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
-    ASSERT_EQ(runtime->servers[0].locations.size(), 1u);
+    ASSERT_EQ(runtime->servers[0].locations.size(), 1U);
     EXPECT_TRUE(runtime->servers[0].locations[0].script != nullptr);
 
     fs::remove_all(dir, ec);
@@ -5057,7 +5059,7 @@ http {
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
 
     const auto &loc = runtime->servers[0].locations[0];
-    ASSERT_EQ(loc.set_headers.size(), 2u);
+    ASSERT_EQ(loc.set_headers.size(), 2U);
     EXPECT_EQ(loc.set_headers[0].name, "X-Original-Host");
     EXPECT_EQ(loc.set_headers[1].name, "X-Static");
     // Template header has a compiled script; static header does not.

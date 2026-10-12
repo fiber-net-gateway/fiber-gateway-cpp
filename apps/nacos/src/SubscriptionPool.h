@@ -131,6 +131,7 @@ public:
         ~EntryPtr() { reset(); }
 
         [[nodiscard]] Entry &operator*() const noexcept { return *entry_; }
+        // NOLINTNEXTLINE(clang-analyzer-unix.Malloc) fetch_sub runs on the live object
         [[nodiscard]] Entry *operator->() const noexcept { return entry_; }
         [[nodiscard]] Entry *get() const noexcept { return entry_; }
         [[nodiscard]] explicit operator bool() const noexcept { return entry_ != nullptr; }
@@ -322,6 +323,7 @@ public:
         }
         EntryPtr hold(&entry);
         erase_tree_reference(entry);
+        // NOLINTNEXTLINE(clang-analyzer-unix.Malloc) hold keeps the entry alive across erase
         entry.pool = nullptr;
     }
 
@@ -381,8 +383,8 @@ private:
     }
 
     [[nodiscard]] static std::uint64_t key_hash(std::string_view data_id, std::string_view group) noexcept {
-        std::uint64_t hash = 0xcbf29ce484222325ull;
-        constexpr std::uint64_t prime = 0x100000001b3ull;
+        std::uint64_t hash = 0xcbf29ce484222325ULL;
+        constexpr std::uint64_t prime = 0x100000001b3ULL;
         auto mix = [&](std::string_view text) {
             for (unsigned char character: text) {
                 hash ^= character;

@@ -110,7 +110,10 @@ QuicLocalStreamGate::attach(QuicStream::Lease stream, QuicStreamType type, std::
             co_return std::unexpected(wait_result);
         }
         // The waiter is still queued, so this goes straight to the connection:
-        // it is the request the freed credit was woken for.
+        // it is the request the freed credit was woken for. Every Busy return
+        // in try_attach_local_stream happens before it touches the lease, so
+        // the retry re-moves an intact stream.
+        // NOLINTNEXTLINE(bugprone-use-after-move)
         auto attached = connection_->try_attach_local_stream(std::move(stream), type, early_data_mode);
         if (attached || attached.error() != common::IoErr::Busy) {
             co_return attached;

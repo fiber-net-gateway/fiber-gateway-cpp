@@ -278,7 +278,7 @@ PoolEntry *Http2ConnectionPoolCore::allocate_entry(Http2ConnectionPoolGroupBucke
     // left in the h2 options: it is the connection's pre-SETTINGS assumption
     // and its permanent clamp in one.
     h2.local_concurrent_streams_limit = options_.local_concurrent_streams_limit;
-    entry->construct_connection(*loop_, std::move(h2));
+    entry->construct_connection(*loop_, h2);
     entry->connection().stream_gate().set_capacity_callback(&Http2ConnectionPoolCore::on_capacity, entry);
     entry->connection().close_gate().add_observer(entry->closed_observer_, &Http2ConnectionPoolCore::on_closed, entry);
     bucket.all_.push_back(*entry);
@@ -537,14 +537,14 @@ void Http2ConnectionPoolCore::maintain_entry(PoolEntry *entry) noexcept {
     else
         client.http2().graceful_shutdown();
 }
-void Http2ConnectionPoolCore::on_capacity(void *ctx, Http2Connection &) noexcept {
+void Http2ConnectionPoolCore::on_capacity(void *ctx, Http2Connection & /*unused*/) noexcept {
     auto &entry = *static_cast<PoolEntry *>(ctx);
     if (entry.dialing_)
         return;
     entry.pool_->refresh_capacity(entry);
     entry.pool_->wake_waiters(*entry.bucket_);
 }
-void Http2ConnectionPoolCore::on_closed(void *ctx, Http2Connection &, IoErr) noexcept {
+void Http2ConnectionPoolCore::on_closed(void *ctx, Http2Connection & /*unused*/, IoErr /*unused*/) noexcept {
     auto &entry = *static_cast<PoolEntry *>(ctx);
     entry.state_ = EntryState::Closed;
     entry.pool_->retire(entry);

@@ -17,7 +17,7 @@ struct PendingConnector {
     std::atomic<unsigned> *started;
     std::atomic<unsigned> *canceled;
     static async::Task<common::IoResult<void>> connect(void *ctx, http::Http2ClientConnection &conn,
-                                                       const http::HttpConnectionGroupKey &) noexcept {
+                                                       const http::HttpConnectionGroupKey & /*unused*/) noexcept {
         auto &self = *static_cast<PendingConnector *>(ctx);
         EXPECT_EQ(&conn.loop(), self.expected_loop);
         EXPECT_EQ(&event::EventLoop::current(), self.expected_loop);
@@ -37,17 +37,19 @@ TEST(LocalHttp2ConnectionPoolSetTest, InitializesOneCorePerLoop) {
     options.initial_group_capacity = 7;
     http::LocalHttp2ConnectionPoolSet set(group, options);
     EXPECT_TRUE(set.init());
-    EXPECT_EQ(set.size(), 3u);
-    EXPECT_EQ(set.options().initial_group_capacity, 7u);
+    EXPECT_EQ(set.size(), 3U);
+    EXPECT_EQ(set.options().initial_group_capacity, 7U);
 }
 
 TEST(LocalHttp2ConnectionPoolSetTest, ShutdownCancelsEveryShardAndConcurrentCallersJoinDrain) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     event::EventLoopGroup group(2);
     http::LocalHttp2ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
     std::atomic<unsigned> started{0}, canceled{0}, completed{0};
     std::array<PendingConnector, 2> connectors{
-            {{&group.at(0), &started, &canceled}, {&group.at(1), &started, &canceled}}};
+            {{.expected_loop = &group.at(0), .started = &started, .canceled = &canceled},
+             {.expected_loop = &group.at(1), .started = &started, .canceled = &canceled}}};
     std::array<std::promise<void>, 2> done;
     auto f0 = done[0].get_future();
     auto f1 = done[1].get_future();
@@ -65,10 +67,10 @@ TEST(LocalHttp2ConnectionPoolSetTest, ShutdownCancelsEveryShardAndConcurrentCall
             while (started.load() != 2)
                 co_await async::sleep(1ms);
             co_await set.shutdown_async();
-            EXPECT_EQ(canceled.load(), 2u);
-            EXPECT_EQ(completed.load(), 2u);
-            EXPECT_EQ(set.connection_total(), 0u);
-            EXPECT_EQ(set.group_count(), 0u);
+            EXPECT_EQ(canceled.load(), 2U);
+            EXPECT_EQ(completed.load(), 2U);
+            EXPECT_EQ(set.connection_total(), 0U);
+            EXPECT_EQ(set.group_count(), 0U);
             auto lease = co_await set.acquire(key, {}, 0ms);
             EXPECT_FALSE(lease);
             EXPECT_EQ(lease.error(), common::IoErr::Canceled);
@@ -79,6 +81,7 @@ TEST(LocalHttp2ConnectionPoolSetTest, ShutdownCancelsEveryShardAndConcurrentCall
     ASSERT_EQ(f1.wait_for(3s), std::future_status::ready);
     group.stop();
     group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(LocalHttp2ConnectionPoolSetTest, ClearAcrossShardsAllowsSubsequentAcquire) {

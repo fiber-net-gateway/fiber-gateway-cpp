@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
 #include <cstring>
 #include <expected>
 #include <limits>
@@ -19,7 +20,7 @@ namespace fiber::http {
 
 namespace {
 
-constexpr std::size_t kHttp3ReadChunkSize = 16 * 1024;
+constexpr std::size_t kHttp3ReadChunkSize = static_cast<const std::size_t>(16 * 1024);
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -243,11 +244,11 @@ const ClientHttp3Request *ClientHttp3Request::from_stream(const quic::QuicStream
     if (stream.destroy_callback() != &ClientHttp3Request::destroy_owner) {
         return nullptr;
     }
-    auto *request = static_cast<const ClientHttp3Request *>(stream.owner());
+    const auto *request = static_cast<const ClientHttp3Request *>(stream.owner());
     return request != nullptr && &request->stream_ == &stream ? request : nullptr;
 }
 
-void ClientHttp3Request::destroy_owner(void *owner, quic::QuicStream &) noexcept {
+void ClientHttp3Request::destroy_owner(void *owner, quic::QuicStream & /*unused*/) noexcept {
     delete static_cast<ClientHttp3Request *>(owner);
 }
 
@@ -874,9 +875,12 @@ common::IoErr ClientHttp3Request::complete_header_block() noexcept {
 
 const Http3QpackDecoder::Ops &ClientHttp3Request::decoder_ops() noexcept {
     static const Http3QpackDecoder::Ops kOps{
-            &ClientHttp3Request::on_indexed_field, &ClientHttp3Request::on_indexed_name,
-            &ClientHttp3Request::on_name_raw,      &ClientHttp3Request::on_name_huffman,
-            &ClientHttp3Request::on_value_raw,     &ClientHttp3Request::on_value_huffman,
+            .on_indexed_field = &ClientHttp3Request::on_indexed_field,
+            .on_indexed_name = &ClientHttp3Request::on_indexed_name,
+            .on_name_raw = &ClientHttp3Request::on_name_raw,
+            .on_name_huffman = &ClientHttp3Request::on_name_huffman,
+            .on_value_raw = &ClientHttp3Request::on_value_raw,
+            .on_value_huffman = &ClientHttp3Request::on_value_huffman,
     };
     return kOps;
 }
@@ -1003,6 +1007,9 @@ common::IoErr ClientHttp3Request::commit_regular_header(std::string_view name, s
     if (!stored_name.data() && !name.empty()) {
         return fail_response(Http3ErrorCode::InternalError, common::IoErr::NoMem);
     }
+    // The third argument intentionally passes data() as the stable-copy
+    // pointer (not a NUL-terminated C string); the size travels in the view.
+    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
     if (current_head_->headers.add_view(stored_name, value, stored_name.data(), name_hash) == nullptr) {
         return fail_response(Http3ErrorCode::InternalError, common::IoErr::NoMem);
     }
@@ -1203,7 +1210,7 @@ ClientHttp3Request::read_body(std::size_t max_bytes, std::chrono::milliseconds t
             const std::size_t available = inbound_buf_.readable_bytes();
             if (available != 0 && frame_payload_remaining_ != 0) {
                 const std::size_t take = std::min<std::uint64_t>(
-                        std::min<std::size_t>(available, max_bytes - out.readable_bytes()), frame_payload_remaining_);
+                        {available, max_bytes - out.readable_bytes(), frame_payload_remaining_});
                 if (response_no_body_ && take != 0) {
                     co_return std::unexpected(fail_response(Http3ErrorCode::MessageError));
                 }
@@ -1394,7 +1401,7 @@ void ClientHttp3Request::on_connection_close(void *owner, Http3ErrorCode error) 
     }
 }
 
-void ClientHttp3Request::reject_from_goaway(std::uint64_t) noexcept {
+void ClientHttp3Request::reject_from_goaway(std::uint64_t /*unused*/) noexcept {
     outcome_ = Http3RequestOutcome::Rejected;
     terminal_error_ = common::IoErr::Canceled;
     recv_state_ = RecvState::Error;
@@ -1402,7 +1409,7 @@ void ClientHttp3Request::reject_from_goaway(std::uint64_t) noexcept {
     (void) stream_.stop_read(error_value(Http3ErrorCode::RequestCancelled));
 }
 
-void ClientHttp3Request::handle_connection_close(Http3ErrorCode) noexcept {
+void ClientHttp3Request::handle_connection_close(Http3ErrorCode /*unused*/) noexcept {
     if (outcome_ != Http3RequestOutcome::Complete && outcome_ != Http3RequestOutcome::Rejected &&
         outcome_ != Http3RequestOutcome::PossiblyProcessed) {
         outcome_ = request_headers_sent_ ? Http3RequestOutcome::PossiblyProcessed : Http3RequestOutcome::NotSent;

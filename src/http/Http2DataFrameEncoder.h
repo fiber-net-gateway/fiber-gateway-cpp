@@ -29,7 +29,7 @@ public:
 private:
     [[nodiscard]] common::IoErr validate_options() const noexcept;
     [[nodiscard]] common::IoErr append_frame(Http2OutboundEncodeTarget &target, mem::IoBufChain &payload,
-                                             std::uint32_t payload_bytes, bool end_stream) noexcept;
+                                             std::uint32_t payload_bytes, bool end_stream) const noexcept;
 
     Options options_{};
 };

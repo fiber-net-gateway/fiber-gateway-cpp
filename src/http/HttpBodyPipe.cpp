@@ -69,6 +69,9 @@ async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBo
             }
         }
 
+        // IoBufChain move leaves a valid empty state; reading refill here after
+        // the append_chain move (by design: moved-from counts as zero bytes).
+        // NOLINTNEXTLINE(bugprone-use-after-move)
         const std::size_t buffered = buffer.readable_bytes() + refill.readable_bytes();
         if (pending_read_error && buffered == 0 && !buffer.complete() && !refill.complete()) {
             abort_guard.abort(pending_read_error->code);

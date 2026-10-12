@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <limits>
 
+#include <fiber/common/Assert.h>
+
 namespace fiber::http {
 
 namespace {
@@ -10,13 +12,13 @@ namespace {
 constexpr std::size_t kUriPosNpos = std::numeric_limits<std::size_t>::max();
 
 constexpr std::uint32_t kUsualUriChar[8] = {
-        0x00000000u, 0x7fff37d6u,
+        0x00000000U, 0x7fff37d6U,
 #if defined(_WIN32)
         0xefffffffu,
 #else
-        0xffffffffu,
+        0xffffffffU,
 #endif
-        0x7fffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
+        0x7fffffffU, 0xffffffffU, 0xffffffffU, 0xffffffffU, 0xffffffffU,
 };
 
 enum class ScanState : std::uint8_t {
@@ -110,11 +112,14 @@ common::IoErr process_complex_uri(std::string_view raw_uri, const HttpUriParseSt
         return common::IoErr::NoMem;
     }
 
-    const std::size_t dst_cap = raw_uri.size() + (state.empty_path_in_uri ? 1u : 0u);
+    const std::size_t dst_cap = raw_uri.size() + (state.empty_path_in_uri ? 1U : 0U);
     char *dst = static_cast<char *>(pool->alloc(dst_cap));
     if (!dst && dst_cap != 0) {
         return common::IoErr::NoMem;
     }
+    // needs_complex_parse() implies the parse scan saw at least one character,
+    // so dst_cap >= 1 and the NoMem guard above retired the null case.
+    FIBER_ASSERT(dst != nullptr);
 
     ComplexState current = ComplexState::Usual;
     ComplexState quoted_state = ComplexState::Usual;

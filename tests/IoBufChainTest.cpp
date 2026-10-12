@@ -29,7 +29,7 @@ static_assert(!std::is_copy_constructible_v<IoBufChain>);
 static_assert(std::is_move_constructible_v<IoBufChain>);
 
 TEST(IoBufChainTest, ChainExportsReadableAndWritableIovecs) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf a = IoBuf::allocate(8);
         IoBuf b = IoBuf::allocate(8);
         ASSERT_TRUE(a);
@@ -43,8 +43,8 @@ TEST(IoBufChainTest, ChainExportsReadableAndWritableIovecs) {
         IoBufChain chain;
         ASSERT_TRUE(chain.append(std::move(a)));
         ASSERT_TRUE(chain.append(std::move(b)));
-        EXPECT_EQ(chain.size(), 2u);
-        EXPECT_EQ(chain.readable_bytes(), 6u);
+        EXPECT_EQ(chain.size(), 2U);
+        EXPECT_EQ(chain.readable_bytes(), 6U);
 
         std::array<iovec, 4> iov{};
         int count = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
@@ -53,8 +53,8 @@ TEST(IoBufChainTest, ChainExportsReadableAndWritableIovecs) {
         EXPECT_EQ(std::string_view(static_cast<const char *>(iov[1].iov_base), iov[1].iov_len), "cdef");
 
         chain.consume(3);
-        EXPECT_EQ(chain.readable_bytes(), 3u);
-        EXPECT_EQ(chain.size(), 2u);
+        EXPECT_EQ(chain.readable_bytes(), 3U);
+        EXPECT_EQ(chain.size(), 2U);
         count = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
         ASSERT_EQ(count, 1);
         EXPECT_EQ(std::string_view(static_cast<const char *>(iov[0].iov_base), iov[0].iov_len), "def");
@@ -76,12 +76,12 @@ TEST(IoBufChainTest, NodePoolResetsNodeOnReuse) {
         node->buf = std::move(buf);
         node->next = node;
         pool.release(node);
-        EXPECT_EQ(pool.cached_count(), 1u);
+        EXPECT_EQ(pool.cached_count(), 1U);
 
         auto *reused = pool.alloc();
         ASSERT_EQ(reused, node);
-        EXPECT_EQ(reused->offset, 0u);
-        EXPECT_EQ(reused->state, 0u);
+        EXPECT_EQ(reused->offset, 0U);
+        EXPECT_EQ(reused->state, 0U);
         EXPECT_FALSE(reused->buf.valid());
         EXPECT_EQ(reused->next, nullptr);
         pool.release(reused);
@@ -105,17 +105,17 @@ TEST(IoBufChainTest, ChainAppendNodeTakesOwnershipAndResetsOwnerFields) {
 
         IoBufChain chain;
         ASSERT_TRUE(chain.append_node(node));
-        EXPECT_EQ(node->offset, 0u);
-        EXPECT_EQ(node->state, 0u);
+        EXPECT_EQ(node->offset, 0U);
+        EXPECT_EQ(node->state, 0U);
         EXPECT_EQ(node->next, nullptr);
-        EXPECT_EQ(chain.size(), 1u);
-        EXPECT_EQ(chain.readable_bytes(), 3u);
+        EXPECT_EQ(chain.size(), 1U);
+        EXPECT_EQ(chain.readable_bytes(), 3U);
         EXPECT_EQ(readable_string(chain), "abc");
     });
 }
 
 TEST(IoBufChainTest, AppendChainMovesNodesAndCompletion) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf first = IoBuf::allocate(4);
         IoBuf second = IoBuf::allocate(5);
         IoBuf prefix = IoBuf::allocate(4);
@@ -140,17 +140,19 @@ TEST(IoBufChainTest, AppendChainMovesNodesAndCompletion) {
         ASSERT_TRUE(dst.append_chain(std::move(src)));
 
         EXPECT_EQ(readable_string(dst), "xyabcde");
-        EXPECT_EQ(dst.size(), 3u);
-        EXPECT_EQ(dst.readable_bytes(), 7u);
+        EXPECT_EQ(dst.size(), 3U);
+        EXPECT_EQ(dst.readable_bytes(), 7U);
         EXPECT_TRUE(dst.complete());
+        // NOLINTNEXTLINE(bugprone-use-after-move) moved-from inspection is the test subject
         EXPECT_TRUE(src.empty());
-        EXPECT_EQ(src.readable_bytes(), 0u);
+        EXPECT_EQ(src.readable_bytes(), 0U);
+        // NOLINTNEXTLINE(bugprone-use-after-move) moved-from inspection is the test subject
         EXPECT_FALSE(src.complete());
     });
 }
 
 TEST(IoBufChainTest, AppendChainTransfersEmptyCompletionMarker) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBufChain src;
         IoBufChain dst;
         src.mark_complete();
@@ -159,12 +161,13 @@ TEST(IoBufChainTest, AppendChainTransfersEmptyCompletionMarker) {
 
         EXPECT_TRUE(dst.empty());
         EXPECT_TRUE(dst.complete());
+        // NOLINTNEXTLINE(bugprone-use-after-move) moved-from inspection is the test subject
         EXPECT_FALSE(src.complete());
     });
 }
 
 TEST(IoBufChainTest, AppendChainIntoEmptyDestinationMovesNodes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf buf = IoBuf::allocate(4);
         ASSERT_TRUE(buf);
         std::memcpy(buf.writable_data(), "abc", 3);
@@ -181,7 +184,7 @@ TEST(IoBufChainTest, AppendChainIntoEmptyDestinationMovesNodes) {
 }
 
 TEST(IoBufChainTest, AppendChainRejectsCompletedDestination) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf buf = IoBuf::allocate(4);
         ASSERT_TRUE(buf);
         std::memcpy(buf.writable_data(), "ab", 2);
@@ -193,12 +196,13 @@ TEST(IoBufChainTest, AppendChainRejectsCompletedDestination) {
         completed.mark_complete();
 
         EXPECT_FALSE(completed.append_chain(std::move(src)));
+        // NOLINTNEXTLINE(bugprone-use-after-move) moved-from inspection is the test subject
         EXPECT_EQ(readable_string(src), "ab");
     });
 }
 
 TEST(IoBufChainTest, DropEmptyFrontRemovesOnlyDrainedPrefix) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf a = IoBuf::allocate(4);
         IoBuf b = IoBuf::allocate(4);
         ASSERT_TRUE(a);
@@ -215,21 +219,21 @@ TEST(IoBufChainTest, DropEmptyFrontRemovesOnlyDrainedPrefix) {
 
         chain.consume(2);
         ASSERT_NE(chain.front(), nullptr);
-        EXPECT_EQ(chain.size(), 2u);
-        EXPECT_EQ(chain.front()->readable(), 0u);
+        EXPECT_EQ(chain.size(), 2U);
+        EXPECT_EQ(chain.front()->readable(), 0U);
 
         chain.drop_empty_front();
         ASSERT_NE(chain.front(), nullptr);
-        EXPECT_EQ(chain.size(), 1u);
+        EXPECT_EQ(chain.size(), 1U);
         EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(chain.front()->readable_data()),
                                    chain.front()->readable()),
                   "cd");
-        EXPECT_EQ(chain.writable_bytes(), 2u);
+        EXPECT_EQ(chain.writable_bytes(), 2U);
     });
 }
 
 TEST(IoBufChainTest, ConsumeAndCompactDropsFullyConsumedFrontNodes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf a = IoBuf::allocate(4);
         IoBuf b = IoBuf::allocate(4);
         IoBuf c = IoBuf::allocate(4);
@@ -254,19 +258,19 @@ TEST(IoBufChainTest, ConsumeAndCompactDropsFullyConsumedFrontNodes) {
         EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(chain.front()->readable_data()),
                                    chain.front()->readable()),
                   "d");
-        EXPECT_EQ(chain.size(), 2u);
-        EXPECT_EQ(chain.readable_bytes(), 3u);
-        EXPECT_EQ(chain.writable_bytes(), 4u);
+        EXPECT_EQ(chain.size(), 2U);
+        EXPECT_EQ(chain.readable_bytes(), 3U);
+        EXPECT_EQ(chain.writable_bytes(), 4U);
 
         chain.consume_and_compact(3);
         EXPECT_TRUE(chain.empty());
-        EXPECT_EQ(chain.size(), 0u);
+        EXPECT_EQ(chain.size(), 0U);
         EXPECT_EQ(chain.front(), nullptr);
     });
 }
 
 TEST(IoBufChainTest, ChainCommitBuildsWritableIovecs) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf a = IoBuf::allocate(4);
         IoBuf b = IoBuf::allocate(3);
         ASSERT_TRUE(a);
@@ -275,19 +279,19 @@ TEST(IoBufChainTest, ChainCommitBuildsWritableIovecs) {
         IoBufChain chain;
         ASSERT_TRUE(chain.append(std::move(a)));
         ASSERT_TRUE(chain.append(std::move(b)));
-        EXPECT_EQ(chain.writable_bytes(), 7u);
+        EXPECT_EQ(chain.writable_bytes(), 7U);
 
         std::array<iovec, 4> iov{};
         int count = chain.fill_read_iov(iov.data(), static_cast<int>(iov.size()));
         ASSERT_EQ(count, 2);
-        EXPECT_EQ(iov[0].iov_len, 4u);
-        EXPECT_EQ(iov[1].iov_len, 3u);
+        EXPECT_EQ(iov[0].iov_len, 4U);
+        EXPECT_EQ(iov[1].iov_len, 3U);
 
         std::memcpy(iov[0].iov_base, "wxyz", 4);
         std::memcpy(iov[1].iov_base, "12", 2);
         chain.commit(6);
 
-        EXPECT_EQ(chain.readable_bytes(), 6u);
+        EXPECT_EQ(chain.readable_bytes(), 6U);
 
         count = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
         ASSERT_EQ(count, 2);
@@ -297,7 +301,7 @@ TEST(IoBufChainTest, ChainCommitBuildsWritableIovecs) {
 }
 
 TEST(IoBufChainTest, CommitBackOnlyCommitsPhysicalTail) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf first = IoBuf::allocate(4);
         IoBuf last = IoBuf::allocate(4);
         ASSERT_TRUE(first);
@@ -313,18 +317,18 @@ TEST(IoBufChainTest, CommitBackOnlyCommitsPhysicalTail) {
         std::memcpy(chain.back()->writable_data(), "xy", 2);
         chain.commit_back(2);
 
-        EXPECT_EQ(chain.front()->readable(), 0u);
-        EXPECT_EQ(chain.front()->writable(), 4u);
-        EXPECT_EQ(chain.back()->readable(), 2u);
-        EXPECT_EQ(chain.back()->writable(), 2u);
-        EXPECT_EQ(chain.readable_bytes(), 2u);
-        EXPECT_EQ(chain.writable_bytes(), 6u);
+        EXPECT_EQ(chain.front()->readable(), 0U);
+        EXPECT_EQ(chain.front()->writable(), 4U);
+        EXPECT_EQ(chain.back()->readable(), 2U);
+        EXPECT_EQ(chain.back()->writable(), 2U);
+        EXPECT_EQ(chain.readable_bytes(), 2U);
+        EXPECT_EQ(chain.writable_bytes(), 6U);
         EXPECT_EQ(readable_string(chain), "xy");
     });
 }
 
 TEST(IoBufChainTest, TakePrefixMovesWholeNodesAndAppendsToExistingDestination) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf a = IoBuf::allocate(4);
         IoBuf b = IoBuf::allocate(5);
         IoBuf c = IoBuf::allocate(4);
@@ -354,17 +358,17 @@ TEST(IoBufChainTest, TakePrefixMovesWholeNodesAndAppendsToExistingDestination) {
 
         EXPECT_EQ(readable_string(src), "efg");
         EXPECT_EQ(readable_string(dst), "xyabcd");
-        EXPECT_EQ(src.size(), 1u);
-        EXPECT_EQ(dst.size(), 3u);
-        EXPECT_EQ(src.readable_bytes(), 3u);
-        EXPECT_EQ(dst.readable_bytes(), 6u);
-        EXPECT_EQ(src.writable_bytes(), 1u);
-        EXPECT_EQ(dst.writable_bytes(), 7u);
+        EXPECT_EQ(src.size(), 1U);
+        EXPECT_EQ(dst.size(), 3U);
+        EXPECT_EQ(src.readable_bytes(), 3U);
+        EXPECT_EQ(dst.readable_bytes(), 6U);
+        EXPECT_EQ(src.writable_bytes(), 1U);
+        EXPECT_EQ(dst.writable_bytes(), 7U);
     });
 }
 
 TEST(IoBufChainTest, TakePrefixIntoEmptyDestinationSplicesNodes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf buf = IoBuf::allocate(4);
         ASSERT_TRUE(buf);
 
@@ -383,7 +387,7 @@ TEST(IoBufChainTest, TakePrefixIntoEmptyDestinationSplicesNodes) {
 }
 
 TEST(IoBufChainTest, RetainPrefixIntoEmptyOutputSplicesNodes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf buf = IoBuf::allocate(8);
         ASSERT_TRUE(buf);
 
@@ -402,7 +406,7 @@ TEST(IoBufChainTest, RetainPrefixIntoEmptyOutputSplicesNodes) {
 }
 
 TEST(IoBufChainTest, TakePrefixSplitsBoundaryNodeUsingRetainedSlice) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf buf = IoBuf::allocate(8);
         ASSERT_TRUE(buf);
 
@@ -419,19 +423,19 @@ TEST(IoBufChainTest, TakePrefixSplitsBoundaryNodeUsingRetainedSlice) {
         ASSERT_NE(dst.front(), nullptr);
         EXPECT_EQ(readable_string(src), "def");
         EXPECT_EQ(readable_string(dst), "abc");
-        EXPECT_EQ(src.size(), 1u);
-        EXPECT_EQ(dst.size(), 1u);
-        EXPECT_EQ(src.readable_bytes(), 3u);
-        EXPECT_EQ(dst.readable_bytes(), 3u);
-        EXPECT_EQ(src.writable_bytes(), 2u);
-        EXPECT_EQ(dst.writable_bytes(), 0u);
-        EXPECT_EQ(src.front()->use_count(), 2u);
-        EXPECT_EQ(dst.front()->use_count(), 2u);
+        EXPECT_EQ(src.size(), 1U);
+        EXPECT_EQ(dst.size(), 1U);
+        EXPECT_EQ(src.readable_bytes(), 3U);
+        EXPECT_EQ(dst.readable_bytes(), 3U);
+        EXPECT_EQ(src.writable_bytes(), 2U);
+        EXPECT_EQ(dst.writable_bytes(), 0U);
+        EXPECT_EQ(src.front()->use_count(), 2U);
+        EXPECT_EQ(dst.front()->use_count(), 2U);
     });
 }
 
 TEST(IoBufChainTest, TakePrefixSkipsEmptyReadableNodes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf empty = IoBuf::allocate(4);
         IoBuf full = IoBuf::allocate(4);
         IoBuf tail = IoBuf::allocate(4);
@@ -454,17 +458,17 @@ TEST(IoBufChainTest, TakePrefixSkipsEmptyReadableNodes) {
 
         EXPECT_EQ(readable_string(src), "d");
         EXPECT_EQ(readable_string(dst), "abc");
-        EXPECT_EQ(src.size(), 2u);
-        EXPECT_EQ(dst.size(), 2u);
-        EXPECT_EQ(src.readable_bytes(), 1u);
-        EXPECT_EQ(dst.readable_bytes(), 3u);
-        EXPECT_EQ(src.writable_bytes(), 6u);
-        EXPECT_EQ(dst.writable_bytes(), 2u);
+        EXPECT_EQ(src.size(), 2U);
+        EXPECT_EQ(dst.size(), 2U);
+        EXPECT_EQ(src.readable_bytes(), 1U);
+        EXPECT_EQ(dst.readable_bytes(), 3U);
+        EXPECT_EQ(src.writable_bytes(), 6U);
+        EXPECT_EQ(dst.writable_bytes(), 2U);
     });
 }
 
 TEST(IoBufChainTest, TakePrefixTransfersCompleteOnlyWithFullReadableRange) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBuf buf = IoBuf::allocate(8);
         ASSERT_TRUE(buf);
         std::memcpy(buf.writable_data(), "abcdef", 6);
@@ -489,7 +493,7 @@ TEST(IoBufChainTest, TakePrefixTransfersCompleteOnlyWithFullReadableRange) {
 }
 
 TEST(IoBufChainTest, EmptyCompleteCanBeTransferred) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBufChain src;
         IoBufChain dst;
         src.mark_complete();
@@ -501,22 +505,22 @@ TEST(IoBufChainTest, EmptyCompleteCanBeTransferred) {
 }
 
 TEST(IoBufChainTest, TrimEndShrinksTailNodeInPlace) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBufChain chain;
         ASSERT_TRUE(chain.append(IoBuf::allocate(16)));
         chain.commit_back(8); // "committed" node: 8 readable, 8 writable-accounted
 
         chain.trim_end(3);
-        EXPECT_EQ(chain.readable_bytes(), 5u);
-        EXPECT_EQ(chain.size(), 1u);
-        EXPECT_EQ(chain.back()->readable(), 5u);
+        EXPECT_EQ(chain.readable_bytes(), 5U);
+        EXPECT_EQ(chain.size(), 1U);
+        EXPECT_EQ(chain.back()->readable(), 5U);
         // Trimmed tail returns to the writable accounting.
-        EXPECT_EQ(chain.writable_bytes(), 11u);
+        EXPECT_EQ(chain.writable_bytes(), 11U);
     });
 }
 
 TEST(IoBufChainTest, TrimEndReleasesFullyTrimmedTailNodes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBufChain chain;
         IoBuf buf1 = IoBuf::allocate(8);
         IoBuf buf2 = IoBuf::allocate(8);
@@ -534,14 +538,14 @@ TEST(IoBufChainTest, TrimEndReleasesFullyTrimmedTailNodes) {
         // Trim 4 (all of node3) + 2 (half of node2).
         chain.trim_end(6);
         EXPECT_EQ(readable_string(chain), "aaaabb");
-        EXPECT_EQ(chain.size(), 2u);
-        EXPECT_EQ(chain.back()->readable(), 2u);
+        EXPECT_EQ(chain.size(), 2U);
+        EXPECT_EQ(chain.back()->readable(), 2U);
 
         // Trim everything: the chain empties and releases all nodes.
         chain.trim_end(6);
         EXPECT_TRUE(chain.empty());
-        EXPECT_EQ(chain.readable_bytes(), 0u);
-        EXPECT_EQ(chain.size(), 0u);
+        EXPECT_EQ(chain.readable_bytes(), 0U);
+        EXPECT_EQ(chain.size(), 0U);
         EXPECT_EQ(chain.front(), nullptr);
         EXPECT_EQ(chain.back(), nullptr);
         EXPECT_EQ(readable_string(chain), "");
@@ -549,7 +553,7 @@ TEST(IoBufChainTest, TrimEndReleasesFullyTrimmedTailNodes) {
 }
 
 TEST(IoBufChainTest, CommitTailroomPublishesBytesWrittenOutOfBand) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBufChain chain;
         // A node delivered by a transport read: all bytes committed before the
         // node entered the chain; its tailroom is in the writable accounting.
@@ -557,8 +561,8 @@ TEST(IoBufChainTest, CommitTailroomPublishesBytesWrittenOutOfBand) {
         std::memcpy(buf.writable_data(), "payload", 7);
         buf.commit(7);
         ASSERT_TRUE(chain.append(std::move(buf)));
-        ASSERT_EQ(chain.readable_bytes(), 7u);
-        ASSERT_EQ(chain.writable_bytes(), 9u);
+        ASSERT_EQ(chain.readable_bytes(), 7U);
+        ASSERT_EQ(chain.writable_bytes(), 9U);
 
         // Write into the tailroom out-of-band (e.g. a seal in place), then
         // publish those bytes as readable.
@@ -566,13 +570,13 @@ TEST(IoBufChainTest, CommitTailroomPublishesBytesWrittenOutOfBand) {
         chain.commit_tailroom(2);
 
         EXPECT_EQ(readable_string(chain), "payloadXY");
-        EXPECT_EQ(chain.readable_bytes(), 9u);
-        EXPECT_EQ(chain.writable_bytes(), 7u);
+        EXPECT_EQ(chain.readable_bytes(), 9U);
+        EXPECT_EQ(chain.writable_bytes(), 7U);
     });
 }
 
 TEST(IoBufChainTest, FrontNodeWalksReadableSpansInOrder) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         IoBufChain empty;
         EXPECT_EQ(empty.front_node(), nullptr);
 

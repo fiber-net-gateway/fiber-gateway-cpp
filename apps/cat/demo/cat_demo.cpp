@@ -155,7 +155,7 @@ std::optional<ServerEndpoint> read_client_xml(const std::string &path) {
 std::string get_hostname() {
     std::array<char, 256> buf{};
     if (::gethostname(buf.data(), buf.size()) == 0) {
-        return std::string(buf.data());
+        return {buf.data()};
     }
     return "localhost";
 }
@@ -502,7 +502,7 @@ fiber::async::DetachedTask run_demo(fiber::event::EventLoop *loop, fiber::cat::C
     std::cout << "recording metrics...\n";
     record_metrics(*client);
 
-    const std::size_t expected_trees = static_cast<std::size_t>(settings.count) * 2 + 2;
+    const std::size_t expected_trees = (static_cast<std::size_t>(settings.count) * 2) + 2;
     const auto send_deadline = loop->now() + 5s;
     while (client->stats().sent_messages < expected_trees && loop->now() < send_deadline) {
         co_await fiber::async::sleep(10ms);

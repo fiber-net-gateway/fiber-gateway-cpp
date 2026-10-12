@@ -17,7 +17,7 @@ namespace {
 
 // Mirrors InterpreterVm's const_handle: ConstValueHandle exposes only const
 // accessors yet is constructed from JsValue*, so a const_cast bridges the gap.
-ConstValueHandle const_handle(const JsValue &value) noexcept { return ConstValueHandle(const_cast<JsValue *>(&value)); }
+ConstValueHandle const_handle(const JsValue &value) noexcept { return {const_cast<JsValue *>(&value)}; }
 
 // Returns a borrowed UTF-8 view; heap strings with isolated UTF-16 surrogates
 // are rejected. For well-formed Unicode a

@@ -29,7 +29,7 @@ ZlibReferenceResult zlib_reference_gunzip(std::string_view input, bool allow_tra
     while (!inflate.stream_end()) {
         ZlibReferenceResult step = inflate.step(input.substr(offset, input.size() - offset), out_chunk);
         offset += step.consumed;
-        result.output += std::move(step.output);
+        result.output += step.output;
         if (!step.ok) {
             result.ok = false;
             result.z_status = step.z_status;

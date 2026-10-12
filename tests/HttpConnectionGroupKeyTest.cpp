@@ -14,6 +14,7 @@ const fiber::net::IpAddress kLoopback = fiber::net::IpAddress::loopback_v4();
 const fiber::net::IpAddress kOtherAddress = fiber::net::IpAddress::v4({127, 0, 0, 2});
 
 TEST(HttpConnectionGroupKeyTest, NameKeyNormalizesCaseAndCachesHash) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     auto left = HttpConnectionGroupKey::make("Example.COM", 443, Scheme::Https);
     auto right = HttpConnectionGroupKey::make("example.com", 443, Scheme::Https);
 
@@ -26,9 +27,11 @@ TEST(HttpConnectionGroupKeyTest, NameKeyNormalizesCaseAndCachesHash) {
     EXPECT_EQ(left->hash(), right->hash());
     EXPECT_EQ(*left, *right);
     EXPECT_EQ(std::hash<HttpConnectionGroupKey>{}(*left), std::hash<HttpConnectionGroupKey>{}(*right));
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupKeyTest, NameKeysDifferentSchemeOrPortDoNotMatch) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     auto http_key = HttpConnectionGroupKey::make("example.com", 80, Scheme::Http);
     auto https_key = HttpConnectionGroupKey::make("example.com", 80, Scheme::Https);
     auto other_port = HttpConnectionGroupKey::make("example.com", 8080, Scheme::Http);
@@ -38,9 +41,11 @@ TEST(HttpConnectionGroupKeyTest, NameKeysDifferentSchemeOrPortDoNotMatch) {
     ASSERT_TRUE(other_port.has_value());
     EXPECT_NE(*http_key, *https_key);
     EXPECT_NE(*http_key, *other_port);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupKeyTest, LiteralHostParsesIntoAddress) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     const auto v4 = HttpConnectionGroupKey::make("127.0.0.1", 8080, Scheme::Http);
     const auto same = HttpConnectionGroupKey::make("127.0.0.1", 8080, Scheme::Http);
     const auto other_ip = HttpConnectionGroupKey::make("127.0.0.2", 8080, Scheme::Http);
@@ -58,9 +63,11 @@ TEST(HttpConnectionGroupKeyTest, LiteralHostParsesIntoAddress) {
     EXPECT_NE(*v4, *other_ip);
     ASSERT_TRUE(v6->has_ip());
     EXPECT_EQ(v6->ip(), fiber::net::IpAddress::loopback_v6());
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupKeyTest, PinnedAddressIsPartOfIdentity) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     auto resolved = HttpConnectionGroupKey::make("example.com", 443, Scheme::Https);
     auto pinned = HttpConnectionGroupKey::make("EXAMPLE.com", 443, Scheme::Https, kLoopback);
     auto pinned_same = HttpConnectionGroupKey::make("example.com", 443, Scheme::Https, kLoopback);
@@ -77,9 +84,11 @@ TEST(HttpConnectionGroupKeyTest, PinnedAddressIsPartOfIdentity) {
     EXPECT_EQ(pinned->hash(), pinned_same->hash());
     EXPECT_NE(*pinned, *resolved);
     EXPECT_NE(*pinned, *pinned_other);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupKeyTest, DifferentNamesPinnedToSameAddressStayDistinct) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     auto first = HttpConnectionGroupKey::make("first.example", 443, Scheme::Https, kLoopback);
     auto second = HttpConnectionGroupKey::make("second.example", 443, Scheme::Https, kLoopback);
     auto literal = HttpConnectionGroupKey::make("127.0.0.1", 443, Scheme::Http);
@@ -91,6 +100,7 @@ TEST(HttpConnectionGroupKeyTest, DifferentNamesPinnedToSameAddressStayDistinct) 
     ASSERT_TRUE(pinned_http.has_value());
     EXPECT_NE(*first, *second);
     EXPECT_NE(*literal, *pinned_http);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(HttpConnectionGroupKeyTest, HttpsRejectsLiteralHost) {

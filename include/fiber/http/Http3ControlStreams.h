@@ -41,7 +41,7 @@ private:
         common::IntrusiveListHook link{};
     };
     using PeerStreamReaderList = common::IntrusiveList<PeerStreamReader, offsetof(PeerStreamReader, link)>;
-    static void destroy_stream(void *, quic::QuicStream &stream) noexcept;
+    static void destroy_stream(void * /*unused*/, quic::QuicStream &stream) noexcept;
     async::DetachedTask run_peer_uni_stream(quic::QuicStream::Lease stream) noexcept;
     common::IoResult<void> register_peer_stream(PeerStreamReader &reader, std::uint64_t type) noexcept;
     void unregister_peer_stream(PeerStreamReader &reader) noexcept;

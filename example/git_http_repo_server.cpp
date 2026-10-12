@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -33,7 +34,6 @@
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/detail/StreamFd.h>
 
-extern char **environ;
 
 namespace fs = std::filesystem;
 
@@ -42,9 +42,9 @@ namespace {
 using fiber::common::IoErr;
 using fiber::common::IoResult;
 
-constexpr std::size_t kIoChunkSize = 16 * 1024;
-constexpr std::size_t kMaxCgiHeaderBytes = 64 * 1024;
-constexpr std::size_t kRequestBodyMemoryThreshold = 512 * 1024;
+constexpr std::size_t kIoChunkSize = static_cast<std::size_t>(16 * 1024);
+constexpr std::size_t kMaxCgiHeaderBytes = static_cast<std::size_t>(64 * 1024);
+constexpr std::size_t kRequestBodyMemoryThreshold = static_cast<std::size_t>(512 * 1024);
 
 struct UniqueFd {
     int fd = -1;
@@ -341,11 +341,11 @@ std::string header_to_cgi_key(std::string_view lowcase_name) {
     return key;
 }
 
-void set_env_entry(std::vector<std::string> &env, std::string key, std::string value) {
-    std::string prefix = key;
+void set_env_entry(std::vector<std::string> &env, std::string key, const std::string &value) {
+    std::string prefix = std::move(key);
     prefix.push_back('=');
     for (std::string &entry: env) {
-        if (entry.size() >= prefix.size() && entry.compare(0, prefix.size(), prefix) == 0) {
+        if (entry.size() >= prefix.size() && entry.starts_with(prefix)) {
             entry = std::move(prefix);
             entry.append(value);
             return;
@@ -611,7 +611,7 @@ fiber::async::Task<IoResult<RequestBodyStorage>> collect_request_body(fiber::htt
     }
 
     for (;;) {
-        auto read_result = co_await exchange.read_body(64 * 1024);
+        auto read_result = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -670,7 +670,7 @@ fiber::async::Task<IoResult<void>> stream_file_via_read(fiber::net::detail::Stre
 fiber::async::Task<IoResult<void>> stream_file_to_backend(fiber::net::detail::StreamFd &stream, int file_fd,
                                                           std::size_t total_size) {
     off_t offset = 0;
-    while (static_cast<std::size_t>(offset) < total_size) {
+    while (std::cmp_less(offset, total_size)) {
         std::size_t remaining = total_size - static_cast<std::size_t>(offset);
         ssize_t rc = ::sendfile(stream.fd(), file_fd, &offset, remaining);
         if (rc > 0) {
@@ -694,7 +694,7 @@ fiber::async::Task<IoResult<void>> stream_file_to_backend(fiber::net::detail::St
         }
         co_return std::unexpected(fiber::common::io_err_from_errno(errno));
     }
-    if (static_cast<std::size_t>(offset) != total_size) {
+    if (std::cmp_not_equal(offset, total_size)) {
         co_return std::unexpected(IoErr::BrokenPipe);
     }
     co_return IoResult<void>{};
@@ -792,7 +792,7 @@ std::optional<CgiResponse> parse_cgi_response_headers(const std::vector<std::uin
             if (!content_length) {
                 return std::nullopt;
             }
-            response.content_length = *content_length;
+            response.content_length = content_length;
             continue;
         }
 

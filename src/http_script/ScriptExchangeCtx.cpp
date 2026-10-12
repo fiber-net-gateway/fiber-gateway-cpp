@@ -58,7 +58,9 @@ bool put_string(fiber::script::GcHeap &heap, fiber::script::ValueHandle obj_root
 
 std::string_view copy_to_pool(fiber::mem::BufPool &pool, std::string_view value) noexcept {
     if (value.empty()) {
-        return std::string_view("", 0);
+        // Non-null empty: the pool copy path requires a dereferenceable base.
+        // NOLINTNEXTLINE(bugprone-string-constructor)
+        return {"", 0};
     }
     auto *data = static_cast<char *>(pool.alloc(value.size(), alignof(char)));
     if (data == nullptr) {
@@ -294,6 +296,8 @@ bool ScriptExchangeCtx::bind_constant(ConstIndex index, std::string_view value) 
         return false;
     }
     if (value.empty()) {
+        // Normalize to a non-null data pointer for make_native_string.
+        // NOLINTNEXTLINE(bugprone-string-constructor)
         value = std::string_view("", 0);
     }
     constant_slots_[index] = fiber::script::JsValue::make_native_string(value.data(), value.size());

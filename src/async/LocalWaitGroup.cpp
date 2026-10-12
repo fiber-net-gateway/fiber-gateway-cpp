@@ -41,6 +41,8 @@ void LocalWaitGroup::JoinAwaiter::detach_from_group(WaitAwaiter &base) noexcept 
 
 LocalWaitGroup::~LocalWaitGroup() {
     FIBER_ASSERT(count_ == 0);
+    // Positive form states the invariant directly.
+    // NOLINTNEXTLINE(readability-simplify-boolean-expr)
     FIBER_ASSERT(head_ == nullptr && tail_ == nullptr);
 }
 

@@ -30,11 +30,11 @@ struct OwnedStreamHolder {
 
     static const fiber::http::Http2Stream::Ops &ops() noexcept {
         static const fiber::http::Http2Stream::Ops kOps{
-                &OwnedStreamHolder::destroy_owner,
-                &OwnedStreamHolder::on_header_block_start,
-                &OwnedStreamHolder::on_header_block_complete,
-                &OwnedStreamHolder::on_body,
-                &OwnedStreamHolder::on_abort,
+                .on_destroy = &OwnedStreamHolder::destroy_owner,
+                .on_header_block_start = &OwnedStreamHolder::on_header_block_start,
+                .on_header_block_complete = &OwnedStreamHolder::on_header_block_complete,
+                .on_body = &OwnedStreamHolder::on_body,
+                .on_abort = &OwnedStreamHolder::on_abort,
         };
         return kOps;
     }
@@ -48,15 +48,18 @@ struct OwnedStreamHolder {
         return fiber::common::IoErr::None;
     }
 
-    static fiber::common::IoErr on_header_block_complete(void *, bool) noexcept { return fiber::common::IoErr::None; }
-
-    static fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept {
+    static fiber::common::IoErr on_header_block_complete(void * /*unused*/, bool /*unused*/) noexcept {
         return fiber::common::IoErr::None;
     }
 
-    static void on_abort(void *, fiber::common::IoErr) noexcept {}
+    static fiber::common::IoErr on_body(void * /*unused*/, fiber::mem::IoBuf && /*unused*/, bool /*unused*/) noexcept {
+        return fiber::common::IoErr::None;
+    }
 
-    static fiber::common::IoErr on_indexed_field(void *, fiber::http::Http2HpackDecoder::TableEntryView) noexcept {
+    static void on_abort(void * /*unused*/, fiber::common::IoErr /*unused*/) noexcept {}
+
+    static fiber::common::IoErr on_indexed_field(void * /*unused*/,
+                                                 fiber::http::Http2HpackDecoder::TableEntryView /*unused*/) noexcept {
         return fiber::common::IoErr::None;
     }
 
@@ -132,9 +135,12 @@ struct OwnedStreamHolder {
 
     static const fiber::http::Http2HpackDecoder::Ops &decoder_ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kOps{
-                &OwnedStreamHolder::on_indexed_field, &OwnedStreamHolder::on_indexed_name,
-                &OwnedStreamHolder::on_name_raw,      &OwnedStreamHolder::on_name_huffman,
-                &OwnedStreamHolder::on_value_raw,     &OwnedStreamHolder::on_value_huffman,
+                .on_indexed_field = &OwnedStreamHolder::on_indexed_field,
+                .on_indexed_name = &OwnedStreamHolder::on_indexed_name,
+                .on_name_raw = &OwnedStreamHolder::on_name_raw,
+                .on_name_huffman = &OwnedStreamHolder::on_name_huffman,
+                .on_value_raw = &OwnedStreamHolder::on_value_raw,
+                .on_value_huffman = &OwnedStreamHolder::on_value_huffman,
         };
         return kOps;
     }
@@ -154,11 +160,11 @@ struct OwnedStreamHolder {
 
 class DummyHttpTransport final : public fiber::test::HttpTransportStub {
 public:
-    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds /*timeout*/) override {
         co_return fiber::common::IoResult<void>{};
     }
 
-    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds /*timeout*/) override {
         co_return fiber::common::IoResult<void>{};
     }
 

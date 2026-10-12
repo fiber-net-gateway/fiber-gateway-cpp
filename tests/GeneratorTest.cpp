@@ -92,7 +92,7 @@ TEST(GeneratorTest, StringFromChunksEscapesAcrossChunks) {
         size_t lens[2];
         size_t index = 0;
     };
-    ChunkCtx ctx{{"a", "\"b"}, {1, 2}};
+    ChunkCtx ctx{.chunks = {"a", "\"b"}, .lens = {1, 2}};
     auto producer = [](void *raw, const char *&data, size_t &len, bool &done) noexcept -> bool {
         auto *self = static_cast<ChunkCtx *>(raw);
         if (!self || self->index > 2) {

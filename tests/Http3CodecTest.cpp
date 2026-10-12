@@ -36,7 +36,7 @@ void append_varint(std::vector<std::uint8_t> &out, std::uint64_t value) {
 } // namespace
 
 TEST(Http3CodecTest, VarintParserSupportsSplitInput) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> bytes;
         append_varint(bytes, 15293);
 
@@ -55,7 +55,7 @@ TEST(Http3CodecTest, VarintParserSupportsSplitInput) {
 }
 
 TEST(Http3CodecTest, SettingsParserRejectsDuplicateParameter) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> payload;
         append_varint(payload, static_cast<std::uint64_t>(fiber::http::Http3SettingId::QpackBlockedStreams));
         append_varint(payload, 1);
@@ -74,7 +74,7 @@ TEST(Http3CodecTest, SettingsParserRejectsDuplicateParameter) {
 }
 
 TEST(Http3CodecTest, SettingsParserWaitsForSplitValue) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> payload;
         append_varint(payload, static_cast<std::uint64_t>(fiber::http::Http3SettingId::QpackBlockedStreams));
         append_varint(payload, 128);

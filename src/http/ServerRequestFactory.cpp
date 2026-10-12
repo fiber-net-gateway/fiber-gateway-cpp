@@ -8,7 +8,7 @@ namespace fiber::http {
 
 const Http2Connection::Ops &ServerRequestFactory::ops() noexcept {
     static const Http2Connection::Ops kOps{
-            &ServerRequestFactory::create_peer_stream_op,
+            .create_peer_stream = &ServerRequestFactory::create_peer_stream_op,
     };
     return kOps;
 }

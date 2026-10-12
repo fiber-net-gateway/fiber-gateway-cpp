@@ -204,8 +204,9 @@ fiber::common::IoResult<CapturedQuestion> parse_question(const std::uint8_t *pac
     if (!decoded || decoded->next_offset > packet_len || packet_len - decoded->next_offset < 4) {
         return std::unexpected(IoErr::Invalid);
     }
-    return CapturedQuestion{std::string(decoded->name), read_be16(packet + decoded->next_offset),
-                            read_be16(packet + decoded->next_offset + 2)};
+    return CapturedQuestion{.name = std::string(decoded->name),
+                            .type = read_be16(packet + decoded->next_offset),
+                            .dns_class = read_be16(packet + decoded->next_offset + 2)};
 }
 
 std::vector<std::uint8_t> make_empty_response(std::uint16_t id, std::string_view qname, std::uint16_t type,
@@ -274,7 +275,7 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<
     if (!bind_result) {
         port_promise->set_value(0);
         outcome.err = bind_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -282,7 +283,7 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -290,7 +291,7 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<
     auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -298,14 +299,14 @@ DetachedTask run_udp_success_server(fiber::event::EventLoop *loop, std::promise<
     auto question = parse_question(buf.data(), recv_result->size);
     if (!question) {
         outcome.err = question.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     auto response = make_a_response(read_be16(buf.data()), question->name, {1, 2, 3, 4});
     auto send_result = co_await socket.send_to(response.data(), response.size(), recv_result->peer, 2s);
     outcome.err = send_result ? IoErr::None : send_result.error();
     socket.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_udp_concurrent_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
@@ -316,7 +317,7 @@ DetachedTask run_udp_concurrent_server(fiber::event::EventLoop *loop, std::promi
     if (!bind_result) {
         port_promise->set_value(0);
         outcome.err = bind_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -324,7 +325,7 @@ DetachedTask run_udp_concurrent_server(fiber::event::EventLoop *loop, std::promi
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -335,22 +336,22 @@ DetachedTask run_udp_concurrent_server(fiber::event::EventLoop *loop, std::promi
     };
     std::array<Request, 2> requests{};
     std::array<std::uint8_t, 512> buf{};
-    for (std::size_t i = 0; i < requests.size(); ++i) {
+    for (auto &request: requests) {
         auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
         if (!recv_result) {
             outcome.err = recv_result.error();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
         auto question = parse_question(buf.data(), recv_result->size);
         if (!question) {
             outcome.err = question.error();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
-        requests[i].id = read_be16(buf.data());
-        requests[i].question = std::move(*question);
-        requests[i].peer = recv_result->peer;
+        request.id = read_be16(buf.data());
+        request.question = std::move(*question);
+        request.peer = recv_result->peer;
         ++outcome.recv_count;
     }
 
@@ -360,14 +361,14 @@ DetachedTask run_udp_concurrent_server(fiber::event::EventLoop *loop, std::promi
         auto send_result = co_await socket.send_to(response.data(), response.size(), request.peer, 2s);
         if (!send_result) {
             outcome.err = send_result.error();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
     }
 
     outcome.err = IoErr::None;
     socket.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_concurrent_client_queries(fiber::event::EventLoop *loop, std::uint16_t port,
@@ -417,7 +418,7 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
     if (!bind_result) {
         port_promise->set_value(0);
         outcome.err = bind_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -425,7 +426,7 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -435,7 +436,7 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
         auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
         if (!recv_result) {
             outcome.err = recv_result.error();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
         ++outcome.recv_count;
@@ -446,20 +447,20 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
         auto question = parse_question(buf.data(), recv_result->size);
         if (!question) {
             outcome.err = question.error();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
         auto response = make_a_response(read_be16(buf.data()), question->name, {5, 6, 7, 8});
         auto send_result = co_await socket.send_to(response.data(), response.size(), peer, 2s);
         outcome.err = send_result ? IoErr::None : send_result.error();
         socket.close();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
     outcome.err = IoErr::Unknown;
     socket.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DnsClient::ResponseDisposition validate_complete_dns_message(void *context, const std::uint8_t *packet,
@@ -677,7 +678,7 @@ DetachedTask run_udp_validation_server(fiber::event::EventLoop *loop, std::promi
     if (!bind_result) {
         port_promise->set_value(0);
         outcome.err = bind_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -685,7 +686,7 @@ DetachedTask run_udp_validation_server(fiber::event::EventLoop *loop, std::promi
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -693,7 +694,7 @@ DetachedTask run_udp_validation_server(fiber::event::EventLoop *loop, std::promi
     auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     ++outcome.recv_count;
@@ -701,7 +702,7 @@ DetachedTask run_udp_validation_server(fiber::event::EventLoop *loop, std::promi
     auto question = parse_question(buf.data(), recv_result->size);
     if (!question) {
         outcome.err = question.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -732,14 +733,14 @@ DetachedTask run_udp_validation_server(fiber::event::EventLoop *loop, std::promi
         if (!send_result) {
             outcome.err = send_result.error();
             socket.close();
-            outcome_promise->set_value(std::move(outcome));
+            outcome_promise->set_value(outcome);
             co_return;
         }
     }
 
     outcome.err = IoErr::None;
     socket.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
@@ -752,7 +753,7 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -760,7 +761,7 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     auto recv_result = co_await udp.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     ++outcome.recv_count;
@@ -768,21 +769,21 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     auto udp_question = parse_question(buf.data(), recv_result->size);
     if (!udp_question) {
         outcome.err = udp_question.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     auto truncated = make_truncated_response(read_be16(buf.data()), udp_question->name);
     auto udp_send = co_await udp.send_to(truncated.data(), truncated.size(), recv_result->peer, 2s);
     if (!udp_send) {
         outcome.err = udp_send.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
     auto accept_result = co_await fiber::async::timeout_for([&]() { return listener.accept(); }, 2s);
     if (!accept_result) {
         outcome.err = accept_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -791,7 +792,7 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     auto prefix_read = co_await read_exact(stream, prefix.data(), prefix.size());
     if (!prefix_read) {
         outcome.err = prefix_read.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -800,14 +801,14 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     auto query_read = co_await read_exact(stream, tcp_query.data(), tcp_query.size());
     if (!query_read) {
         outcome.err = query_read.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
     auto tcp_question = parse_question(tcp_query.data(), tcp_query.size());
     if (!tcp_question) {
         outcome.err = tcp_question.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     std::uint16_t response_id = read_be16(tcp_query.data());
@@ -824,7 +825,7 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     auto write_prefix_result = co_await write_all(stream, response_prefix.data(), response_prefix.size());
     if (!write_prefix_result) {
         outcome.err = write_prefix_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     auto write_payload_result = co_await write_all(stream, response.data(), response.size());
@@ -832,7 +833,7 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
     udp.close();
     listener.close();
     stream.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient *client,
@@ -845,7 +846,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -853,7 +854,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     auto recv_result = co_await udp.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     ++outcome.recv_count;
@@ -861,21 +862,21 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     auto question = parse_question(buf.data(), recv_result->size);
     if (!question) {
         outcome.err = question.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     auto truncated = make_truncated_response(read_be16(buf.data()), question->name);
     auto udp_send = co_await udp.send_to(truncated.data(), truncated.size(), recv_result->peer, 2s);
     if (!udp_send) {
         outcome.err = udp_send.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
     auto accept_result = co_await fiber::async::timeout_for([&]() { return listener.accept(); }, 2s);
     if (!accept_result) {
         outcome.err = accept_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -884,7 +885,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     auto prefix_read = co_await read_exact(stream, prefix.data(), prefix.size());
     if (!prefix_read) {
         outcome.err = prefix_read.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -892,7 +893,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     auto query_read = co_await read_exact(stream, tcp_query.data(), tcp_query.size());
     if (!query_read) {
         outcome.err = query_read.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -909,7 +910,7 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
     udp.close();
     listener.close();
     stream.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_client_query(fiber::event::EventLoop *loop, std::uint16_t port, std::chrono::milliseconds timeout,
@@ -1052,9 +1053,9 @@ void expect_multi_server_success(MultiServerMode mode) {
     group.join();
 
     EXPECT_EQ(server.err, IoErr::None);
-    EXPECT_EQ(server.recv_counts[0], 1u);
-    EXPECT_EQ(server.recv_counts[1], 1u);
-    EXPECT_EQ(client.query_count, mode == MultiServerMode::Rotate ? 2u : 1u);
+    EXPECT_EQ(server.recv_counts[0], 1U);
+    EXPECT_EQ(server.recv_counts[1], 1U);
+    EXPECT_EQ(client.query_count, mode == MultiServerMode::Rotate ? 2U : 1U);
     EXPECT_EQ(client.errors[0], IoErr::None);
     if (mode == MultiServerMode::Rotate) {
         EXPECT_EQ(client.errors[1], IoErr::None);
@@ -1064,11 +1065,11 @@ void expect_multi_server_success(MultiServerMode mode) {
     ASSERT_TRUE(parser.init());
     auto parsed = parser.parse(client.packet.data(), client.packet.size());
     ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
-    ASSERT_EQ(parsed->answer_count, 1u);
-    ASSERT_EQ(parsed->answers[0].rdata_len, 4u);
+    ASSERT_EQ(parsed->answer_count, 1U);
+    ASSERT_EQ(parsed->answers[0].rdata_len, 4U);
     const bool tcp_on_second = mode == MultiServerMode::SecondTcpFallback;
-    EXPECT_EQ(parsed->answers[0].rdata[0], tcp_on_second ? 30u : 20u);
-    EXPECT_EQ(parsed->answers[0].rdata[3], tcp_on_second ? 3u : 2u);
+    EXPECT_EQ(parsed->answers[0].rdata[0], tcp_on_second ? 30U : 20U);
+    EXPECT_EQ(parsed->answers[0].rdata[3], tcp_on_second ? 3U : 2U);
 }
 
 TEST(DnsClientTest, QueryRawReturnsUdpResponse) {
@@ -1099,13 +1100,13 @@ TEST(DnsClientTest, QueryRawReturnsUdpResponse) {
     ASSERT_TRUE(parser.init());
     auto parsed = parser.parse(client.packet.data(), client.packet.size());
     ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
-    ASSERT_EQ(parsed->answer_count, 1u);
+    ASSERT_EQ(parsed->answer_count, 1U);
     ASSERT_EQ(parsed->answers[0].type, static_cast<std::uint16_t>(RecordType::A));
-    ASSERT_EQ(parsed->answers[0].rdata_len, 4u);
-    EXPECT_EQ(parsed->answers[0].rdata[0], 1u);
-    EXPECT_EQ(parsed->answers[0].rdata[1], 2u);
-    EXPECT_EQ(parsed->answers[0].rdata[2], 3u);
-    EXPECT_EQ(parsed->answers[0].rdata[3], 4u);
+    ASSERT_EQ(parsed->answers[0].rdata_len, 4U);
+    EXPECT_EQ(parsed->answers[0].rdata[0], 1U);
+    EXPECT_EQ(parsed->answers[0].rdata[1], 2U);
+    EXPECT_EQ(parsed->answers[0].rdata[2], 3U);
+    EXPECT_EQ(parsed->answers[0].rdata[3], 4U);
 }
 
 TEST(DnsClientTest, ConcurrentQueriesAcceptResponsesInReverseOrder) {
@@ -1139,11 +1140,11 @@ TEST(DnsClientTest, ConcurrentQueriesAcceptResponsesInReverseOrder) {
     group.join();
 
     EXPECT_EQ(server.err, IoErr::None);
-    EXPECT_EQ(server.recv_count, 2u);
+    EXPECT_EQ(server.recv_count, 2U);
     EXPECT_EQ(client.errors[0], IoErr::None);
     EXPECT_EQ(client.errors[1], IoErr::None);
-    EXPECT_GT(client.packet_sizes[0], 0u);
-    EXPECT_GT(client.packet_sizes[1], 0u);
+    EXPECT_GT(client.packet_sizes[0], 0U);
+    EXPECT_GT(client.packet_sizes[1], 0U);
 }
 
 TEST(DnsClientTest, QueryRawIgnoresWrongIdQuestionAnd0x20Case) {
@@ -1174,12 +1175,12 @@ TEST(DnsClientTest, QueryRawIgnoresWrongIdQuestionAnd0x20Case) {
     ASSERT_TRUE(parser.init());
     auto parsed = parser.parse(client.packet.data(), client.packet.size());
     ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
-    ASSERT_EQ(parsed->answer_count, 1u);
-    ASSERT_EQ(parsed->answers[0].rdata_len, 4u);
-    EXPECT_EQ(parsed->answers[0].rdata[0], 4u);
-    EXPECT_EQ(parsed->answers[0].rdata[1], 3u);
-    EXPECT_EQ(parsed->answers[0].rdata[2], 2u);
-    EXPECT_EQ(parsed->answers[0].rdata[3], 1u);
+    ASSERT_EQ(parsed->answer_count, 1U);
+    ASSERT_EQ(parsed->answers[0].rdata_len, 4U);
+    EXPECT_EQ(parsed->answers[0].rdata[0], 4U);
+    EXPECT_EQ(parsed->answers[0].rdata[1], 3U);
+    EXPECT_EQ(parsed->answers[0].rdata[2], 2U);
+    EXPECT_EQ(parsed->answers[0].rdata[3], 1U);
 }
 
 TEST(DnsClientTest, QueryRawCanDisableStrict0x20Echo) {
@@ -1210,12 +1211,12 @@ TEST(DnsClientTest, QueryRawCanDisableStrict0x20Echo) {
     ASSERT_TRUE(parser.init());
     auto parsed = parser.parse(client.packet.data(), client.packet.size());
     ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
-    ASSERT_EQ(parsed->answer_count, 1u);
-    ASSERT_EQ(parsed->answers[0].rdata_len, 4u);
-    EXPECT_EQ(parsed->answers[0].rdata[0], 8u);
-    EXPECT_EQ(parsed->answers[0].rdata[1], 8u);
-    EXPECT_EQ(parsed->answers[0].rdata[2], 8u);
-    EXPECT_EQ(parsed->answers[0].rdata[3], 8u);
+    ASSERT_EQ(parsed->answer_count, 1U);
+    ASSERT_EQ(parsed->answers[0].rdata_len, 4U);
+    EXPECT_EQ(parsed->answers[0].rdata[0], 8U);
+    EXPECT_EQ(parsed->answers[0].rdata[1], 8U);
+    EXPECT_EQ(parsed->answers[0].rdata[2], 8U);
+    EXPECT_EQ(parsed->answers[0].rdata[3], 8U);
 }
 
 TEST(DnsClientTest, QueryRawRetriesAfterTimeout) {
@@ -1240,7 +1241,7 @@ TEST(DnsClientTest, QueryRawRetriesAfterTimeout) {
     group.join();
 
     EXPECT_EQ(server.err, IoErr::None);
-    EXPECT_EQ(server.recv_count, 2u);
+    EXPECT_EQ(server.recv_count, 2U);
     EXPECT_EQ(client.err, IoErr::None);
 }
 
@@ -1296,10 +1297,10 @@ TEST(DnsClientTest, QueryRawFallsBackToTcpOnTruncatedUdpResponse) {
     ASSERT_TRUE(parser.init());
     auto parsed = parser.parse(client.packet.data(), client.packet.size());
     ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
-    ASSERT_EQ(parsed->answers[0].rdata[0], 9u);
-    ASSERT_EQ(parsed->answers[0].rdata[1], 9u);
-    ASSERT_EQ(parsed->answers[0].rdata[2], 9u);
-    ASSERT_EQ(parsed->answers[0].rdata[3], 9u);
+    ASSERT_EQ(parsed->answers[0].rdata[0], 9U);
+    ASSERT_EQ(parsed->answers[0].rdata[1], 9U);
+    ASSERT_EQ(parsed->answers[0].rdata[2], 9U);
+    ASSERT_EQ(parsed->answers[0].rdata[3], 9U);
 }
 
 TEST(DnsClientTest, TcpFallbackRejectsWrongResponseId) { expect_tcp_response_rejected(TcpResponseMode::WrongId); }
@@ -1346,7 +1347,7 @@ TEST(DnsClientTest, CloseAndReleaseCancelPendingTcpFallback) {
 
     EXPECT_EQ(client.err, IoErr::Canceled);
     EXPECT_EQ(server.err, IoErr::None);
-    EXPECT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(server.recv_count, 1U);
 }
 
 } // namespace

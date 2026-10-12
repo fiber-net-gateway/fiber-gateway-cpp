@@ -247,7 +247,7 @@ std::shared_ptr<const ConstPackage> ConstPackage::Builder::build() {
     state_->package->storage_->size = state_->size;
     std::shared_ptr<ConstPackage> package(std::move(state_->package));
     state_.reset();
-    return std::shared_ptr<const ConstPackage>(std::move(package));
+    return {std::move(package)};
 }
 
 fiber::script::AbiResult ConstPackage::constant_fn(void *userdata,

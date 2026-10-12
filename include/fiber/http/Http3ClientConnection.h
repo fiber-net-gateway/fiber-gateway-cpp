@@ -134,12 +134,14 @@ private:
                                                                          common::IoErr &identity_error) noexcept;
     [[nodiscard]] static quic::QuicConnection::Options own_quic_options(const quic::QuicConnection::Options &base,
                                                                         Http3ClientConnection *owner) noexcept;
-    static quic::QuicStream::Lease create_peer_stream(void *, std::uint64_t) noexcept;
-    static void on_peer_stream_attached(void *, quic::QuicStream &) noexcept;
-    static void on_quic_state_change(void *, quic::QuicConnection &) noexcept;
-    static void on_quic_capacity_change(void *, quic::QuicConnection &) noexcept;
-    static bool on_new_tls_session(void *, quic::QuicConnection &, tls::TlsSessionState &&) noexcept;
-    static void on_new_token(void *, quic::QuicConnection &, const std::uint8_t *, std::size_t) noexcept;
+    static quic::QuicStream::Lease create_peer_stream(void * /*unused*/, std::uint64_t /*unused*/) noexcept;
+    static void on_peer_stream_attached(void * /*owner*/, quic::QuicStream & /*stream*/) noexcept;
+    static void on_quic_state_change(void * /*owner*/, quic::QuicConnection & /*unused*/) noexcept;
+    static void on_quic_capacity_change(void * /*owner*/, quic::QuicConnection & /*unused*/) noexcept;
+    static bool on_new_tls_session(void * /*owner*/, quic::QuicConnection & /*quic*/,
+                                   tls::TlsSessionState && /*session*/) noexcept;
+    static void on_new_token(void * /*owner*/, quic::QuicConnection & /*unused*/, const std::uint8_t * /*token*/,
+                             std::size_t /*token_len*/) noexcept;
     [[nodiscard]] static const Http3ControlStreams::Ops &control_ops() noexcept;
     [[nodiscard]] quic::QuicClientCacheKey cache_key() const noexcept;
     [[nodiscard]] std::uint32_t max_qpack_string_size() const noexcept { return max_qpack_string_size_; }
@@ -157,13 +159,13 @@ private:
     void abort_connect(Http3ErrorCode close_code) noexcept;
     [[nodiscard]] async::Task<Http3ClientConnectResult> fail_connect(Http3ClientConnectError error,
                                                                      Http3ErrorCode close_code) noexcept;
-    [[nodiscard]] common::IoResult<void> register_client_request(Http3ClientRequestEntry &) noexcept;
-    void unregister_client_request(Http3ClientRequestEntry &) noexcept;
+    [[nodiscard]] common::IoResult<void> register_client_request(Http3ClientRequestEntry & /*entry*/) noexcept;
+    void unregister_client_request(Http3ClientRequestEntry & /*entry*/) noexcept;
     [[nodiscard]] async::Task<void> join_protocol_tasks() noexcept;
-    async::DetachedTask run_graceful_shutdown(Http3ErrorCode) noexcept;
-    [[nodiscard]] common::IoResult<void> apply_peer_goaway(std::uint64_t) noexcept;
-    void reject_client_requests(std::uint64_t) noexcept;
-    void detach_client_requests(Http3ErrorCode) noexcept;
+    async::DetachedTask run_graceful_shutdown(Http3ErrorCode /*error*/) noexcept;
+    [[nodiscard]] common::IoResult<void> apply_peer_goaway(std::uint64_t /*id*/) noexcept;
+    void reject_client_requests(std::uint64_t /*goaway_id*/) noexcept;
+    void detach_client_requests(Http3ErrorCode /*error*/) noexcept;
 
     Http3Client &client_;
     // Session cache identity. The address is the dial target, not the

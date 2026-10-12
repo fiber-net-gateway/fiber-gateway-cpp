@@ -233,7 +233,7 @@ common::IoResult<MessageParser::ScannedMessageView> MessageParser::scan(const st
 }
 
 MessageParser::RecordCursor MessageParser::cursor(RecordSectionView section) noexcept {
-    return RecordCursor{section.offset, section.end_offset, section.count};
+    return RecordCursor{.offset = section.offset, .end_offset = section.end_offset, .remaining = section.count};
 }
 
 common::IoResult<bool> MessageParser::next_record(const ScannedMessageView &message, RecordCursor &record_cursor,

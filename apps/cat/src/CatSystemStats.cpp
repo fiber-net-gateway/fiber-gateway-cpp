@@ -190,6 +190,9 @@ bool read_file(std::string_view path, std::array<char, Capacity> &storage, std::
     const bool failed = std::ferror(file) != 0;
     bool truncated = false;
     if (!failed && size == storage.size()) {
+        // Deliberate EOF probe: a buffer filled to the brim means the file
+        // may be truncated, and fgetc returning EOF is the all-clear.
+        // NOLINTNEXTLINE(clang-analyzer-unix.Stream)
         truncated = std::fgetc(file) != EOF;
     }
     std::fclose(file);

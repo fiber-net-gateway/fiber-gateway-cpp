@@ -260,22 +260,22 @@ TEST(ServerHelloDecode, FullParseExtractsEveryField) {
     ASSERT_TRUE(tls_decode_server_hello(body.data(), body.size(), hello).has_value());
     EXPECT_EQ(hello.legacy_version, 0x0303);
     EXPECT_EQ(hello.random.data(), body.data() + 2); // spans borrow the body
-    EXPECT_EQ(hello.session_id.size(), 4u);
+    EXPECT_EQ(hello.session_id.size(), 4U);
     EXPECT_EQ(hello.cipher_suite, 0x1301);
     EXPECT_EQ(hello.compression_method, 0);
     EXPECT_TRUE(hello.has_supported_version);
     EXPECT_EQ(hello.supported_version, 0x0304);
     EXPECT_TRUE(hello.has_key_share);
-    EXPECT_EQ(hello.key_share_group, 0x001Du);
+    EXPECT_EQ(hello.key_share_group, 0x001DU);
     EXPECT_EQ(hello.key_share.size(), kServerShare.size());
     EXPECT_EQ(0, std::memcmp(hello.key_share.data(), kServerShare.data(), kServerShare.size()));
     EXPECT_TRUE(hello.has_alpn);
     EXPECT_EQ(hello.alpn, "h2");
     EXPECT_TRUE(hello.has_extended_master_secret);
     EXPECT_TRUE(hello.has_renegotiation_info);
-    EXPECT_EQ(hello.renegotiation_info.size(), 1u); // content kept for the engine's empty-check
+    EXPECT_EQ(hello.renegotiation_info.size(), 1U); // content kept for the engine's empty-check
     EXPECT_TRUE(hello.has_selected_identity);
-    EXPECT_EQ(hello.selected_identity, 1u);
+    EXPECT_EQ(hello.selected_identity, 1U);
     EXPECT_FALSE(hello.has_cookie);
 
     EXPECT_FALSE(tls_is_hello_retry_request(hello.random));
@@ -299,10 +299,10 @@ TEST(ServerHelloDecode, HrrFormKeyShareHasEmptyExchange) {
     TlsServerHello hello;
     ASSERT_TRUE(tls_decode_server_hello(body.data(), body.size(), hello).has_value());
     EXPECT_TRUE(hello.has_key_share);
-    EXPECT_EQ(hello.key_share_group, 0x0017u);
+    EXPECT_EQ(hello.key_share_group, 0x0017U);
     EXPECT_TRUE(hello.key_share.empty()); // selected_group form
     EXPECT_TRUE(hello.has_cookie);
-    EXPECT_EQ(hello.cookie.size(), 2u);
+    EXPECT_EQ(hello.cookie.size(), 2U);
 }
 
 TEST(ServerHelloDecode, ExtensionlessSh12Decodes) {
@@ -311,7 +311,7 @@ TEST(ServerHelloDecode, ExtensionlessSh12Decodes) {
     ASSERT_TRUE(tls_decode_server_hello(body.data(), body.size(), hello).has_value());
     EXPECT_EQ(hello.legacy_version, 0x0303);
     EXPECT_TRUE(hello.session_id.empty());
-    EXPECT_EQ(hello.cipher_suite, 0xC02Fu);
+    EXPECT_EQ(hello.cipher_suite, 0xC02FU);
     EXPECT_FALSE(hello.has_supported_version);
     EXPECT_FALSE(hello.has_key_share);
     EXPECT_TRUE(hello.extensions_block.empty());
@@ -382,7 +382,7 @@ TEST(ServerHelloDecode, MalformedTable) {
         const auto whole = plain_sh_body();
         const auto truncated = std::vector<std::uint8_t>(whole.begin(), whole.begin() + 40);
         EXPECT_FALSE(tls_decode_server_hello(truncated.data(), truncated.size(), sentinel).has_value());
-        EXPECT_EQ(sentinel.cipher_suite, 0xBEEFu);
+        EXPECT_EQ(sentinel.cipher_suite, 0xBEEFU);
     }
 }
 
@@ -442,7 +442,7 @@ TEST(CertificateDecode, Tls13FullParse) {
     TlsCertificate13 out;
     ASSERT_TRUE(tls_decode_certificate_13(body.data(), body.size(), out).has_value());
     EXPECT_TRUE(out.certificate_request_context.empty());
-    EXPECT_EQ(out.cert_count, 2u);
+    EXPECT_EQ(out.cert_count, 2U);
     EXPECT_EQ(out.certs[0].size(), kDerA.size());
     EXPECT_EQ(0, std::memcmp(out.certs[0].data(), kDerA.data(), kDerA.size()));
     EXPECT_EQ(out.certs[1].size(), kDerB.size());
@@ -453,14 +453,14 @@ TEST(CertificateDecode, Tls13EmptyListIsStructurallyValid) {
     const auto body = cert13_body({}, {});
     TlsCertificate13 out;
     ASSERT_TRUE(tls_decode_certificate_13(body.data(), body.size(), out).has_value());
-    EXPECT_EQ(out.cert_count, 0u); // rejecting an empty server chain is the engine's rule
+    EXPECT_EQ(out.cert_count, 0U); // rejecting an empty server chain is the engine's rule
 }
 
 TEST(CertificateDecode, Tls12FullParse) {
     const auto body = cert12_body({cert12_entry(kDerA), cert12_entry(kDerB)});
     TlsCertificate12 out;
     ASSERT_TRUE(tls_decode_certificate_12(body.data(), body.size(), out).has_value());
-    EXPECT_EQ(out.cert_count, 2u);
+    EXPECT_EQ(out.cert_count, 2U);
     EXPECT_EQ(out.certs[1].size(), kDerB.size());
 }
 
@@ -532,7 +532,7 @@ TEST(CertificateRequestDecode, Tls13RequiresSignatureAlgorithms) {
     ASSERT_TRUE(tls_decode_certificate_request_13(body.data(), body.size(), out).has_value());
     EXPECT_EQ(out.certificate_request_context, "a");
     EXPECT_TRUE(out.has_signature_algorithms);
-    EXPECT_EQ(out.signature_algorithms.size(), 4u); // raw u16 list
+    EXPECT_EQ(out.signature_algorithms.size(), 4U); // raw u16 list
     EXPECT_EQ(out.signature_algorithms.data(), body.data() + 2 + 2 + 6); // borrows body
 }
 
@@ -556,11 +556,11 @@ TEST(CertificateRequestDecode, Tls12PositionalVectors) {
 
     TlsCertificateRequest12 out;
     ASSERT_TRUE(tls_decode_certificate_request_12(body.data(), body.size(), out).has_value());
-    EXPECT_EQ(out.certificate_types.size(), 1u);
+    EXPECT_EQ(out.certificate_types.size(), 1U);
     EXPECT_EQ(out.certificate_types.front(), 0x40);
     EXPECT_TRUE(out.has_signature_algorithms);
-    EXPECT_EQ(out.signature_algorithms.size(), 4u);
-    EXPECT_EQ(out.certificate_authorities.size(), 3u);
+    EXPECT_EQ(out.signature_algorithms.size(), 4U);
+    EXPECT_EQ(out.certificate_authorities.size(), 3U);
 }
 
 TEST(CertificateRequestDecode, MalformedTable) {
@@ -597,8 +597,8 @@ TEST(CertificateVerifyAndFinishedDecode, ParseAndMalformedTable) {
         put_u16(body, 4);
         body.insert(body.end(), {0xDE, 0xAD, 0xBE, 0xEF});
         ASSERT_TRUE(tls_decode_certificate_verify(body.data(), body.size(), out).has_value());
-        EXPECT_EQ(out.algorithm, 0x0403u);
-        EXPECT_EQ(out.signature.size(), 4u);
+        EXPECT_EQ(out.algorithm, 0x0403U);
+        EXPECT_EQ(out.signature.size(), 4U);
         EXPECT_EQ(out.signature.data(), body.data() + 4);
 
         const auto bad = [&](std::vector<std::uint8_t> mangled) {
@@ -613,7 +613,7 @@ TEST(CertificateVerifyAndFinishedDecode, ParseAndMalformedTable) {
         TlsFinished out;
         const std::vector<std::uint8_t> vd(32, 0x77);
         ASSERT_TRUE(tls_decode_finished(vd.data(), vd.size(), out).has_value());
-        EXPECT_EQ(out.verify_data.size(), 32u);
+        EXPECT_EQ(out.verify_data.size(), 32U);
         const std::vector<std::uint8_t> empty;
         EXPECT_FALSE(tls_decode_finished(empty.data(), 0, out).has_value());
     }
@@ -639,11 +639,11 @@ TEST(ServerKeyExchangeDecode, NamedCurveOnly) {
 
     TlsServerKeyExchange out;
     ASSERT_TRUE(tls_decode_server_key_exchange(body.data(), body.size(), out).has_value());
-    EXPECT_EQ(out.curve_type, 3u);
-    EXPECT_EQ(out.named_group, 0x001Du);
-    EXPECT_EQ(out.public_key.size(), 32u);
-    EXPECT_EQ(out.algorithm, 0x0804u);
-    EXPECT_EQ(out.signature.size(), 64u);
+    EXPECT_EQ(out.curve_type, 3U);
+    EXPECT_EQ(out.named_group, 0x001DU);
+    EXPECT_EQ(out.public_key.size(), 32U);
+    EXPECT_EQ(out.algorithm, 0x0804U);
+    EXPECT_EQ(out.signature.size(), 64U);
     EXPECT_EQ(out.public_key.data(), body.data() + 4); // borrows body
 
     const auto bad = [&](const std::vector<std::uint8_t> &mangled) {
@@ -719,15 +719,15 @@ TEST_F(ClientHelloEncodeTest, RoundTripsThroughTheDecoder) {
     TlsClientHello hello;
     ASSERT_TRUE(tls_decode_client_hello(buffer_.data() + 4, encoded.value().len - 4, hello).has_value());
     EXPECT_EQ(hello.legacy_version, 0x0303);
-    EXPECT_EQ(hello.random.size(), 32u);
-    EXPECT_EQ(hello.session_id.size(), 4u);
-    EXPECT_EQ(hello.cipher_suites.size(), 6u);
+    EXPECT_EQ(hello.random.size(), 32U);
+    EXPECT_EQ(hello.session_id.size(), 4U);
+    EXPECT_EQ(hello.cipher_suites.size(), 6U);
     EXPECT_TRUE(hello.has_server_name);
     EXPECT_EQ(hello.server_name, "example.com");
     EXPECT_TRUE(hello.has_supported_groups);
-    EXPECT_EQ(hello.supported_groups.size(), 4u);
+    EXPECT_EQ(hello.supported_groups.size(), 4U);
     EXPECT_TRUE(hello.has_signature_algorithms);
-    EXPECT_EQ(hello.signature_algorithms.size(), 6u);
+    EXPECT_EQ(hello.signature_algorithms.size(), 6U);
     EXPECT_TRUE(hello.has_key_share);
     EXPECT_EQ(hello.key_share_entries.size(), 4 + kClientShare.size());
     fiber::tls::TlsKeyShareView share;
@@ -735,20 +735,20 @@ TEST_F(ClientHelloEncodeTest, RoundTripsThroughTheDecoder) {
                         .has_value());
     EXPECT_EQ(share.key_exchange.size(), kClientShare.size());
     EXPECT_TRUE(hello.has_alpn);
-    EXPECT_EQ(hello.alpn_list.size(), 12u); // "h2" (1+2) + "http/1.1" (1+8)
+    EXPECT_EQ(hello.alpn_list.size(), 12U); // "h2" (1+2) + "http/1.1" (1+8)
     EXPECT_TRUE(hello.has_session_ticket);
-    EXPECT_EQ(hello.session_ticket.size(), 3u);
+    EXPECT_EQ(hello.session_ticket.size(), 3U);
     EXPECT_TRUE(hello.has_extended_master_secret);
     EXPECT_TRUE(hello.has_renegotiation_info);
     EXPECT_TRUE(hello.has_psk_key_exchange_modes);
     EXPECT_TRUE(hello.has_early_data);
     EXPECT_TRUE(hello.has_pre_shared_key);
-    EXPECT_EQ(hello.psk_identity_count, 1u);
-    EXPECT_EQ(hello.psk_binder_count, 1u);
+    EXPECT_EQ(hello.psk_identity_count, 1U);
+    EXPECT_EQ(hello.psk_binder_count, 1U);
 
     // supported_versions: fixed [0x0304, 0x0303] offer
     EXPECT_TRUE(hello.has_supported_versions);
-    EXPECT_EQ(hello.supported_versions.size(), 4u);
+    EXPECT_EQ(hello.supported_versions.size(), 4U);
     EXPECT_EQ(hello.supported_versions[0], 0x03);
     EXPECT_EQ(hello.supported_versions[1], 0x04);
     EXPECT_EQ(hello.supported_versions[2], 0x03);
@@ -817,7 +817,7 @@ TEST_F(ClientHelloEncodeTest, CookieEchoIsLengthPrefixed) {
     const auto with = encode(in);
     ASSERT_TRUE(without.has_value());
     ASSERT_TRUE(with.has_value());
-    EXPECT_EQ(with.value().len - without.value().len, 4u + 2u + sizeof(kCookie));
+    EXPECT_EQ(with.value().len - without.value().len, 4U + 2U + sizeof(kCookie));
 
     // Extension materializes as 00 2C | be16(payload=2+5) | be16(len) | bytes
     // right before the supported_groups extension (00 0A).
@@ -878,23 +878,25 @@ TEST(FlightEncode, CertificateBothFormsRoundTrip) {
 
     // 1.3 with an echoed context
     std::vector<std::uint8_t> scratch(64, 0);
-    const auto len13 =
-            tls_encode_certificate_13({reinterpret_cast<const std::uint8_t *>("\x07ctx"), 4}, certs, scratch);
+    const std::array<std::uint8_t, 4> context13{0x07, 'c', 't', 'x'};
+    const auto len13 = tls_encode_certificate_13({context13.data(), context13.size()}, certs, scratch);
     ASSERT_TRUE(len13.has_value());
     TlsCertificate13 cert13;
     ASSERT_TRUE(tls_decode_certificate_13(scratch.data() + 4, len13.value() - 4, cert13).has_value());
-    EXPECT_EQ(cert13.certificate_request_context, std::string_view("\x07ctx", 4));
-    EXPECT_EQ(cert13.cert_count, 2u);
-    EXPECT_EQ(cert13.certs[0].size(), 10u);
-    EXPECT_EQ(cert13.certs[1].size(), 20u);
+    EXPECT_EQ(cert13.certificate_request_context, std::string_view("\x07"
+                                                                   "ctx",
+                                                                   4));
+    EXPECT_EQ(cert13.cert_count, 2U);
+    EXPECT_EQ(cert13.certs[0].size(), 10U);
+    EXPECT_EQ(cert13.certs[1].size(), 20U);
 
     // 1.2 bare list
     const auto len12 = tls_encode_certificate_12(certs, scratch);
     ASSERT_TRUE(len12.has_value());
     TlsCertificate12 cert12;
     ASSERT_TRUE(tls_decode_certificate_12(scratch.data() + 4, len12.value() - 4, cert12).has_value());
-    EXPECT_EQ(cert12.cert_count, 2u);
-    EXPECT_EQ(cert12.certs[1].size(), 20u);
+    EXPECT_EQ(cert12.cert_count, 2U);
+    EXPECT_EQ(cert12.certs[1].size(), 20U);
 
     // cap: kMaxEntries + 1 entries rejected
     const std::vector<std::span<const std::uint8_t>> many(TlsCertificate13::kMaxEntries + 1, der_a);
@@ -917,8 +919,8 @@ TEST(FlightEncode, CertificateVerifyAndFinishedRoundTrip) {
     ASSERT_TRUE(cv_len.has_value());
     TlsCertificateVerify cv;
     ASSERT_TRUE(tls_decode_certificate_verify(scratch.data() + 4, cv_len.value() - 4, cv).has_value());
-    EXPECT_EQ(cv.algorithm, 0x0804u);
-    EXPECT_EQ(cv.signature.size(), 3u);
+    EXPECT_EQ(cv.algorithm, 0x0804U);
+    EXPECT_EQ(cv.signature.size(), 3U);
     EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::CertificateVerify));
 
     const std::vector<std::uint8_t> verify_data(32, 0x99);
@@ -926,7 +928,7 @@ TEST(FlightEncode, CertificateVerifyAndFinishedRoundTrip) {
     ASSERT_TRUE(fin_len.has_value());
     TlsFinished fin;
     ASSERT_TRUE(tls_decode_finished(scratch.data() + 4, fin_len.value() - 4, fin).has_value());
-    EXPECT_EQ(fin.verify_data.size(), 32u);
+    EXPECT_EQ(fin.verify_data.size(), 32U);
     EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::Finished));
 
     EXPECT_FALSE(tls_encode_certificate_verify(0x0804, {}, scratch).has_value());
@@ -937,7 +939,7 @@ TEST(FlightEncode, GenericMessageAndEndOfEarlyData) {
     std::vector<std::uint8_t> scratch(8, 0);
     const auto len = tls_encode_handshake_message(TlsHandshakeType::EndOfEarlyData, {}, scratch);
     ASSERT_TRUE(len.has_value());
-    EXPECT_EQ(len.value(), 4u);
+    EXPECT_EQ(len.value(), 4U);
     EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::EndOfEarlyData));
     EXPECT_EQ(scratch[1], 0);
     EXPECT_EQ(scratch[2], 0);
@@ -948,7 +950,7 @@ TEST(FlightEncode, GenericMessageAndEndOfEarlyData) {
     EXPECT_FALSE(len2.has_value()); // scratch too small
     const auto len3 = tls_encode_handshake_message(TlsHandshakeType::ClientKeyExchange, body, scratch);
     ASSERT_TRUE(len3.has_value());
-    EXPECT_EQ(len3.value(), 6u);
+    EXPECT_EQ(len3.value(), 6U);
     EXPECT_EQ(scratch[4], 0xAA);
     EXPECT_EQ(scratch[5], 0xBB);
 }
@@ -965,7 +967,7 @@ TEST(FlightEncode, ClientKeyExchange12PointForms) {
     }
     const auto len = tls_encode_client_key_exchange(point, scratch);
     ASSERT_TRUE(len.has_value());
-    EXPECT_EQ(len.value(), 4u + 1u + 32u);
+    EXPECT_EQ(len.value(), 4U + 1U + 32U);
     EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::ClientKeyExchange));
     EXPECT_EQ(scratch[3], 33); // be24 body length
     EXPECT_EQ(scratch[4], 32); // u8 point length
@@ -975,14 +977,14 @@ TEST(FlightEncode, ClientKeyExchange12PointForms) {
     point.assign(65, 0xAB);
     const auto len65 = tls_encode_client_key_exchange(point, scratch);
     ASSERT_TRUE(len65.has_value());
-    EXPECT_EQ(len65.value(), 4u + 1u + 65u);
+    EXPECT_EQ(len65.value(), 4U + 1U + 65U);
     EXPECT_EQ(scratch[4], 65);
 
     // Contract violations: empty point, >255-byte point, tight scratch.
     EXPECT_FALSE(tls_encode_client_key_exchange({}, scratch).has_value());
     const std::vector<std::uint8_t> huge(256, 0x01);
     EXPECT_FALSE(tls_encode_client_key_exchange(huge, scratch).has_value());
-    EXPECT_FALSE(tls_encode_client_key_exchange(point, {scratch.data(), 4u + 1u + 65u - 1}).has_value());
+    EXPECT_FALSE(tls_encode_client_key_exchange(point, {scratch.data(), 4U + 1U + 65U - 1}).has_value());
 }
 
 // ---- 07 server flight encoders ----
@@ -1032,7 +1034,7 @@ TEST(ServerFlightEncode, ServerHello13RoundTrip) {
     ASSERT_TRUE(tls_decode_server_hello(scratch.data() + 4, len.value() - 4, sh).has_value());
     EXPECT_EQ(sh.legacy_version, 0x0303);
     EXPECT_EQ(0, std::memcmp(sh.random.data(), random.data(), 32));
-    ASSERT_EQ(sh.session_id.size(), 32u);
+    ASSERT_EQ(sh.session_id.size(), 32U);
     EXPECT_EQ(0, std::memcmp(sh.session_id.data(), session_id.data(), 32));
     EXPECT_EQ(sh.cipher_suite, 0x1301);
     EXPECT_EQ(sh.compression_method, 0);
@@ -1040,7 +1042,7 @@ TEST(ServerFlightEncode, ServerHello13RoundTrip) {
     EXPECT_EQ(sh.supported_version, 0x0304);
     EXPECT_TRUE(sh.has_key_share);
     EXPECT_EQ(sh.key_share_group, 0x001D);
-    ASSERT_EQ(sh.key_share.size(), 32u);
+    ASSERT_EQ(sh.key_share.size(), 32U);
     EXPECT_EQ(0, std::memcmp(sh.key_share.data(), share.data(), 32));
     EXPECT_TRUE(sh.has_selected_identity);
     EXPECT_EQ(sh.selected_identity, 0);
@@ -1105,7 +1107,7 @@ TEST(ServerFlightEncode, ServerHello12RoundTrip) {
     EXPECT_FALSE(sh.has_key_share);
     EXPECT_TRUE(sh.has_extended_master_secret);
     EXPECT_TRUE(sh.has_renegotiation_info);
-    ASSERT_EQ(sh.renegotiation_info.size(), 1u); // empty renegotiated_connection
+    ASSERT_EQ(sh.renegotiation_info.size(), 1U); // empty renegotiated_connection
     EXPECT_EQ(sh.renegotiation_info[0], 0);
     EXPECT_TRUE(sh.has_alpn);
     EXPECT_EQ(sh.alpn, "h2");
@@ -1164,7 +1166,7 @@ TEST(ServerFlightEncode, EncryptedExtensionsRoundTrip) {
     EXPECT_TRUE(ee.has_early_data);
     // server_name ack: an EMPTY extension (RFC 8446 §4.2.1 — no ServerNameList;
     // BoringSSL rejects any payload), before alpn and early_data.
-    ASSERT_GE(ee.extensions_block.size(), 4u);
+    ASSERT_GE(ee.extensions_block.size(), 4U);
     EXPECT_EQ(ee.extensions_block[0], 0x00); // type low byte (0)
     EXPECT_EQ(ee.extensions_block[1], 0x00);
     EXPECT_EQ(ee.extensions_block[2], 0x00); // payload length 0
@@ -1183,7 +1185,7 @@ TEST(ServerFlightEncode, EncryptedExtensionsRoundTrip) {
     // Empty EE is valid: u16 zero extension block only.
     const auto bare = tls_encode_encrypted_extensions(TlsEncryptedExtensionsInput{}, scratch);
     ASSERT_TRUE(bare.has_value());
-    EXPECT_EQ(bare.value(), 4u + 2u);
+    EXPECT_EQ(bare.value(), 4U + 2U);
 }
 
 TEST(ServerFlightEncode, CertificateRequestRoundTrip) {
@@ -1198,7 +1200,7 @@ TEST(ServerFlightEncode, CertificateRequestRoundTrip) {
     ASSERT_TRUE(tls_decode_certificate_request_13(scratch.data() + 4, len13.value() - 4, req13).has_value());
     EXPECT_TRUE(req13.certificate_request_context.empty());
     EXPECT_TRUE(req13.has_signature_algorithms);
-    ASSERT_EQ(req13.signature_algorithms.size(), 6u);
+    ASSERT_EQ(req13.signature_algorithms.size(), 6U);
     EXPECT_EQ(req13.signature_algorithms[0], 0x04);
     EXPECT_EQ(req13.signature_algorithms[1], 0x03);
     EXPECT_EQ(extension_order(req13.extensions_block), (std::vector<std::uint16_t>{13}));
@@ -1208,14 +1210,14 @@ TEST(ServerFlightEncode, CertificateRequestRoundTrip) {
     ASSERT_TRUE(len12.has_value());
     TlsCertificateRequest12 req12{};
     ASSERT_TRUE(tls_decode_certificate_request_12(scratch.data() + 4, len12.value() - 4, req12).has_value());
-    ASSERT_EQ(req12.certificate_types.size(), 2u);
+    ASSERT_EQ(req12.certificate_types.size(), 2U);
     EXPECT_EQ(req12.certificate_types[0], 1);
     EXPECT_EQ(req12.certificate_types[1], 64);
     EXPECT_TRUE(req12.has_signature_algorithms);
-    ASSERT_EQ(req12.signature_algorithms.size(), 6u);
+    ASSERT_EQ(req12.signature_algorithms.size(), 6U);
     EXPECT_TRUE(req12.certificate_authorities.empty());
     // The trailing empty vector is present on the wire: u16 0 length.
-    EXPECT_EQ(len12.value(), 4u + 1u + 2u + 2u + 6u + 2u);
+    EXPECT_EQ(len12.value(), 4U + 1U + 2U + 2U + 6U + 2U);
 
     // Contract violations.
     EXPECT_FALSE(tls_encode_certificate_request_13({}, scratch).has_value());
@@ -1290,14 +1292,14 @@ TEST(ServerFlightEncode, NewSessionTicket13) {
     put_u16(expected, 4);
     put_u32(expected, 14336);
 
-    ASSERT_EQ(len.value(), 4u + expected.size());
+    ASSERT_EQ(len.value(), 4U + expected.size());
     EXPECT_EQ(0, std::memcmp(scratch.data() + 4, expected.data(), expected.size()));
 
     // max_early_data == 0 => empty extension block, no early_data entry.
     in.max_early_data = 0;
     const auto len2 = tls_encode_new_session_ticket_13(in, scratch);
     ASSERT_TRUE(len2.has_value());
-    ASSERT_GE(len2.value(), 4u + 13u);
+    ASSERT_GE(len2.value(), 4U + 13U);
     const std::size_t body2 = len2.value() - 4;
     EXPECT_EQ(scratch[4 + body2 - 1], 0); // ext block len low byte 0
     EXPECT_EQ(scratch[4 + body2 - 2], 0);
@@ -1318,7 +1320,7 @@ TEST(ServerFlightEncode, NewSessionTicket12) {
     put_u32(expected, 86400);
     put_u16(expected, static_cast<std::uint16_t>(ticket.size()));
     expected.insert(expected.end(), ticket.begin(), ticket.end());
-    ASSERT_EQ(len.value(), 4u + expected.size());
+    ASSERT_EQ(len.value(), 4U + expected.size());
     EXPECT_EQ(0, std::memcmp(scratch.data() + 4, expected.data(), expected.size()));
 
     EXPECT_FALSE(tls_encode_new_session_ticket_12(100, {}, scratch).has_value());
@@ -1358,15 +1360,15 @@ TEST(PskWalk, IdentityAndBinderAtIndex) {
     TlsPskIdentityView view{};
     const auto first = tls_psk_identity_at(identities, 0, view);
     ASSERT_TRUE(first.has_value());
-    ASSERT_EQ(view.identity.size(), 1u);
+    ASSERT_EQ(view.identity.size(), 1U);
     EXPECT_EQ(view.identity[0], 0xA1);
-    EXPECT_EQ(view.obfuscated_ticket_age, 100u);
+    EXPECT_EQ(view.obfuscated_ticket_age, 100U);
 
     const auto second = tls_psk_identity_at(identities, 1, view);
     ASSERT_TRUE(second.has_value());
-    ASSERT_EQ(view.identity.size(), 2u);
+    ASSERT_EQ(view.identity.size(), 2U);
     EXPECT_EQ(view.identity[0], 0xB1);
-    EXPECT_EQ(view.obfuscated_ticket_age, 0xFFFFFFF0u);
+    EXPECT_EQ(view.obfuscated_ticket_age, 0xFFFFFFF0U);
 
     const auto third = tls_psk_identity_at(identities, 2, view);
     ASSERT_TRUE(third.has_value());
@@ -1387,13 +1389,13 @@ TEST(PskWalk, IdentityAndBinderAtIndex) {
     const auto b0 = tls_psk_binder_at(binders, 0, binder);
     ASSERT_TRUE(b0.has_value());
     ASSERT_TRUE(b0.value());
-    ASSERT_EQ(binder.size(), 32u);
+    ASSERT_EQ(binder.size(), 32U);
     EXPECT_EQ(binder[0], 0x11);
 
     const auto b1 = tls_psk_binder_at(binders, 1, binder);
     ASSERT_TRUE(b1.has_value());
     ASSERT_TRUE(b1.value());
-    ASSERT_EQ(binder.size(), 48u);
+    ASSERT_EQ(binder.size(), 48U);
     EXPECT_EQ(binder[0], 0x22);
 
     const auto b2 = tls_psk_binder_at(binders, 2, binder);

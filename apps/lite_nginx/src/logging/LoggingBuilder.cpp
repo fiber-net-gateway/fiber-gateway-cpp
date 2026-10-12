@@ -93,7 +93,7 @@ std::expected<fiber::log::LogConfig, runtime::RuntimeError> LoggingBuilder::buil
 
     fiber::log::LogConfigBuilder builder;
     std::unordered_map<std::string, fiber::log::AppenderId> appenders;
-    appenders.reserve(config.logging.appenders.size() * 2 + 1);
+    appenders.reserve((config.logging.appenders.size() * 2) + 1);
 
     for (const auto &appender: config.logging.appenders) {
         fiber::log::LogConfigResult<fiber::log::AppenderId> added = std::unexpected(fiber::log::LogConfigError{});

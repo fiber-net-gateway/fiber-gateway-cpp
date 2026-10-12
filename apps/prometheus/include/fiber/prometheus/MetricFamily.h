@@ -16,8 +16,8 @@ enum class GaugeReduction : std::uint8_t { Sum, Min, Max };
 enum class HistogramUnit : std::uint8_t { Raw, Nanoseconds, Microseconds, Milliseconds, Seconds };
 
 struct RegistryOptions {
-    std::size_t max_help_bytes = 64 * 1024;
-    std::size_t max_label_value_bytes = 4 * 1024;
+    std::size_t max_help_bytes = std::size_t{64} * 1024;
+    std::size_t max_label_value_bytes = std::size_t{4} * 1024;
 };
 
 class FamilyId {

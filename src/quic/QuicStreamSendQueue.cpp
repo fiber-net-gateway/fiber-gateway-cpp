@@ -69,6 +69,9 @@ common::IoResult<std::size_t> QuicStreamSendQueue::try_append(const mem::IoBuf &
             slice.same_storage(tail_->buf) && tail_->buf.try_merge_adjacent(std::move(slice))) {
             pool_->release(extent);
         } else {
+            // try_merge_adjacent consumes its rvalue only on success; on the
+            // false path here slice is intact for the extent to take.
+            // NOLINTNEXTLINE(bugprone-use-after-move)
             extent->buf = std::move(slice);
             extent->next = nullptr;
             if (tail_ != nullptr) {
@@ -226,7 +229,9 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
     }
 
     bool use_len = false;
-    std::size_t actual_data = data_len;
+    // Total under the if/else-if chain below: every path either assigns
+    // actual_data or returns, so no initializer is needed.
+    std::size_t actual_data;
 
     if (base_hdr < capacity) {
         const std::size_t remaining = capacity - base_hdr;

@@ -48,7 +48,10 @@ public:
 
         FinalAwaiter final_suspend() noexcept { return {}; }
 
-        void return_value(const AbiResult &result) noexcept {
+        void return_value(const AbiResult &result) const noexcept {
+            // completion_ is value-initialized via NSDMI; the analyzer mis-
+            // models coroutine-frame promise construction.
+            // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.Branch)
             if (completion_.complete) {
                 completion_.complete(completion_.ctx, result);
             }

@@ -32,7 +32,7 @@ public:
 
     fiber::async::Task<
             std::expected<std::shared_ptr<const fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>>
-    get(std::string, std::string) noexcept override {
+    get(std::string /*service_name*/, std::string /*group*/) noexcept override {
         co_return std::unexpected(fiber::nacos::NamingServiceError{
                 .code = fiber::nacos::NamingServiceErrorCode::Server,
                 .message = "not implemented by fake naming service",
@@ -57,7 +57,8 @@ public:
     }
 
     std::expected<fiber::nacos::InstanceRegistration, fiber::nacos::NamingServiceError>
-    registry(std::string_view, std::string_view, fiber::nacos::Instance) override {
+    registry(std::string_view /*service_name*/, std::string_view /*group*/,
+             fiber::nacos::Instance /*instance*/) override {
         return std::unexpected(fiber::nacos::NamingServiceError{
                 .code = fiber::nacos::NamingServiceErrorCode::Server,
                 .message = "not implemented by fake naming service",
@@ -182,18 +183,19 @@ struct FakeState {
 struct FakeStateOps {
     using State = FakeState;
 
-    void on_init(const fiber::nacos::ServiceKeyView &, State &state) noexcept {
+    void on_init(const fiber::nacos::ServiceKeyView & /*unused*/, State &state) const noexcept {
         ++counters->creates;
         state.counters = counters;
     }
 
-    void on_update(const fiber::nacos::ServiceKeyView &, State &state,
-                   const std::shared_ptr<const fiber::nacos::ServiceInfo> &snapshot) noexcept {
+    void on_update(const fiber::nacos::ServiceKeyView & /*unused*/, State &state,
+                   const std::shared_ptr<const fiber::nacos::ServiceInfo> &snapshot) const noexcept {
         ++counters->updates;
         state.last_ref_time = snapshot->last_ref_time;
     }
 
-    void on_retire(const fiber::nacos::ServiceKeyView &, State &, fiber::nacos::ServiceRetireReason reason) noexcept {
+    void on_retire(const fiber::nacos::ServiceKeyView & /*unused*/, State & /*unused*/,
+                   fiber::nacos::ServiceRetireReason reason) const noexcept {
         ++counters->retires;
         counters->last_retire_reason = reason;
     }

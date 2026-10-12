@@ -12,8 +12,8 @@
 
 namespace fiber::http {
 
-inline constexpr std::size_t kDefaultBodyPipeBufferSize = 64 * 1024;
-inline constexpr std::size_t kDefaultBodyPipeLowWater = 48 * 1024;
+inline constexpr std::size_t kDefaultBodyPipeBufferSize = static_cast<const std::size_t>(64 * 1024);
+inline constexpr std::size_t kDefaultBodyPipeLowWater = static_cast<const std::size_t>(48 * 1024);
 inline constexpr std::size_t kUnbufferedBodyPipeLowWater = 0;
 
 struct HttpBodyPipeOptions {

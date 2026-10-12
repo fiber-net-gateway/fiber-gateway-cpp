@@ -97,6 +97,7 @@ TEST(CatMessageIdTest, GeneratesUniqueIdsAcrossConcurrentCallers) {
     std::mutex mutex;
     std::unordered_set<std::string> ids;
     std::vector<std::thread> callers;
+    callers.reserve(4);
     for (std::size_t caller = 0; caller < 4; ++caller) {
         callers.emplace_back([&] {
             for (std::size_t index = 0; index < 500; ++index) {

@@ -88,7 +88,7 @@ void Http3ServerConnection::on_quic_state_change(void *owner, quic::QuicConnecti
         self.cancel_idle_timer();
     }
 }
-void Http3ServerConnection::on_quic_capacity_change(void *owner, quic::QuicConnection &) noexcept {
+void Http3ServerConnection::on_quic_capacity_change(void *owner, quic::QuicConnection & /*unused*/) noexcept {
     static_cast<Http3ServerConnection *>(owner)->local_stream_gate_.on_capacity_change();
 }
 void Http3ServerConnection::start() noexcept {

@@ -37,7 +37,7 @@ public:
     [[nodiscard]] static ServerHttp3Request *from_stream(quic::QuicStream &stream) noexcept;
     [[nodiscard]] static const ServerHttp3Request *from_stream(const quic::QuicStream &stream) noexcept;
 
-    ~ServerHttp3Request();
+    ~ServerHttp3Request() override;
 
     [[nodiscard]] quic::QuicStream &stream() noexcept { return stream_; }
     [[nodiscard]] const quic::QuicStream &stream() const noexcept { return stream_; }

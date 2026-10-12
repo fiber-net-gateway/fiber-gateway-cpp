@@ -47,7 +47,7 @@ public:
     explicit ThreadGroup(std::size_t size);
     ~ThreadGroup();
 
-    void start(RunFn fn);
+    void start(const RunFn &fn);
     void request_stop();
     void join();
     [[nodiscard]] bool started() const noexcept { return started_.load(std::memory_order_acquire); }

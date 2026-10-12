@@ -53,7 +53,7 @@ template<typename T, typename ValueEncoder>
         if (result != EncodeResult::OK) {
             return result;
         }
-        result = std::forward<ValueEncoder>(value_encoder)(entry.value);
+        result = value_encoder(entry.value); // called per iteration; invoke as an lvalue instead of forwarding
         if (result != EncodeResult::OK) {
             return result;
         }

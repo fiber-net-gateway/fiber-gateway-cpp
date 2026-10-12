@@ -28,7 +28,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -75,7 +75,7 @@ TEST(UrlFuncsTest, EncodeComponentEncodesNonAsciiAsUppercaseHex) {
 }
 
 TEST(UrlFuncsTest, EncodeComponentNonStringThrows) {
-    expect_script_string("try { URL.encodeComponent(123); return \"no\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_script_string(R"(try { URL.encodeComponent(123); return "no"; } catch (e) { return "caught"; })", "caught");
 }
 
 // ---- URL.decodeComponent ----
@@ -89,11 +89,10 @@ TEST(UrlFuncsTest, DecodeComponentRoundTrip) {
 }
 
 TEST(UrlFuncsTest, DecodeComponentMalformedEscapeThrows) {
-    expect_script_string("try { URL.decodeComponent('%zz'); return \"no\"; } catch (e) { return \"caught\"; }",
+    expect_script_string(R"(try { URL.decodeComponent('%zz'); return "no"; } catch (e) { return "caught"; })",
                          "caught");
-    expect_script_string("try { URL.decodeComponent('%1'); return \"no\"; } catch (e) { return \"caught\"; }",
-                         "caught");
-    expect_script_string("try { URL.decodeComponent('%'); return \"no\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_script_string(R"(try { URL.decodeComponent('%1'); return "no"; } catch (e) { return "caught"; })", "caught");
+    expect_script_string(R"(try { URL.decodeComponent('%'); return "no"; } catch (e) { return "caught"; })", "caught");
 }
 
 // ---- URL.parseQuery ----
@@ -127,7 +126,7 @@ TEST(UrlFuncsTest, ParseQueryDecodesKeysAndValues) {
 }
 
 TEST(UrlFuncsTest, ParseQueryMalformedEscapeThrows) {
-    expect_script_string("try { URL.parseQuery('%zz=1'); return \"no\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_script_string(R"(try { URL.parseQuery('%zz=1'); return "no"; } catch (e) { return "caught"; })", "caught");
 }
 
 // ---- URL.buildQuery ----
@@ -159,6 +158,6 @@ TEST(UrlFuncsTest, BuildQueryNullValueRendersAsNull) {
 }
 
 TEST(UrlFuncsTest, BuildQueryNonObjectThrows) {
-    expect_script_string("try { URL.buildQuery(123); return \"no\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_script_string("try { URL.buildQuery('x'); return \"no\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_script_string(R"(try { URL.buildQuery(123); return "no"; } catch (e) { return "caught"; })", "caught");
+    expect_script_string(R"(try { URL.buildQuery('x'); return "no"; } catch (e) { return "caught"; })", "caught");
 }

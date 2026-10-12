@@ -44,12 +44,12 @@ fiber::common::IoErr TcpConnectTraits::connect_once(int fd, const SocketAddress 
 TcpStream::TcpStream(fiber::event::EventLoop &loop, int fd) : stream_(loop, fd) {}
 
 TcpStream::TcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress peer) :
-    stream_(loop, fd), remote_addr_(std::move(peer)) {}
+    stream_(loop, fd), remote_addr_(peer) {}
 
 TcpStream::TcpStream(ConnectInfant &&infant) :
     stream_(infant.loop(), infant.release_fd()), remote_addr_(infant.take_peer()) {}
 
-TcpStream::~TcpStream() {}
+TcpStream::~TcpStream() = default;
 
 bool TcpStream::valid() const noexcept { return stream_.valid(); }
 
@@ -64,7 +64,7 @@ bool TcpStream::peer_closed() const noexcept { return stream_.peer_closed(); }
 bool TcpStream::read_ready() const noexcept { return stream_.read_ready(); }
 bool TcpStream::write_ready() const noexcept { return stream_.write_ready(); }
 
-fiber::common::IoErr TcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
+fiber::common::IoErr TcpStream::apply_socket_options(const TcpSocketOptions &options) const noexcept {
     return detail::apply_tcp_socket_options(fd(), options);
 }
 

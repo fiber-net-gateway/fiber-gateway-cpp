@@ -12,7 +12,7 @@
 namespace {
 
 std::size_t hash_stream_id(std::uint32_t stream_id) {
-    std::uint32_t value = stream_id * 2654435761u;
+    std::uint32_t value = stream_id * 2654435761U;
     value ^= value >> 16;
     return value;
 }
@@ -48,7 +48,7 @@ fiber::http::Http2Stream::Lease make_stream(std::uint32_t stream_id) {
 TEST(Http2StreamTableTest, AllocatesBucketsLazilyOnFirstInsert) {
     fiber::http::Http2StreamTable table;
 
-    EXPECT_EQ(table.bucket_count(), 0u);
+    EXPECT_EQ(table.bucket_count(), 0U);
     EXPECT_TRUE(table.empty());
     EXPECT_EQ(table.find(1), nullptr);
     EXPECT_FALSE(table.erase(1));
@@ -57,7 +57,7 @@ TEST(Http2StreamTableTest, AllocatesBucketsLazilyOnFirstInsert) {
     ASSERT_TRUE(stream1);
     ASSERT_TRUE(table.insert(std::move(stream1)));
     EXPECT_EQ(table.bucket_count(), fiber::http::Http2StreamTable::kInitialBucketCount);
-    EXPECT_EQ(table.size(), 1u);
+    EXPECT_EQ(table.size(), 1U);
 }
 
 TEST(Http2StreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
@@ -75,7 +75,7 @@ TEST(Http2StreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
     EXPECT_TRUE(table.insert(std::move(stream1)));
     EXPECT_TRUE(table.insert(std::move(stream3)));
     EXPECT_FALSE(table.insert(std::move(duplicate1)));
-    EXPECT_EQ(table.size(), 2u);
+    EXPECT_EQ(table.size(), 2U);
     EXPECT_EQ(table.find(1), stream1_ptr);
     EXPECT_EQ(table.find(3), stream3_ptr);
     EXPECT_EQ(table.find(5), nullptr);
@@ -86,7 +86,7 @@ TEST(Http2StreamTableTest, GrowsBeyondInitialBucketCountAndKeepsEveryStreamReach
     constexpr std::uint32_t kStreamCount = 64;
 
     for (std::uint32_t i = 0; i < kStreamCount; ++i) {
-        fiber::http::Http2Stream::Lease stream = make_stream(i * 2 + 1);
+        fiber::http::Http2Stream::Lease stream = make_stream((i * 2) + 1);
         ASSERT_TRUE(stream);
         ASSERT_TRUE(table.insert(std::move(stream)));
     }
@@ -94,9 +94,9 @@ TEST(Http2StreamTableTest, GrowsBeyondInitialBucketCountAndKeepsEveryStreamReach
     EXPECT_EQ(table.size(), kStreamCount);
     EXPECT_GE(table.bucket_count(), kStreamCount * 2);
     for (std::uint32_t i = 0; i < kStreamCount; ++i) {
-        EXPECT_NE(table.find(i * 2 + 1), nullptr);
+        EXPECT_NE(table.find((i * 2) + 1), nullptr);
     }
-    EXPECT_EQ(table.find(kStreamCount * 2 + 1), nullptr);
+    EXPECT_EQ(table.find((kStreamCount * 2) + 1), nullptr);
 }
 
 TEST(Http2StreamTableTest, ReleasesGrownBucketsOnceDrainedButKeepsInitialOnes) {
@@ -104,17 +104,17 @@ TEST(Http2StreamTableTest, ReleasesGrownBucketsOnceDrainedButKeepsInitialOnes) {
     constexpr std::uint32_t kStreamCount = 64;
 
     for (std::uint32_t i = 0; i < kStreamCount; ++i) {
-        fiber::http::Http2Stream::Lease stream = make_stream(i * 2 + 1);
+        fiber::http::Http2Stream::Lease stream = make_stream((i * 2) + 1);
         ASSERT_TRUE(stream);
         ASSERT_TRUE(table.insert(std::move(stream)));
     }
     ASSERT_GT(table.bucket_count(), fiber::http::Http2StreamTable::kInitialBucketCount);
 
     for (std::uint32_t i = 0; i < kStreamCount; ++i) {
-        EXPECT_TRUE(table.erase(i * 2 + 1));
+        EXPECT_TRUE(table.erase((i * 2) + 1));
     }
     EXPECT_TRUE(table.empty());
-    EXPECT_EQ(table.bucket_count(), 0u);
+    EXPECT_EQ(table.bucket_count(), 0U);
 
     // A table that never grew past the initial allocation keeps its buckets, so
     // a client running one request at a time does not reallocate per stream.
@@ -154,5 +154,5 @@ TEST(Http2StreamTableTest, EraseKeepsLaterCollisionsReachable) {
     fiber::http::Http2Stream::Lease erased_b = table.erase(stream_b_ptr->stream_id());
     EXPECT_EQ(erased_b.get(), stream_b_ptr);
     EXPECT_EQ(table.find(stream_c_ptr->stream_id()), stream_c_ptr);
-    EXPECT_EQ(table.size(), 1u);
+    EXPECT_EQ(table.size(), 1U);
 }

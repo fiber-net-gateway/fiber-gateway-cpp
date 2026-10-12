@@ -72,7 +72,7 @@ public:
 private:
     union Storage {
         template<typename Factory>
-        explicit Storage(WhenAnyFromFactories, Factory &factory) : awaiter(std::invoke(factory)) {}
+        explicit Storage(WhenAnyFromFactories /*unused*/, Factory &factory) : awaiter(std::invoke(factory)) {}
 
         ~Storage() noexcept {}
 
@@ -125,10 +125,10 @@ private:
 
 public:
     template<std::size_t Index>
-    explicit WhenAnyResult(std::in_place_index_t<Index>) : value_(std::in_place_index<Index>) {}
+    explicit WhenAnyResult(std::in_place_index_t<Index> /*unused*/) : value_(std::in_place_index<Index>) {}
 
     template<std::size_t Index, typename U>
-    explicit WhenAnyResult(std::in_place_index_t<Index>, U &&value) :
+    explicit WhenAnyResult(std::in_place_index_t<Index> /*unused*/, U &&value) :
         value_(std::in_place_index<Index>, std::forward<U>(value)) {}
 
     [[nodiscard]] std::size_t index() const noexcept { return value_.index(); }

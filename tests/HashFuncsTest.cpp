@@ -34,7 +34,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -79,7 +79,7 @@ std::string call_hash_binary(const char *name, const std::uint8_t *bytes, std::s
         return {};
     }
     Library::HostCallFrame frame(heap, JsValue::make_undefined(), nullptr);
-    Library::Arguments args{ConstValueHandle(args_storage), 1};
+    Library::Arguments args{.args = ConstValueHandle(args_storage), .argc = 1};
     AbiResult result = match.callable->function(match.callable->userdata, frame, args);
     EXPECT_TRUE(result.is_success()) << "hash did not succeed";
     if (!result.is_success()) {
@@ -168,9 +168,9 @@ TEST(HashFuncsTest, Sha256BinaryBranch) {
 // ---- unsupported input types raise catchable TypeError ----
 
 TEST(HashFuncsTest, UnsupportedTypesRaiseTypeError) {
-    expect_caught("try { hash.md5(123); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_caught("try { hash.md5(null); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_caught("try { hash.md5([]); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_caught("try { hash.sha1(true); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_caught("try { hash.sha256({}); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_caught(R"(try { hash.md5(123); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_caught(R"(try { hash.md5(null); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_caught(R"(try { hash.md5([]); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_caught(R"(try { hash.sha1(true); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_caught(R"(try { hash.sha256({}); return "no-throw"; } catch (e) { return "caught"; })", "caught");
 }

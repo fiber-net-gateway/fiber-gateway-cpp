@@ -14,8 +14,8 @@ TEST(Wtf8Test, RoundTripsEverySingleUtf16Unit) {
         const char16_t input = static_cast<char16_t>(value);
         Wtf8MeasureResult measure;
         ASSERT_TRUE(fiber::script::gc_detail::wtf8_measure_utf16(&input, 1, measure));
-        ASSERT_GE(measure.byte_len, 1u);
-        ASSERT_LE(measure.byte_len, 3u);
+        ASSERT_GE(measure.byte_len, 1U);
+        ASSERT_LE(measure.byte_len, 3U);
 
         char encoded[3] = {};
         ASSERT_TRUE(fiber::script::gc_detail::wtf8_write_utf16(&input, 1, encoded, measure.byte_len));
@@ -36,7 +36,7 @@ TEST(Wtf8Test, SurrogatePairUsesCanonicalFourByteUtf8) {
     const char16_t input[] = {static_cast<char16_t>(0xD83D), static_cast<char16_t>(0xDE00)};
     Wtf8MeasureResult measure;
     ASSERT_TRUE(fiber::script::gc_detail::wtf8_measure_utf16(input, 2, measure));
-    EXPECT_EQ(measure.byte_len, 4u);
+    EXPECT_EQ(measure.byte_len, 4U);
     EXPECT_TRUE(measure.well_formed);
 
     char encoded[4] = {};

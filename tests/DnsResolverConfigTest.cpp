@@ -23,12 +23,12 @@ options timeout:7 attempts:4 rotate
 
     auto parsed = fiber::dns::parse_resolver_config(text);
     ASSERT_TRUE(parsed.has_value());
-    ASSERT_EQ(parsed->nameservers.size(), 2u);
+    ASSERT_EQ(parsed->nameservers.size(), 2U);
     EXPECT_EQ(parsed->nameservers[0].ip().to_string(), "192.0.2.1");
-    EXPECT_EQ(parsed->nameservers[0].port(), 53u);
+    EXPECT_EQ(parsed->nameservers[0].port(), 53U);
     EXPECT_EQ(parsed->nameservers[1].ip().to_string(), "2001:db8::53");
     EXPECT_EQ(parsed->timeout, std::chrono::seconds(7));
-    EXPECT_EQ(parsed->attempts, 4u);
+    EXPECT_EQ(parsed->attempts, 4U);
     EXPECT_TRUE(parsed->rotate);
     EXPECT_EQ(parsed->unsupported, ResolverUnsupportedFeature::None);
 }
@@ -45,15 +45,15 @@ lookup file bind
 
     auto parsed = fiber::dns::parse_resolver_config(text);
     ASSERT_TRUE(parsed.has_value());
-    ASSERT_EQ(parsed->search.size(), 1u);
+    ASSERT_EQ(parsed->search.size(), 1U);
     EXPECT_EQ(parsed->search[0], "final.example");
-    EXPECT_EQ(parsed->ndots, 5u);
+    EXPECT_EQ(parsed->ndots, 5U);
     EXPECT_TRUE(fiber::dns::has_unsupported_feature(parsed->unsupported, ResolverUnsupportedFeature::Search));
     EXPECT_TRUE(fiber::dns::has_unsupported_feature(parsed->unsupported, ResolverUnsupportedFeature::Ndots));
     EXPECT_TRUE(fiber::dns::has_unsupported_feature(parsed->unsupported, ResolverUnsupportedFeature::SortList));
     EXPECT_TRUE(fiber::dns::has_unsupported_feature(parsed->unsupported, ResolverUnsupportedFeature::Option));
     EXPECT_TRUE(fiber::dns::has_unsupported_feature(parsed->unsupported, ResolverUnsupportedFeature::Directive));
-    EXPECT_EQ(parsed->first_unsupported_line, 2u);
+    EXPECT_EQ(parsed->first_unsupported_line, 2U);
 }
 
 TEST(DnsResolverConfigTest, EnforcesNameserverAndOptionBounds) {
@@ -65,7 +65,7 @@ nameserver 192.0.2.4
 )");
     ASSERT_FALSE(too_many.has_value());
     EXPECT_EQ(too_many.error().code, ResolverConfigErrorCode::TooManyNameservers);
-    EXPECT_EQ(too_many.error().line, 5u);
+    EXPECT_EQ(too_many.error().line, 5U);
 
     auto invalid_option = fiber::dns::parse_resolver_config("nameserver 127.0.0.1\noptions attempts:6\n");
     ASSERT_FALSE(invalid_option.has_value());

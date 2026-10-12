@@ -11,7 +11,7 @@ namespace {
 
 fiber::nacos::NacosClientConfigParams valid_params() {
     fiber::nacos::NacosClientConfigParams params;
-    params.server_hosts.push_back("127.0.0.1");
+    params.server_hosts.emplace_back("127.0.0.1");
     params.username = "user";
     params.password = "password";
     return params;
@@ -24,7 +24,7 @@ TEST(NacosClientConfigTest, AppliesDefaultsAndOwnsValues) {
 
     auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->server_hosts().size(), 1u);
+    EXPECT_EQ(result->server_hosts().size(), 1U);
     EXPECT_EQ(result->server_hosts()[0].value(), "127.0.0.1");
     EXPECT_TRUE(result->server_hosts()[0].is_ip_literal());
     EXPECT_FALSE(result->has_hostname_server());
@@ -67,7 +67,7 @@ TEST(NacosClientConfigTest, RejectsInvalidRequiredFields) {
         auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, fiber::nacos::NacosConfigErrorCode::InvalidServerHost);
-        EXPECT_EQ(result.error().server_index, 0u);
+        EXPECT_EQ(result.error().server_index, 0U);
     }
     {
         auto params = valid_params();
@@ -101,14 +101,14 @@ TEST(NacosClientConfigTest, RejectsInvalidRequiredFields) {
 
 TEST(NacosClientConfigTest, DeduplicatesServers) {
     auto params = valid_params();
-    params.server_hosts.push_back("127.0.0.1");
-    params.server_hosts.push_back("NACOS.Internal.");
-    params.server_hosts.push_back("nacos.internal");
-    params.server_hosts.push_back("127.0.0.2");
+    params.server_hosts.emplace_back("127.0.0.1");
+    params.server_hosts.emplace_back("NACOS.Internal.");
+    params.server_hosts.emplace_back("nacos.internal");
+    params.server_hosts.emplace_back("127.0.0.2");
 
     auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(result.has_value());
-    ASSERT_EQ(result->server_hosts().size(), 3u);
+    ASSERT_EQ(result->server_hosts().size(), 3U);
     EXPECT_EQ(result->server_hosts()[0].value(), "127.0.0.1");
     EXPECT_EQ(result->server_hosts()[1].value(), "nacos.internal");
     EXPECT_EQ(result->server_hosts()[2].value(), "127.0.0.2");
@@ -136,7 +136,7 @@ TEST(NacosClientConfigTest, RejectsInvalidServerHosts) {
         auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, fiber::nacos::NacosConfigErrorCode::InvalidServerHost);
-        EXPECT_EQ(result.error().server_index, 0u);
+        EXPECT_EQ(result.error().server_index, 0U);
     }
 }
 
@@ -146,7 +146,7 @@ TEST(NacosClientConfigTest, AcceptsIpv6AndInternalHostnameForms) {
 
     auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(result.has_value());
-    ASSERT_EQ(result->server_hosts().size(), 2u);
+    ASSERT_EQ(result->server_hosts().size(), 2U);
     EXPECT_EQ(result->server_hosts()[0].value(), "2001:db8::1");
     EXPECT_TRUE(result->server_hosts()[0].is_ip_literal());
     EXPECT_EQ(result->server_hosts()[1].value(), "_nacos._tcp.internal");

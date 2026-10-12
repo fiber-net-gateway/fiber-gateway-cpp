@@ -183,6 +183,8 @@ void Http2CloseGate::dispatch() noexcept {
         ObserverCallback callback = hook->callback;
         void *observer_ctx = hook->ctx;
         remove_observer(*hook);
+        // Non-null is a registration invariant (add_observer asserts it).
+        // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
         callback(observer_ctx, *connection_, terminal_error_);
     }
     phase_ = Phase::Complete;

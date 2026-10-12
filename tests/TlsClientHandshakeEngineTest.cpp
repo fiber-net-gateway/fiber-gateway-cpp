@@ -24,6 +24,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "TlsCertFixtures.h"
@@ -77,7 +78,7 @@ EVP_PKEY *load_key(const char *pem) {
 }
 
 // TLS_KEYLOG=<path> enables NSS-format secret dumping for debugging.
-void keylog_line(const SSL *, const char *line) {
+void keylog_line(const SSL * /*unused*/, const char *line) {
     if (const char *path = ::getenv("TLS_KEYLOG"); path != nullptr && path[0] != '\0') {
         if (FILE *f = std::fopen(path, "a"); f != nullptr) {
             std::fprintf(f, "%s\n", line);
@@ -88,9 +89,9 @@ void keylog_line(const SSL *, const char *line) {
 
 // ALPN selection: the FIRST protocol the client offered (order = preference,
 // so the client can assert its own preference was picked).
-int select_first_alpn(SSL *, const unsigned char **out, unsigned char *out_len, const unsigned char *in,
-                      unsigned int in_len, void *) {
-    if (in_len == 0 || in_len > 255 || 1 + in[0] > in_len) {
+int select_first_alpn(SSL * /*unused*/, const unsigned char **out, unsigned char *out_len, const unsigned char *in,
+                      unsigned int in_len, void * /*unused*/) {
+    if (in_len == 0 || in_len > 255 || std::cmp_greater(1 + in[0], in_len)) {
         return SSL_TLSEXT_ERR_NOACK;
     }
     *out = in + 1;
@@ -166,9 +167,8 @@ public:
                 return nullptr;
             }
             SSL_CTX_set_verify(ctx,
-                               opt.require_client_cert
-                                       ? static_cast<int>(SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
-                                       : static_cast<int>(SSL_VERIFY_PEER),
+                               opt.require_client_cert ? (SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
+                                                       : SSL_VERIFY_PEER,
                                nullptr);
         }
         SSL_CTX_set_alpn_select_cb(ctx, select_first_alpn, nullptr);
@@ -502,7 +502,7 @@ TEST(TlsClientHandshake13Full, HandshakeAndAppRoundTrip) {
         EXPECT_EQ(0, std::memcmp("h2", state.alpn.data(), 2));
         EXPECT_FALSE(state.session_resumed);
         EXPECT_FALSE(state.early_data_accepted);
-        EXPECT_GE(state.peer_chain.size(), 2u); // leaf + intermediate
+        EXPECT_GE(state.peer_chain.size(), 2U); // leaf + intermediate
 
         // ---- post-handshake app data in both directions over the live session ----
         EXPECT_EQ(1, server->handshake_step());
@@ -527,7 +527,7 @@ TEST(TlsClientHandshake13Full, HandshakeAndAppRoundTrip) {
                 {sealed_in.data() + fiber::tls::kTlsRecordHeaderSize, rec_len}, open_dst);
         ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
         EXPECT_EQ(fiber::tls::TlsContentType::ApplicationData, opened.inner_type);
-        ASSERT_EQ(4u, opened.plain_len);
+        ASSERT_EQ(4U, opened.plain_len);
         EXPECT_EQ(0, std::memcmp("ping", open_dst.data(), 4));
 
         std::array<std::uint8_t, 64> seal_dst{};
@@ -601,7 +601,7 @@ TEST(TlsClientHandshake13Hrr, SecondFlightAfterRetryCompletes) {
         TlsConnectedState state = engine.take_state();
         EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
         EXPECT_FALSE(state.session_resumed);
-        EXPECT_GE(state.peer_chain.size(), 1u);
+        EXPECT_GE(state.peer_chain.size(), 1U);
     });
 }
 
@@ -706,6 +706,7 @@ void expect_engine_failure(const ServerOptions &server_opt, const TlsClientConfi
 
     const std::optional<int> desc = last_alert_desc(log.client_to_server);
     ASSERT_TRUE(desc.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     EXPECT_EQ(static_cast<int>(expected), *desc); // the fatal alert went on the wire
 }
 
@@ -729,7 +730,7 @@ TEST(TlsClientHandshake13Failure, ExpiredLeafSendsCertificateExpired) {
         ClientMaterial material;
         // The leaf's SAN is example.com (the CN alone would never reach the
         // window check — matching is SAN-only); this timestamp is past notAfter.
-        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs + 3650LL * 24 * 3600 * 1000);
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs + (3650LL * 24 * 3600 * 1000));
 
         expect_engine_failure(ServerOptions{.leaf_pem = certfix::kLeafExpiredPem}, cfg,
                               TlsAlertDesc::CertificateExpired);
@@ -754,7 +755,7 @@ TEST(TlsClientHandshake13Failure, OversizedHandshakeHeaderRefusedBeforeBody) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         ClientMaterial material;
         const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
-        constexpr std::size_t kCap = 100u << 10;
+        constexpr std::size_t kCap = 100U << 10;
         const auto sh_header = [](std::size_t body_len) {
             return std::vector<std::uint8_t>{22,
                                              0x03,
@@ -853,7 +854,7 @@ TEST(TlsClientHandshake13Full, LongServerChainAccepted) {
         DriveLog log;
         ASSERT_TRUE(drive(*server, engine, false, log));
         TlsConnectedState state = engine.take_state();
-        EXPECT_EQ(6u, state.peer_chain.size());
+        EXPECT_EQ(6U, state.peer_chain.size());
     });
 }
 
@@ -873,7 +874,7 @@ TEST(TlsClientHandshake13Failure, TamperedSealedRecordFailsAuthentication) {
         ASSERT_TRUE(server->ship(chain_bytes(engine.take_output())));
         ASSERT_EQ(0, server->handshake_step());
         std::vector<std::uint8_t> flight = server->drain_wbio();
-        ASSERT_GE(flight.size(), 32u);
+        ASSERT_GE(flight.size(), 32U);
         flight.back() ^= 0x55;
 
         Event event = Event::None;
@@ -919,7 +920,7 @@ TEST(TlsClientHandshake12Full, HandshakeAndAppRoundTrip) {
         EXPECT_EQ(0, std::memcmp("h2", state.alpn.data(), 2));
         EXPECT_FALSE(state.session_resumed);
         EXPECT_FALSE(state.early_data_accepted);
-        EXPECT_GE(state.peer_chain.size(), 2u); // leaf + intermediate
+        EXPECT_GE(state.peer_chain.size(), 2U); // leaf + intermediate
         EXPECT_TRUE(state.tls12_master.len() == 48); // AES128 suite PRF is SHA-256
         EXPECT_TRUE(state.client_app_secret.empty() && state.resumption_master.empty()); // 1.3-only fields
 
@@ -939,7 +940,7 @@ TEST(TlsClientHandshake12Full, HandshakeAndAppRoundTrip) {
                 (static_cast<std::uint16_t>(sealed_in[1]) << 8) | sealed_in[2], static_cast<std::uint16_t>(rec_len),
                 {sealed_in.data() + fiber::tls::kTlsRecordHeaderSize, rec_len}, open_dst);
         ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
-        ASSERT_EQ(4u, opened.plain_len);
+        ASSERT_EQ(4U, opened.plain_len);
         EXPECT_EQ(0, std::memcmp("ping", open_dst.data(), 4));
 
         std::array<std::uint8_t, 64> seal_dst{};
@@ -1003,7 +1004,7 @@ TEST(TlsClientHandshake12Full, EcdsaSuiteAgrees) {
         EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
         EXPECT_EQ(static_cast<std::uint16_t>(TlsCipherSuiteId::EcdheEcdsaAes128GcmSha256),
                   static_cast<std::uint16_t>(state.suite));
-        EXPECT_GE(state.peer_chain.size(), 1u);
+        EXPECT_GE(state.peer_chain.size(), 1U);
     });
 }
 
@@ -1101,13 +1102,13 @@ TEST(TlsClientCrSigalgs, LongListKeepsOnlyOurSchemes) {
             }
         }
         EXPECT_EQ(expected, n);
-        EXPECT_GT(n, 0u);
+        EXPECT_GT(n, 0U);
     };
     check(fiber::tls::kTls12SignaturePreference);
     check(fiber::tls::kTls13SignaturePreference);
 
     std::array<std::uint16_t, fiber::tls::kClientMaxCrSigalgs> none{};
-    EXPECT_EQ(0u, fiber::tls::tls_client_keep_cr_sigalgs({}, fiber::tls::kTls12SignaturePreference, none));
+    EXPECT_EQ(0U, fiber::tls::tls_client_keep_cr_sigalgs({}, fiber::tls::kTls12SignaturePreference, none));
 }
 
 // A 1.2 CertificateRequest whose list holds none of our schemes is "nothing
@@ -1177,7 +1178,7 @@ void expect_reject_after_sh_mutation(const ServerOptions &opt, const TlsClientCo
     ASSERT_TRUE(server->ship(chain_bytes(engine.take_output())));
     ASSERT_EQ(0, server->handshake_step());
     std::vector<std::uint8_t> flight = server->drain_wbio();
-    ASSERT_GE(flight.size(), fiber::tls::kTlsRecordHeaderSize + 4u + 2u + 32u + 1u + 32u + 2u);
+    ASSERT_GE(flight.size(), fiber::tls::kTlsRecordHeaderSize + 4U + 2U + 32U + 1U + 32U + 2U);
     ASSERT_EQ(22, flight[0]); // plaintext handshake record
     ASSERT_EQ(2, flight[5]); // ... whose first message is a ServerHello
     mutate(flight);
@@ -1190,6 +1191,7 @@ void expect_reject_after_sh_mutation(const ServerOptions &opt, const TlsClientCo
 
     const std::optional<int> desc = last_alert_desc(chain_bytes(engine.take_output()));
     ASSERT_TRUE(desc.has_value());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     EXPECT_EQ(static_cast<int>(expected), *desc); // the fatal alert went on the wire
 }
 
@@ -1418,7 +1420,7 @@ TEST(TlsClientHandshake13Psk, ResumesWithoutCertificates) {
                 (static_cast<std::uint16_t>(sealed_in[1]) << 8) | sealed_in[2], static_cast<std::uint16_t>(rec_len),
                 {sealed_in.data() + fiber::tls::kTlsRecordHeaderSize, rec_len}, open_dst);
         ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
-        ASSERT_EQ(4u, opened.plain_len);
+        ASSERT_EQ(4U, opened.plain_len);
         EXPECT_EQ(0, std::memcmp("ping", open_dst.data(), 4));
     });
 }
@@ -1488,7 +1490,7 @@ TEST(TlsClientHandshake13Psk, EarlyDataAccepted) {
                 static_cast<std::uint16_t>(rec_len), {sealed.data() + fiber::tls::kTlsRecordHeaderSize, rec_len},
                 open_dst);
         ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
-        ASSERT_EQ(4u, opened.plain_len);
+        ASSERT_EQ(4U, opened.plain_len);
         EXPECT_EQ(0, std::memcmp("ping", open_dst.data(), 4));
     });
 }
@@ -1615,7 +1617,7 @@ TEST(TlsClientHandshakeBounds, Tls12ServerHelloBelowFloorRefusedAtFork) {
         // Our fatal alert went out — an alert record (type 21) behind the still
         // queued ClientHello flight, carrying {fatal, protocol_version}.
         const std::vector<std::uint8_t> out = chain_bytes(engine.take_output());
-        ASSERT_GE(out.size(), fiber::tls::kTlsRecordHeaderSize + 2u);
+        ASSERT_GE(out.size(), fiber::tls::kTlsRecordHeaderSize + 2U);
         bool alert_found = false;
         for (std::size_t off = 0; off + fiber::tls::kTlsRecordHeaderSize <= out.size();) {
             const std::size_t len = (static_cast<std::size_t>(out[off + 3]) << 8) | out[off + 4];

@@ -1,5 +1,7 @@
 #include <fiber/async/WaitGroup.h>
 #include <fiber/http/ClientHttp3Exchange.h>
+
+#include <cstddef>
 #include "Http3ConnectionTestSupport.h"
 
 TEST(Http3ClientConnectionTest, LocalSettingsUseConfiguredFieldSectionLimit) {
@@ -13,7 +15,12 @@ TEST(Http3ClientConnectionTest, LocalSettingsUseConfiguredFieldSectionLimit) {
         std::uint64_t advertised_limit;
         std::uint64_t expected;
     };
-    const Case cases[] = {{128 * 1024, 0, 128 * 1024}, {4096, 0, 4096}, {4096, 2048, 2048}, {0, 0, 0}};
+    const Case cases[] = {{.receive_limit = static_cast<std::size_t>(128 * 1024),
+                           .advertised_limit = 0,
+                           .expected = static_cast<std::uint64_t>(128 * 1024)},
+                          {.receive_limit = 4096, .advertised_limit = 0, .expected = 4096},
+                          {.receive_limit = 4096, .advertised_limit = 2048, .expected = 2048},
+                          {.receive_limit = 0, .advertised_limit = 0, .expected = 0}};
     for (const auto &test: cases) {
         fiber::http::Http3Client::Options options{};
         options.max_field_section_size = test.receive_limit;
@@ -240,7 +247,7 @@ void check_local_drain_with_registered_request(std::chrono::milliseconds drain_t
     options.remote_connection_id = connection_id_from({5, 6, 7, 8});
     fiber::http::Http3Client::Options client_options{};
     client_options.drain_timeout = drain_timeout;
-    ClientFixture fixture(endpoint.get(), options, std::move(client_options));
+    ClientFixture fixture(endpoint.get(), options, client_options);
     auto &h3 = fixture.connection();
     ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
     std::promise<void> done;

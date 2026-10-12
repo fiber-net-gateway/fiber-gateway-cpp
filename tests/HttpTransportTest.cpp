@@ -195,7 +195,7 @@ fiber::async::DetachedTask exercise_tcp_callback(fiber::event::EventLoop *loop, 
         auto read_result = transport->try_readv(result.data.size(), probe);
         result.initial_poll_err = read_result ? fiber::common::IoErr::None : read_result.error();
     }
-    TcpCallbackContext ctx{transport.get(), &result};
+    TcpCallbackContext ctx{.transport = transport.get(), .result = &result};
     result.set_err = transport->set_read_callback(&on_tcp_transport_readable, &ctx);
     if (result.set_err == fiber::common::IoErr::None) {
         (void) ::send(peer_fd, "hello", 5, 0);

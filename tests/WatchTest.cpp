@@ -137,14 +137,14 @@ TEST(WatchTest, EmptyAndInitialCurrentValues) {
     auto empty_subscriber = empty_watch.subscribe();
     auto empty = empty_subscriber.current();
     EXPECT_EQ(empty.value, nullptr);
-    EXPECT_EQ(empty.version, 0u);
+    EXPECT_EQ(empty.version, 0U);
 
     IntWatch initialized_watch(42);
     auto initialized_subscriber = initialized_watch.subscribe();
     auto initialized = initialized_subscriber.current();
     ASSERT_NE(initialized.value, nullptr);
     EXPECT_EQ(*initialized.value, 42);
-    EXPECT_EQ(initialized.version, 1u);
+    EXPECT_EQ(initialized.version, 1U);
 }
 
 TEST(WatchTest, PublisherCanOnlyBeAcquiredOnce) {
@@ -159,6 +159,7 @@ TEST(WatchTest, PublisherCanOnlyBeAcquiredOnce) {
 }
 
 TEST(WatchTest, HandlesOutliveWatchObject) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     std::optional<IntWatch::Subscriber> subscriber;
 
     {
@@ -172,7 +173,8 @@ TEST(WatchTest, HandlesOutliveWatchObject) {
     auto snapshot = subscriber->current();
     ASSERT_NE(snapshot.value, nullptr);
     EXPECT_EQ(*snapshot.value, 7);
-    EXPECT_EQ(snapshot.version, 1u);
+    EXPECT_EQ(snapshot.version, 1U);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(WatchTest, NextZeroReturnsExistingInitialSnapshot) {
@@ -196,11 +198,12 @@ TEST(WatchTest, NextZeroReturnsExistingInitialSnapshot) {
     IntSnapshot snapshot = future.get();
     ASSERT_NE(snapshot.value, nullptr);
     EXPECT_EQ(*snapshot.value, 42);
-    EXPECT_EQ(snapshot.version, 1u);
+    EXPECT_EQ(snapshot.version, 1U);
     group.join();
 }
 
 TEST(WatchTest, NextReturnsLatestCoalescedValue) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     IntWatch watch;
     auto publisher = watch.acquire_publisher();
     ASSERT_TRUE(publisher.has_value());
@@ -227,8 +230,9 @@ TEST(WatchTest, NextReturnsLatestCoalescedValue) {
     IntSnapshot snapshot = future.get();
     ASSERT_NE(snapshot.value, nullptr);
     EXPECT_EQ(*snapshot.value, 3);
-    EXPECT_EQ(snapshot.version, 3u);
+    EXPECT_EQ(snapshot.version, 3U);
     group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(WatchTest, PendingNextResumesAfterPublish) {
@@ -254,7 +258,7 @@ TEST(WatchTest, PendingNextResumesAfterPublish) {
     IntSnapshot snapshot = future.get();
     ASSERT_NE(snapshot.value, nullptr);
     EXPECT_EQ(*snapshot.value, 11);
-    EXPECT_EQ(snapshot.version, 2u);
+    EXPECT_EQ(snapshot.version, 2U);
     group.join();
 }
 
@@ -286,6 +290,7 @@ TEST(WatchTest, SameLoopPublishFromDeferredCallbackResumesWithoutExternalWakeup)
 }
 
 TEST(WatchTest, CurrentDoesNotAffectExplicitNextVersion) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     IntWatch watch;
     auto publisher = watch.acquire_publisher();
     ASSERT_TRUE(publisher.has_value());
@@ -296,13 +301,13 @@ TEST(WatchTest, CurrentDoesNotAffectExplicitNextVersion) {
     auto snapshot_a = subscriber_a.current();
     ASSERT_NE(snapshot_a.value, nullptr);
     EXPECT_EQ(*snapshot_a.value, 1);
-    EXPECT_EQ(snapshot_a.version, 1u);
+    EXPECT_EQ(snapshot_a.version, 1U);
 
     publisher->publish(2);
     auto snapshot_b = subscriber_b.current();
     ASSERT_NE(snapshot_b.value, nullptr);
     EXPECT_EQ(*snapshot_b.value, 2);
-    EXPECT_EQ(snapshot_b.version, 2u);
+    EXPECT_EQ(snapshot_b.version, 2U);
 
     fiber::event::EventLoopGroup group(1);
     std::promise<IntSnapshot> result;
@@ -323,11 +328,13 @@ TEST(WatchTest, CurrentDoesNotAffectExplicitNextVersion) {
     IntSnapshot next = future.get();
     ASSERT_NE(next.value, nullptr);
     EXPECT_EQ(*next.value, 2);
-    EXPECT_EQ(next.version, 2u);
+    EXPECT_EQ(next.version, 2U);
     group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(WatchTest, PendingWaitersFromSameSubscriberResumeOnOwningLoops) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     IntWatch watch;
     auto publisher = watch.acquire_publisher();
     ASSERT_TRUE(publisher.has_value());
@@ -384,10 +391,11 @@ TEST(WatchTest, PendingWaitersFromSameSubscriberResumeOnOwningLoops) {
     ASSERT_NE(snapshot_b.value, nullptr);
     EXPECT_EQ(*snapshot_a.value, 9);
     EXPECT_EQ(*snapshot_b.value, 9);
-    EXPECT_EQ(snapshot_a.version, 1u);
-    EXPECT_EQ(snapshot_b.version, 1u);
+    EXPECT_EQ(snapshot_a.version, 1U);
+    EXPECT_EQ(snapshot_b.version, 1U);
     EXPECT_EQ(resumed_a_future.get(), expected_a);
     EXPECT_EQ(resumed_b_future.get(), expected_b);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(WatchTest, DestroyingPendingCoroutineCancelsWaiter) {

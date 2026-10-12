@@ -395,8 +395,8 @@ private:
     }
 
     [[nodiscard]] static std::uint64_t key_hash(std::string_view service_name, std::string_view group) noexcept {
-        std::uint64_t hash = 0xcbf29ce484222325ull;
-        constexpr std::uint64_t prime = 0x100000001b3ull;
+        std::uint64_t hash = 0xcbf29ce484222325ULL;
+        constexpr std::uint64_t prime = 0x100000001b3ULL;
         const auto mix = [&](std::string_view value) {
             for (unsigned char character: value) {
                 hash ^= character;
@@ -595,10 +595,12 @@ private:
         entry.subscription.close();
         if (entry.state.has_value() && !entry.state_retired) {
             entry.state_retired = true;
-            const ServiceRetireReason retire_reason =
-                    reason == ServiceReadyError::Closed     ? ServiceRetireReason::SubscriptionClosed
-                    : reason == ServiceReadyError::Shutdown ? ServiceRetireReason::Shutdown
-                                                            : ServiceRetireReason::Released;
+            ServiceRetireReason retire_reason = ServiceRetireReason::Released;
+            if (reason == ServiceReadyError::Closed) {
+                retire_reason = ServiceRetireReason::SubscriptionClosed;
+            } else if (reason == ServiceReadyError::Shutdown) {
+                retire_reason = ServiceRetireReason::Shutdown;
+            }
             ops_.on_retire(ServiceKeyView{.service_name = entry.service_name, .group = entry.group}, *entry.state,
                            retire_reason);
         }
@@ -624,6 +626,7 @@ private:
             return;
         }
         drain_published_ = true;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
         drained_publisher_->publish(true);
     }
 

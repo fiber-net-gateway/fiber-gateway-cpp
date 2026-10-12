@@ -29,22 +29,22 @@ std::string random_bytes(std::size_t n, std::uint32_t seed) {
 }
 
 TEST(Crc32Test, KnownCheckValue) {
-    EXPECT_EQ(Crc32::compute(std::string_view("123456789")), 0xCBF43926u);
+    EXPECT_EQ(Crc32::compute(std::string_view("123456789")), 0xCBF43926U);
     const std::uint8_t digits[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
-    EXPECT_EQ(Crc32::compute(std::span<const std::uint8_t>{digits}), 0xCBF43926u);
+    EXPECT_EQ(Crc32::compute(std::span<const std::uint8_t>{digits}), 0xCBF43926U);
 }
 
 TEST(Crc32Test, EmptyInputIsZero) {
-    EXPECT_EQ(Crc32::compute(std::string_view("")), 0u);
-    EXPECT_EQ(Crc32::compute(std::span<const std::uint8_t>{}), 0u);
+    EXPECT_EQ(Crc32::compute(std::string_view("")), 0U);
+    EXPECT_EQ(Crc32::compute(std::span<const std::uint8_t>{}), 0U);
 
     Crc32 crc;
-    EXPECT_EQ(crc.value(), 0u);
+    EXPECT_EQ(crc.value(), 0U);
 }
 
 TEST(Crc32Test, SingleNullByte) {
     const std::string zero("\0", 1);
-    EXPECT_EQ(Crc32::compute(zero), 0xD202EF8Du);
+    EXPECT_EQ(Crc32::compute(zero), 0xD202EF8DU);
     EXPECT_EQ(Crc32::compute(zero), reference_crc32(zero));
 }
 
@@ -72,7 +72,7 @@ TEST(Crc32Test, IncrementalEqualsOneShotAcrossBraidBoundaries) {
     for (std::size_t n = 0; n <= 64; ++n) {
         sizes.push_back(n);
     }
-    for (std::size_t n: {100u, 1000u, 4096u, 65536u, 100003u}) {
+    for (std::size_t n: {100U, 1000U, 4096U, 65536U, 100003U}) {
         sizes.push_back(n);
     }
     const std::vector<std::size_t> chunks = {1, 2, 3, 5, 7, 8, 13, 64, 1000, 33333};
@@ -134,13 +134,13 @@ TEST(Crc32Test, ResetRestartsComputation) {
     Crc32 crc;
     crc.update("123456789");
     const std::uint32_t first = crc.value();
-    EXPECT_EQ(first, 0xCBF43926u);
+    EXPECT_EQ(first, 0xCBF43926U);
 
     crc.update("x");
     EXPECT_NE(crc.value(), first);
 
     crc.reset();
-    EXPECT_EQ(crc.value(), 0u);
+    EXPECT_EQ(crc.value(), 0U);
     crc.update("123456789");
     EXPECT_EQ(crc.value(), first);
 }

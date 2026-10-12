@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <coroutine>
+#include <cstddef>
 #include <limits>
 #include <new>
 #include <string>
@@ -124,7 +125,7 @@ private:
 
 CatClientCore::CatClientCore(event::EventLoop &sender_loop, CatClientConfig config, CatClientOptions options,
                              dns::AddressResolver *resolver) noexcept :
-    loop_(&sender_loop), config_(std::move(config)), options_(std::move(options)), resolver_(resolver),
+    loop_(&sender_loop), config_(std::move(config)), options_(options), resolver_(resolver),
     message_id_generator_(config_.ip()), reconnect_delay_(options_.reconnect_initial_delay),
     collectors_(config_.bootstrap_collectors()) {
     sample_cutoff_.store(sample_cutoff(options_.initial_sample_rate), std::memory_order_relaxed);
@@ -1019,6 +1020,10 @@ void CatClientCore::drop_all_frames() noexcept {
 
 void CatClientCore::notify_control() noexcept {
     const std::uint64_t generation = control_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
+    // control_publisher_ is acquired once in start() with a has_value()
+    // FIBER_ASSERT right after the assignment; the analyzer cannot track
+    // that boundary here.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     control_publisher_->publish(generation);
 }
 
@@ -1173,8 +1178,9 @@ async::Task<std::optional<std::string>> CatClientCore::fetch_router_body(const C
                         const std::size_t remaining = collected.size() <= options_.max_router_response_bytes
                                                               ? options_.max_router_response_bytes - collected.size()
                                                               : 0;
-                        auto chunk = co_await exchange.read_body(std::min<std::size_t>(remaining + 1, 16 * 1024),
-                                                                 options_.router_request_timeout);
+                        auto chunk = co_await exchange.read_body(
+                                std::min<std::size_t>(remaining + 1, static_cast<unsigned long>(16 * 1024)),
+                                options_.router_request_timeout);
                         if (!chunk) {
                             failed = true;
                             break;

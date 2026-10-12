@@ -153,6 +153,9 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
         }
         handles.push_back(handle);
     }
+    // Logger names are unique in the registry (get-or-create semantics), so
+    // the name comparator is a strict total order over this pointer set.
+    // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     std::sort(handles.begin(), handles.end(),
               [](const LoggerHandle *lhs, const LoggerHandle *rhs) { return lhs->name() < rhs->name(); });
 
@@ -175,8 +178,12 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
                 matching_rules.push_back(&rule);
             }
         }
-        std::sort(matching_rules.begin(), matching_rules.end(),
-                  [](const auto *lhs, const auto *rhs) { return lhs->options.name.size() > rhs->options.name.size(); });
+        // Stable: equal-length names keep their config declaration order, so
+        // the last-wins resolution below stays deterministic.
+        // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
+        std::stable_sort(matching_rules.begin(), matching_rules.end(), [](const auto *lhs, const auto *rhs) {
+            return lhs->options.name.size() > rhs->options.name.size();
+        });
 
         LogLevel effective_level = config.root_.level;
         unsigned effective_verbosity = config.root_.verbosity;
@@ -243,7 +250,7 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
         if (total_count > (std::numeric_limits<std::size_t>::max() - logger_size) / sizeof(AppenderId)) {
             return std::unexpected(make_error(LogConfigErrorCode::SizeOverflow, "logger allocation size overflow"));
         }
-        const std::size_t allocation_size = logger_size + total_count * sizeof(AppenderId);
+        const std::size_t allocation_size = logger_size + (total_count * sizeof(AppenderId));
         void *memory =
                 candidate->logger_arena.alloc(allocation_size, std::max<std::size_t>(alignof(Logger), target_align));
         if (!memory) {

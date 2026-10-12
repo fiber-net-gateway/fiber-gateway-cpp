@@ -163,8 +163,8 @@ common::IoResult<TlsServerHandshakeEngine::Event> TlsServerHandshakeEngine::feed
     return pump();
 }
 
-common::IoResult<TlsServerHandshakeEngine::Event>
-TlsServerHandshakeEngine::feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept {
+common::IoResult<TlsServerHandshakeEngine::Event> TlsServerHandshakeEngine::feed_quic(TlsQuicLevel level,
+                                                                                      mem::IoBufChain &bytes) noexcept {
     FIBER_ASSERT(!out_.done);
     if (!ctx_.provide_quic(level, bytes)) {
         return std::unexpected(common::IoErr::NoMem);
@@ -304,8 +304,15 @@ void TlsServerHandshakeEngine::handle_first_message(TlsHandshakeType type,
             fail_local(TlsAlertDesc::IllegalParameter);
             return;
         }
-        auto &sub = flow_.emplace<Tls13ServerHandshake>(Tls13ServerHandshake::Mount{
-                ctx_, cfg_, resumption_, minter_, hello_, early_, out_, {scratch_.data(), scratch_.size()}});
+        auto &sub = flow_.emplace<Tls13ServerHandshake>(
+                Tls13ServerHandshake::Mount{.ctx = ctx_,
+                                            .cfg = cfg_,
+                                            .resumption = resumption_,
+                                            .minter = minter_,
+                                            .hello = hello_,
+                                            .early = early_,
+                                            .out = out_,
+                                            .scratch = {scratch_.data(), scratch_.size()}});
         sub.start(ch, {hello_.ch.data(), hello_.ch_len});
         return;
     }
@@ -315,8 +322,14 @@ void TlsServerHandshakeEngine::handle_first_message(TlsHandshakeType type,
             return;
         }
         FIBER_ASSERT(cfg_.quic == nullptr); // the allow12 gate above is QUIC-blind by construction
-        auto &sub = flow_.emplace<Tls12ServerHandshake>(Tls12ServerHandshake::Mount{
-                ctx_, cfg_, resumption_, minter_, hello_, out_, {scratch_.data(), scratch_.size()}});
+        auto &sub = flow_.emplace<Tls12ServerHandshake>(
+                Tls12ServerHandshake::Mount{.ctx = ctx_,
+                                            .cfg = cfg_,
+                                            .resumption = resumption_,
+                                            .minter = minter_,
+                                            .hello = hello_,
+                                            .out = out_,
+                                            .scratch = {scratch_.data(), scratch_.size()}});
         sub.start(ch, {hello_.ch.data(), hello_.ch_len});
         return;
     }

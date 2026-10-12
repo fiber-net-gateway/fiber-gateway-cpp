@@ -24,7 +24,7 @@ void RWFdWaiterBase::on_event(void *ctx, fiber::common::IoErr err) noexcept {
     if (err == fiber::common::IoErr::None) {
         // Normal transition: drop this subscription before completing; the
         // direction's readiness and kernel interest are untouched.
-        (void) waiter->rwfd_->cancel_wait(waiter);
+        waiter->rwfd_->cancel_wait(waiter);
     }
     // Canceled completions arrive from close(), which has already detached the
     // waiter; the RWFd may be destroyed by then and must not be touched.
@@ -51,6 +51,8 @@ RWFd::~RWFd() {
         // Off the current loop only a fully detached object may die: the
         // handover protocol guarantees there is no registration or subscription
         // left for any loop to dispatch through.
+        // Positive form states the invariant directly.
+        // NOLINTNEXTLINE(readability-simplify-boolean-expr)
         FIBER_ASSERT(!efd_.registered() && !has_callbacks());
     }
 }
@@ -73,6 +75,8 @@ common::IoErr RWFd::attach(int socket) noexcept {
 int RWFd::release_fd() noexcept {
     // An fd with no poller registration belongs to no loop: the constructing
     // thread may release it during a startup rollback.
+    // Positive form states the invariant directly.
+    // NOLINTNEXTLINE(readability-simplify-boolean-expr)
     FIBER_ASSERT(!efd_.registered() || efd_.current_loop().in_loop());
     FIBER_ASSERT(!has_callbacks());
     if (efd_.registered() && efd_.unwatch_all() != common::IoErr::None) {

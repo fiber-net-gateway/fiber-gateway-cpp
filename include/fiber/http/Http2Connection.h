@@ -66,7 +66,7 @@ public:
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
-        std::size_t read_buffer_size = 64 * 1024;
+        std::size_t read_buffer_size = static_cast<std::size_t>(64 * 1024);
         // Inbound-idle deadline: while running, expiry sends a keepalive PING and
         // the peer then has keepalive grace (one third of this, floored at 10s,
         // scaled down for shorter timeouts) to answer with any inbound bytes
@@ -149,6 +149,7 @@ public:
     [[nodiscard]] bool accepts_new_local_stream() const noexcept {
         return local_stream_attach_status() == common::IoErr::None;
     }
+    // NOLINTNEXTLINE(readability-make-member-function-const) non-const twin returns a mutable reference
     [[nodiscard]] event::EventLoop &loop() noexcept {
         FIBER_ASSERT(transport_ != nullptr);
         return transport_->loop();
@@ -157,6 +158,7 @@ public:
         FIBER_ASSERT(transport_ != nullptr);
         return transport_->loop();
     }
+    // NOLINTNEXTLINE(readability-make-member-function-const) non-const twin returns a mutable reference
     [[nodiscard]] HttpTransport &transport() noexcept {
         FIBER_ASSERT(transport_ != nullptr);
         return *transport_;

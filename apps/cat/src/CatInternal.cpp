@@ -168,6 +168,9 @@ bool valid_limits(const RecordLimits &limits) noexcept {
 
 std::string_view copy_string(MessageTrace &trace, std::string_view value) noexcept {
     if (value.empty()) {
+        // {"", 0} keeps a dereferenceable base address; the encoder writes
+        // through .data() without re-checking emptiness.
+        // NOLINTNEXTLINE(bugprone-string-constructor)
         return {"", 0};
     }
     auto *copy = static_cast<char *>(trace.data->pool.alloc(value.size(), alignof(char)));
@@ -271,12 +274,14 @@ Node *allocate_message(MessageTrace &trace, std::string_view type, std::string_v
         node->type = {text, type.size()};
         text += type.size();
     } else {
+        // NOLINTNEXTLINE(bugprone-string-constructor) non-null empty view
         node->type = {"", 0};
     }
     if (!name.empty()) {
         std::copy(name.begin(), name.end(), text);
         node->name = {text, name.size()};
     } else {
+        // NOLINTNEXTLINE(bugprone-string-constructor) non-null empty view
         node->name = {"", 0};
     }
     node->trace = &trace;
@@ -934,6 +939,7 @@ RecordError set_message_text(MessageData *message, std::string_view value, std::
         return RecordError::None;
     }
     if (value.empty()) {
+        // NOLINTNEXTLINE(bugprone-string-constructor) non-null empty view
         current = {"", 0};
         return RecordError::None;
     }

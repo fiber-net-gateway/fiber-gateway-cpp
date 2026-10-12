@@ -80,8 +80,11 @@ inline bool TlsAlpnProtocolsView::contains(std::string_view protocol) const noex
         if (len + 1 > remaining) {
             return false;
         }
+        // char_traits::compare takes an explicit count; no NUL-termination semantics involved.
+        // NOLINTBEGIN(bugprone-suspicious-stringview-data-usage)
         if (len == protocol.size() &&
             std::char_traits<char>::compare(reinterpret_cast<const char *>(cur + 1), protocol.data(), len) == 0) {
+            // NOLINTEND(bugprone-suspicious-stringview-data-usage)
             return true;
         }
         cur += len + 1;
@@ -222,7 +225,7 @@ inline constexpr std::array<std::uint8_t, 32> kTlsHelloRetryRandom = {
         return false;
     }
     for (std::size_t i = 0; i < 32; ++i) {
-        if (random.data()[i] != kTlsHelloRetryRandom[i]) {
+        if (random[i] != kTlsHelloRetryRandom[i]) {
             return false;
         }
     }

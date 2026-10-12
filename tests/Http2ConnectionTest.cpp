@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -54,12 +55,12 @@ public:
         chunks_(std::move(chunks)), write_steps_(std::move(write_steps)), reads_blocked_(block_reads),
         hold_eof_(hold_eof) {}
 
-    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds /*timeout*/) override {
         ++shutdown_count_;
         co_return fiber::common::IoResult<void>{};
     }
 
-    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds /*timeout*/) override {
         ++wait_readable_call_count_;
         while ((reads_blocked_ || (hold_eof_ && next_chunk_ >= chunks_.size())) && !closed_) {
             co_await fiber::async::sleep(std::chrono::milliseconds(1));
@@ -123,7 +124,7 @@ public:
     }
 
     fiber::async::Task<fiber::common::IoResult<size_t>> writev(fiber::mem::IoBufChain &buf,
-                                                               std::chrono::milliseconds) override {
+                                                               std::chrono::milliseconds /*unused*/) override {
         if (closed_) {
             co_return std::unexpected(fiber::common::IoErr::ConnReset);
         }
@@ -223,12 +224,12 @@ public:
 
     explicit ScriptedReadTransport(std::vector<ReadAction> actions) : actions_(std::move(actions)) {}
 
-    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds /*timeout*/) override {
         ++shutdown_count_;
         co_return fiber::common::IoResult<void>{};
     }
 
-    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
+    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds /*timeout*/) override {
         ++wait_readable_call_count_;
         if (closed_) {
             co_return std::unexpected(fiber::common::IoErr::Canceled);
@@ -298,7 +299,7 @@ public:
     }
 
     fiber::async::Task<fiber::common::IoResult<size_t>> writev(fiber::mem::IoBufChain &buf,
-                                                               std::chrono::milliseconds) override {
+                                                               std::chrono::milliseconds /*unused*/) override {
         if (closed_) {
             co_return std::unexpected(fiber::common::IoErr::ConnReset);
         }
@@ -582,7 +583,7 @@ struct KeepaliveRunOutcome {
 };
 
 std::string iobuf_to_string(const fiber::mem::IoBuf &buf) {
-    return std::string(reinterpret_cast<const char *>(buf.readable_data()), buf.readable());
+    return {reinterpret_cast<const char *>(buf.readable_data()), buf.readable()};
 }
 
 ResponseHeadSnapshot snapshot_response_head(const fiber::http::Http2ResponseHead *head) {
@@ -594,8 +595,8 @@ ResponseHeadSnapshot snapshot_response_head(const fiber::http::Http2ResponseHead
     snapshot.kind = head->kind;
     snapshot.status_code = head->status_code;
     snapshot.end_stream = head->end_stream;
-    for (auto it = head->headers.begin(); it != head->headers.end(); ++it) {
-        snapshot.headers.emplace_back(std::string(it->name_view()), std::string(it->value_view()));
+    for (const auto &header: head->headers) {
+        snapshot.headers.emplace_back(std::string(header.name_view()), std::string(header.value_view()));
     }
     return snapshot;
 }
@@ -763,9 +764,12 @@ struct DecodedHeaderBlock {
 
     static const fiber::http::Http2HpackDecoder::Ops &ops() noexcept {
         static const fiber::http::Http2HpackDecoder::Ops kOps{
-                &DecodedHeaderBlock::on_indexed_field, &DecodedHeaderBlock::on_indexed_name,
-                &DecodedHeaderBlock::on_name_raw,      &DecodedHeaderBlock::on_name_huffman,
-                &DecodedHeaderBlock::on_value_raw,     &DecodedHeaderBlock::on_value_huffman,
+                .on_indexed_field = &DecodedHeaderBlock::on_indexed_field,
+                .on_indexed_name = &DecodedHeaderBlock::on_indexed_name,
+                .on_name_raw = &DecodedHeaderBlock::on_name_raw,
+                .on_name_huffman = &DecodedHeaderBlock::on_name_huffman,
+                .on_value_raw = &DecodedHeaderBlock::on_value_raw,
+                .on_value_huffman = &DecodedHeaderBlock::on_value_huffman,
         };
         return kOps;
     }
@@ -931,8 +935,7 @@ std::optional<std::uint32_t> parse_settings_parameter(const EncodedFrame &frame,
 }
 
 std::size_t client_initial_flight_prefix_length(std::string_view written) {
-    if (written.size() < kClientConnectionPreface.size() ||
-        written.substr(0, kClientConnectionPreface.size()) != kClientConnectionPreface) {
+    if (written.size() < kClientConnectionPreface.size() || !written.starts_with(kClientConnectionPreface)) {
         return 0;
     }
 
@@ -1881,7 +1884,7 @@ public:
         }
         return lease->get();
     }
-    fiber::http::Http2Stream *open_stream(std::uint32_t) noexcept { return open_stream(); }
+    fiber::http::Http2Stream *open_stream(std::uint32_t /*unused*/) noexcept { return open_stream(); }
     void request_graceful_close() noexcept { graceful_shutdown(); }
     [[nodiscard]] std::int32_t current_connection_send_window() const noexcept { return connection_send_window(); }
     [[nodiscard]] std::uint32_t current_peer_max_frame_size() const noexcept { return peer_max_outbound_frame_size(); }
@@ -2161,20 +2164,21 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
     };
 
     if (snapshot_before_shutdown) {
-        ControlSetupContext setup_ctx{&connection,
-                                      fake_transport,
-                                      setup,
-                                      block_reads_for_setup,
-                                      options.role == fiber::http::Http2Connection::ConnectionRole::Client &&
+        ControlSetupContext setup_ctx{.connection = &connection,
+                                      .fake_transport = fake_transport,
+                                      .setup = setup,
+                                      .block_reads_for_setup = block_reads_for_setup,
+                                      .strip_initial_flight =
+                                              options.role == fiber::http::Http2Connection::ConnectionRole::Client &&
                                               (static_cast<bool>(setup) || !preserve_initial_flight),
-                                      true,
-                                      &outcome,
-                                      &stream1,
-                                      &stream3,
-                                      &stream1_id,
-                                      &stream3_id,
-                                      local_stream1.get(),
-                                      local_stream3.get()};
+                                      .snapshot_before_shutdown = true,
+                                      .outcome = &outcome,
+                                      .stream1 = &stream1,
+                                      .stream3 = &stream3,
+                                      .stream1_id = &stream1_id,
+                                      .stream3_id = &stream3_id,
+                                      .local_stream1 = local_stream1.get(),
+                                      .local_stream3 = local_stream3.get()};
         fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
 
         outcome.result = co_await connection.close_gate().join();
@@ -2184,20 +2188,21 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
     }
 
     if (block_reads_for_setup) {
-        ControlSetupContext setup_ctx{&connection,
-                                      fake_transport,
-                                      setup,
-                                      block_reads_for_setup,
-                                      options.role == fiber::http::Http2Connection::ConnectionRole::Client &&
+        ControlSetupContext setup_ctx{.connection = &connection,
+                                      .fake_transport = fake_transport,
+                                      .setup = setup,
+                                      .block_reads_for_setup = block_reads_for_setup,
+                                      .strip_initial_flight =
+                                              options.role == fiber::http::Http2Connection::ConnectionRole::Client &&
                                               (static_cast<bool>(setup) || !preserve_initial_flight),
-                                      false,
-                                      &outcome,
-                                      &stream1,
-                                      &stream3,
-                                      &stream1_id,
-                                      &stream3_id,
-                                      local_stream1.get(),
-                                      local_stream3.get()};
+                                      .snapshot_before_shutdown = false,
+                                      .outcome = &outcome,
+                                      .stream1 = &stream1,
+                                      .stream3 = &stream3,
+                                      .stream1_id = &stream1_id,
+                                      .stream3_id = &stream3_id,
+                                      .local_stream1 = local_stream1.get(),
+                                      .local_stream3 = local_stream3.get()};
         fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
         outcome.result = co_await connection.close_gate().join();
     } else {
@@ -2279,7 +2284,7 @@ DetachedTask run_client_concurrent_limit(std::shared_ptr<std::promise<ClientConc
     if (!owner2) {
         if (first) {
             first->get()->close(fiber::common::IoErr::Canceled);
-            connection.try_release_stream(*first->get());
+            connection.try_release_stream(**first);
             first->reset();
         } else {
             delete owner1;
@@ -2296,13 +2301,13 @@ DetachedTask run_client_concurrent_limit(std::shared_ptr<std::promise<ClientConc
         outcome.second_open_error = second.error();
     } else {
         second->get()->close(fiber::common::IoErr::Canceled);
-        connection.try_release_stream(*second->get());
+        connection.try_release_stream(**second);
         second->reset();
     }
 
     if (first) {
         first->get()->close(fiber::common::IoErr::Canceled);
-        connection.try_release_stream(*first->get());
+        connection.try_release_stream(**first);
         first->reset();
     } else {
         delete owner1;
@@ -2320,7 +2325,7 @@ DetachedTask run_client_concurrent_limit(std::shared_ptr<std::promise<ClientConc
     outcome.third_opened = third.has_value();
     if (third) {
         third->get()->close(fiber::common::IoErr::Canceled);
-        connection.try_release_stream(*third->get());
+        connection.try_release_stream(**third);
         third->reset();
     } else {
         delete owner3;
@@ -2557,7 +2562,7 @@ DetachedTask run_local_attach_fifo(std::shared_ptr<std::promise<LocalAttachFifoO
     if (barging) {
         (void) barging_owner.release();
         barging->get()->close(fiber::common::IoErr::Canceled);
-        connection.try_release_stream(*barging->get());
+        connection.try_release_stream(**barging);
         barging->reset();
     }
     for (int i = 0; i < 50 && !done[0] && !done[1]; ++i) {
@@ -2893,7 +2898,7 @@ TEST(Http2ConnectionTest, StartDrivesIoAndNotifiesClosureWithoutRunCoroutine) {
         fiber::event::EventLoopGroup group(1);
         std::promise<fiber::common::IoResult<void>> promise;
         auto future = promise.get_future();
-        CallbackContext callback_ctx{&promise};
+        CallbackContext callback_ctx{.promise = &promise};
         group.start();
         fiber::async::spawn(group.at(0), [&callback_ctx]() -> fiber::async::DetachedTask {
             fiber::http::Http2Connection::Options options;
@@ -3150,9 +3155,9 @@ TEST(Http2ConnectionTest, ReadTimeoutSendsKeepalivePingAndAckClearsOutstanding) 
 
         KeepaliveRunOutcome outcome = execute_keepalive_connection(
                 {
-                        {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
-                        {ScriptedReadTransport::ReadActionKind::Chunk, ack},
-                        {ScriptedReadTransport::ReadActionKind::Eof, {}},
+                        {.kind = ScriptedReadTransport::ReadActionKind::TimedOut, .data = {}},
+                        {.kind = ScriptedReadTransport::ReadActionKind::Chunk, .data = ack},
+                        {.kind = ScriptedReadTransport::ReadActionKind::Eof, .data = {}},
                 },
                 options);
 
@@ -3176,8 +3181,8 @@ TEST(Http2ConnectionTest, SecondReadTimeoutWithoutPingAckClosesConnection) {
 
         KeepaliveRunOutcome outcome = execute_keepalive_connection(
                 {
-                        {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
-                        {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
+                        {.kind = ScriptedReadTransport::ReadActionKind::TimedOut, .data = {}},
+                        {.kind = ScriptedReadTransport::ReadActionKind::TimedOut, .data = {}},
                 },
                 options);
 
@@ -3200,9 +3205,9 @@ TEST(Http2ConnectionTest, AnyInboundDataSettlesOutstandingKeepalivePing) {
         std::string settings_ack = make_frame(0, 0x4, 0x1, 0, {});
         KeepaliveRunOutcome outcome = execute_keepalive_connection(
                 {
-                        {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
-                        {ScriptedReadTransport::ReadActionKind::Chunk, std::move(settings_ack)},
-                        {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
+                        {.kind = ScriptedReadTransport::ReadActionKind::TimedOut, .data = {}},
+                        {.kind = ScriptedReadTransport::ReadActionKind::Chunk, .data = std::move(settings_ack)},
+                        {.kind = ScriptedReadTransport::ReadActionKind::TimedOut, .data = {}},
                 },
                 options);
 
@@ -3956,7 +3961,7 @@ struct CloseGateObserverContext {
     const fiber::http::Http2CloseGate::ObserverHook *hook = nullptr;
 };
 
-void on_close_observed(void *ctx, fiber::http::Http2Connection &, fiber::common::IoErr reason) noexcept {
+void on_close_observed(void *ctx, fiber::http::Http2Connection & /*unused*/, fiber::common::IoErr reason) noexcept {
     auto *observer = static_cast<CloseGateObserverContext *>(ctx);
     observer->outcome->observer_ran = true;
     observer->outcome->observer_reason = reason;
@@ -3974,7 +3979,7 @@ DetachedTask run_close_gate_observer(std::shared_ptr<std::promise<CloseGateObser
     CloseGateObserverOutcome outcome;
     bool joiner_resumed = false;
     fiber::http::Http2CloseGate::ObserverHook hook;
-    CloseGateObserverContext observer_ctx{&outcome, &joiner_resumed, &hook};
+    CloseGateObserverContext observer_ctx{.outcome = &outcome, .joiner_resumed = &joiner_resumed, .hook = &hook};
     connection.close_gate().add_observer(hook, &on_close_observed, &observer_ctx);
 
     connection.request_stop();
@@ -4037,22 +4042,22 @@ TEST(Http2ConnectionTest, CapacityCallbackFiresWhenStreamDetachFreesSlot) {
         ASSERT_NE(owner1, nullptr);
         auto stream1 = connection.try_attach_local_stream(owner1->stream);
         ASSERT_TRUE(stream1.has_value());
-        EXPECT_EQ(connection.local_active_stream_count(), 1u);
-        EXPECT_EQ(connection.available_local_stream_slots(), 0u);
+        EXPECT_EQ(connection.local_active_stream_count(), 1U);
+        EXPECT_EQ(connection.available_local_stream_slots(), 0U);
         EXPECT_FALSE(connection.accepts_new_local_stream());
         // Every stream-count change notifies, attach included.
-        EXPECT_EQ(observer.calls, 1u);
-        EXPECT_EQ(observer.last_slots, 0u);
+        EXPECT_EQ(observer.calls, 1U);
+        EXPECT_EQ(observer.last_slots, 0U);
 
         (*stream1)->close(fiber::common::IoErr::Canceled);
         connection.try_release_stream(**stream1);
         stream1->reset();
 
-        EXPECT_EQ(observer.calls, 2u);
-        EXPECT_EQ(observer.last_slots, 1u);
+        EXPECT_EQ(observer.calls, 2U);
+        EXPECT_EQ(observer.last_slots, 1U);
         EXPECT_TRUE(observer.last_accepts);
-        EXPECT_EQ(connection.local_active_stream_count(), 0u);
-        EXPECT_EQ(connection.available_local_stream_slots(), 1u);
+        EXPECT_EQ(connection.local_active_stream_count(), 0U);
+        EXPECT_EQ(connection.available_local_stream_slots(), 1U);
 
         connection.close_all_streams(fiber::common::IoErr::Canceled);
     });
@@ -4068,20 +4073,20 @@ TEST(Http2ConnectionTest, CapacityCallbackFiresWhenPeerSettingsChangeStreamBudge
         connection.observe_capacity(&CapacityObserver::on_capacity, &observer);
 
         ASSERT_EQ(connection.apply_settings_parameter(0x3, 5), fiber::common::IoErr::None);
-        EXPECT_EQ(observer.calls, 1u);
-        EXPECT_EQ(observer.last_slots, 5u);
+        EXPECT_EQ(observer.calls, 1U);
+        EXPECT_EQ(observer.last_slots, 5U);
         EXPECT_TRUE(observer.last_accepts);
-        EXPECT_EQ(connection.peer_max_concurrent_streams(), 5u);
+        EXPECT_EQ(connection.peer_max_concurrent_streams(), 5U);
 
         ASSERT_EQ(connection.apply_settings_parameter(0x3, 0), fiber::common::IoErr::None);
-        EXPECT_EQ(observer.calls, 2u);
-        EXPECT_EQ(observer.last_slots, 0u);
+        EXPECT_EQ(observer.calls, 2U);
+        EXPECT_EQ(observer.last_slots, 0U);
         EXPECT_FALSE(observer.last_accepts);
         EXPECT_FALSE(connection.accepts_new_local_stream());
 
         connection.clear_capacity_observer();
         ASSERT_EQ(connection.apply_settings_parameter(0x3, 3), fiber::common::IoErr::None);
-        EXPECT_EQ(observer.calls, 2u);
+        EXPECT_EQ(observer.calls, 2U);
     });
 }
 
@@ -4110,14 +4115,14 @@ TEST(Http2ConnectionTest, PeerGoawayNotifiesTheStateCallbackNotCapacity) {
 
         // Refusing new local streams is a state change, not a capacity change: the
         // stream population and the budget both stayed put.
-        EXPECT_EQ(capacity.calls, 0u);
-        EXPECT_EQ(state.calls, 1u);
+        EXPECT_EQ(capacity.calls, 0U);
+        EXPECT_EQ(state.calls, 1U);
         EXPECT_EQ(state.last_state, fiber::http::Http2Connection::State::Draining);
         EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Draining);
         EXPECT_TRUE(connection.peer_goaway_received());
         EXPECT_FALSE(connection.accepts_new_local_stream());
         // The surviving stream is untouched by the peer's last-stream-id.
-        EXPECT_EQ(connection.local_active_stream_count(), 1u);
+        EXPECT_EQ(connection.local_active_stream_count(), 1U);
     });
 }
 
@@ -4131,7 +4136,7 @@ TEST(Http2ConnectionTest, StateCallbackFiresOnClosingFromInit) {
 
         connection.shutdown(fiber::common::IoErr::Canceled);
 
-        EXPECT_EQ(state.calls, 1u);
+        EXPECT_EQ(state.calls, 1U);
         EXPECT_EQ(state.last_state, fiber::http::Http2Connection::State::Closed);
         EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Closed);
     });
@@ -4149,8 +4154,8 @@ TEST(Http2ConnectionTest, CapacityCallbackCoalescesChangeRaisedFromInsideTheCall
         ASSERT_EQ(connection.apply_settings_parameter(0x3, 5), fiber::common::IoErr::None);
 
         // One extra pass for the nested change, not a recursive dispatch.
-        EXPECT_EQ(observer.calls, 2u);
-        EXPECT_EQ(connection.peer_max_concurrent_streams(), 7u);
+        EXPECT_EQ(observer.calls, 2U);
+        EXPECT_EQ(connection.peer_max_concurrent_streams(), 7U);
         EXPECT_FALSE(connection.capacity_dispatch_running_);
         EXPECT_FALSE(connection.capacity_dispatch_again_);
     });
@@ -4204,9 +4209,9 @@ TEST(Http2ConnectionTest, FirstEmptySettingsLeavesTheBudgetAtTheLocalLimit) {
 
         // No entry means no write: the budget stays at the configured limit.
         EXPECT_TRUE(connection.peer_settings_received());
-        EXPECT_EQ(observer.calls, 0u);
-        EXPECT_EQ(connection.peer_max_concurrent_streams(), 512u);
-        EXPECT_EQ(connection.available_local_stream_slots(), 512u);
+        EXPECT_EQ(observer.calls, 0U);
+        EXPECT_EQ(connection.peer_max_concurrent_streams(), 512U);
+        EXPECT_EQ(connection.available_local_stream_slots(), 512U);
     });
 }
 
@@ -4222,18 +4227,18 @@ TEST(Http2ConnectionTest, SettingsReassertingClampedBudgetDoesNotNotifyCapacity)
 
         (void) feed_settings_frame(connection, max_concurrent_entry(100));
         (void) feed_settings_frame(connection, max_concurrent_entry(100));
-        EXPECT_EQ(observer.calls, 0u);
-        EXPECT_EQ(connection.peer_max_concurrent_streams(), 100u);
+        EXPECT_EQ(observer.calls, 0U);
+        EXPECT_EQ(connection.peer_max_concurrent_streams(), 100U);
 
         // Above the clamp the budget cannot move either, so still no notify.
         (void) feed_settings_frame(connection, max_concurrent_entry(200));
-        EXPECT_EQ(observer.calls, 0u);
-        EXPECT_EQ(connection.peer_max_concurrent_streams(), 100u);
+        EXPECT_EQ(observer.calls, 0U);
+        EXPECT_EQ(connection.peer_max_concurrent_streams(), 100U);
 
         (void) feed_settings_frame(connection, max_concurrent_entry(50));
-        EXPECT_EQ(observer.calls, 1u);
-        EXPECT_EQ(observer.last_slots, 50u);
-        EXPECT_EQ(connection.peer_max_concurrent_streams(), 50u);
+        EXPECT_EQ(observer.calls, 1U);
+        EXPECT_EQ(observer.last_slots, 50U);
+        EXPECT_EQ(connection.peer_max_concurrent_streams(), 50U);
     });
 }
 
@@ -4250,18 +4255,18 @@ TEST(Http2ConnectionTest, LocalConcurrentLimitClampsAdvertisedBudget) {
         // Peer budgets at or above the limit leave the budget untouched.
         (void) feed_settings_frame(connection, max_concurrent_entry(100));
         (void) feed_settings_frame(connection, max_concurrent_entry(2000));
-        EXPECT_EQ(observer.calls, 0u);
-        EXPECT_EQ(connection.peer_max_concurrent_streams(), 8u);
-        EXPECT_EQ(connection.available_local_stream_slots(), 8u);
+        EXPECT_EQ(observer.calls, 0U);
+        EXPECT_EQ(connection.peer_max_concurrent_streams(), 8U);
+        EXPECT_EQ(connection.available_local_stream_slots(), 8U);
 
         (void) feed_settings_frame(connection, max_concurrent_entry(4));
-        EXPECT_EQ(observer.calls, 1u);
-        EXPECT_EQ(observer.last_slots, 4u);
-        EXPECT_EQ(connection.peer_max_concurrent_streams(), 4u);
+        EXPECT_EQ(observer.calls, 1U);
+        EXPECT_EQ(observer.last_slots, 4U);
+        EXPECT_EQ(connection.peer_max_concurrent_streams(), 4U);
 
         (void) feed_settings_frame(connection, max_concurrent_entry(0));
-        EXPECT_EQ(observer.calls, 2u);
-        EXPECT_EQ(observer.last_slots, 0u);
+        EXPECT_EQ(observer.calls, 2U);
+        EXPECT_EQ(observer.last_slots, 0U);
         EXPECT_FALSE(connection.accepts_new_local_stream());
     });
 }
@@ -4278,15 +4283,15 @@ TEST(Http2ConnectionTest, PeerStreamPopulationChangesNotifyCapacity) {
 
         fiber::http::Http2Stream *stream = connection.create_peer_stream(1);
         ASSERT_NE(stream, nullptr);
-        EXPECT_EQ(observer.calls, 1u);
+        EXPECT_EQ(observer.calls, 1U);
         EXPECT_TRUE(observer.last_has_streams);
-        EXPECT_EQ(connection.local_active_stream_count(), 0u);
+        EXPECT_EQ(connection.local_active_stream_count(), 0U);
 
         auto retained = stream->lease();
 
         stream->close(fiber::common::IoErr::Canceled);
         connection.try_release_stream(*stream);
-        EXPECT_EQ(observer.calls, 2u);
+        EXPECT_EQ(observer.calls, 2U);
         EXPECT_FALSE(observer.last_has_streams);
         EXPECT_FALSE(connection.has_active_streams());
         EXPECT_TRUE(retained);
@@ -5311,7 +5316,7 @@ TEST(Http2ConnectionTest, SendsStableSpanAcrossPartialWrites) {
 }
 
 TEST(Http2ConnectionTest, SendsIoBufChainUsingWritev) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         SendOutcome outcome = execute_send_connection(
                 [](SendingHttp2Connection &connection) {
                     fiber::mem::IoBuf first = fiber::mem::IoBuf::allocate(4);
@@ -5580,7 +5585,7 @@ TEST(Http2ConnectionTest, ServerHandlerWriteAcceptsMultipleFramesPerBatch) {
 
         // Larger than one max-size frame but within the per-stream batch, so a
         // single write() accepts everything and the batch is split into frames.
-        const std::size_t body_size = 16384 * 2 + 7000;
+        const std::size_t body_size = (16384 * 2) + 7000;
         auto body = std::make_shared<std::string>(body_size, 'b');
         auto header_result = std::make_shared<fiber::common::IoResult<void>>();
         auto body_result = std::make_shared<fiber::common::IoResult<size_t>>();
@@ -5890,6 +5895,7 @@ TEST(Http2ConnectionTest, ServerIgnoresPriorityUpdateFrame) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         std::string request = std::string(kClientConnectionPreface);
         request += make_frame(0, 0x4, 0x0, 0, {});
+        // NOLINTNEXTLINE(bugprone-string-constructor) embedded NUL is the frame payload
         request += make_frame(8, 0x10, 0x0, 0, std::string("\0\0\0\1u=1", 8));
         request += build_headers_frame_bytes(1,
                                              {
@@ -6091,7 +6097,7 @@ TEST(Http2ConnectionTest, ServerReadBodyReturnsLastWhenRequestEndsAtHeaders) {
         ASSERT_TRUE(outcome.result.has_value());
         ASSERT_TRUE(read_result->has_value());
         EXPECT_TRUE(*framing_is_none);
-        EXPECT_EQ(read_result->value().readable_bytes(), 0u);
+        EXPECT_EQ(read_result->value().readable_bytes(), 0U);
         EXPECT_TRUE(read_result->value().complete());
     });
 }
@@ -6365,7 +6371,9 @@ DisabledPushOutcome execute_disabled_push(std::string input, bool reset_local = 
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
         struct Owner {
             Owner() :
-                conn(options(), this, {nullptr, &changed, nullptr}), gate(fiber::event::EventLoop::current(), conn) {}
+                conn(options(), this,
+                     {.create_peer_stream = nullptr, .on_state_change = &changed, .on_capacity_change = nullptr}),
+                gate(fiber::event::EventLoop::current(), conn) {}
             static fiber::http::Http2Connection::Options options() {
                 fiber::http::Http2Connection::Options options;
                 options.role = fiber::http::Http2Connection::ConnectionRole::Client;
@@ -6427,9 +6435,9 @@ TEST(Http2ConnectionTest, ClientDisablesPushAndStillReceivesNormalResponse) {
         EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
         EXPECT_TRUE(outcome.headers_received);
         auto frames = disabled_push_frames(outcome);
-        auto *settings = find_frame(frames, 4, 0);
+        const auto *settings = find_frame(frames, 4, 0);
         ASSERT_NE(settings, nullptr);
-        EXPECT_EQ(settings->length, 24u);
+        EXPECT_EQ(settings->length, 24U);
         EXPECT_EQ(settings->payload.substr(0, 6), std::string("\0\2\0\0\0\0", 6));
     });
 }
@@ -6447,7 +6455,7 @@ TEST(Http2ConnectionTest, DisabledPushBeforeAckIsCanceledAndKeepsHpackTable) {
         EXPECT_TRUE(outcome.headers_received);
         EXPECT_EQ(outcome.response_name, "x-test");
         auto frames = disabled_push_frames(outcome);
-        auto *rst = find_frame(frames, 3, 2);
+        const auto *rst = find_frame(frames, 3, 2);
         ASSERT_NE(rst, nullptr);
         EXPECT_EQ(rst->payload, std::string("\0\0\0\10", 4));
     });
@@ -6461,7 +6469,7 @@ TEST(Http2ConnectionTest, DisabledPushAfterAckSendsProtocolErrorGoaway) {
         auto outcome = execute_disabled_push(input);
         EXPECT_EQ(outcome.error, fiber::common::IoErr::Invalid);
         auto frames = disabled_push_frames(outcome);
-        auto *goaway = find_frame(frames, 7, 0);
+        const auto *goaway = find_frame(frames, 7, 0);
         ASSERT_NE(goaway, nullptr);
         EXPECT_EQ(goaway->payload.substr(4, 4), std::string("\0\0\0\1", 4));
     });
@@ -6469,11 +6477,11 @@ TEST(Http2ConnectionTest, DisabledPushAfterAckSendsProtocolErrorGoaway) {
 
 TEST(Http2ConnectionTest, DisabledPushRejectsUnpromisedHeadersAndInvalidPromiseIds) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
-        for (auto input: {make_frame(1, 1, 4, 2, "\x88"), make_frame(5, 5, 4, 1, promise_payload(3, "\x82"))}) {
+        for (const auto &input: {make_frame(1, 1, 4, 2, "\x88"), make_frame(5, 5, 4, 1, promise_payload(3, "\x82"))}) {
             auto outcome = execute_disabled_push(input);
             EXPECT_EQ(outcome.error, fiber::common::IoErr::Invalid);
             auto frames = disabled_push_frames(outcome);
-            auto *goaway = find_frame(frames, 7, 0);
+            const auto *goaway = find_frame(frames, 7, 0);
             ASSERT_NE(goaway, nullptr);
             EXPECT_EQ(goaway->payload.substr(4, 4), std::string("\0\0\0\1", 4));
         }
@@ -6496,7 +6504,7 @@ TEST(Http2ConnectionTest, DisabledPushInvalidHpackSendsCompressionError) {
         auto outcome = execute_disabled_push(make_frame(payload.size(), 5, 4, 1, payload));
         EXPECT_EQ(outcome.error, fiber::common::IoErr::Invalid);
         auto frames = disabled_push_frames(outcome);
-        auto *goaway = find_frame(frames, 7, 0);
+        const auto *goaway = find_frame(frames, 7, 0);
         ASSERT_NE(goaway, nullptr);
         EXPECT_EQ(goaway->payload.substr(4, 4), std::string("\0\0\0\11", 4));
     });
@@ -6576,7 +6584,7 @@ TEST(Http2ConnectionTest, ClientRejectsPeerEnablePushWithProtocolErrorGoaway) {
         const auto *goaway = find_frame(frames, 7, 0);
         ASSERT_NE(goaway, nullptr) << describe_frames(frames);
         EXPECT_EQ(goaway->payload.substr(4, 4), std::string("\0\0\0\1", 4));
-        EXPECT_EQ(count_frames(frames, 4, 1), 0u) << describe_frames(frames);
+        EXPECT_EQ(count_frames(frames, 4, 1), 0U) << describe_frames(frames);
     });
 }
 
@@ -6586,7 +6594,7 @@ TEST(Http2ConnectionTest, ClientAcceptsPeerEnablePushZeroAndAcknowledgesSettings
         EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
         auto frames = disabled_push_frames(outcome);
         EXPECT_EQ(find_frame(frames, 7, 0), nullptr) << describe_frames(frames);
-        EXPECT_EQ(count_frames(frames, 4, 1), 1u) << describe_frames(frames);
+        EXPECT_EQ(count_frames(frames, 4, 1), 1U) << describe_frames(frames);
     });
 }
 
@@ -6620,7 +6628,7 @@ TEST(Http2ConnectionTest, InitialSettingsAnnounceEnablePushZeroOnClientsOnly) {
         auto server_frames = parse_frames(server.written);
         const auto *server_settings = find_frame(server_frames, 4, 0);
         ASSERT_NE(server_settings, nullptr) << describe_frames(server_frames);
-        EXPECT_EQ(server_settings->length, 18u);
+        EXPECT_EQ(server_settings->length, 18U);
         EXPECT_FALSE(settings_contain_id(*server_settings, 0x2));
 
         fiber::http::Http2Connection::Options client_options;
@@ -6629,7 +6637,7 @@ TEST(Http2ConnectionTest, InitialSettingsAnnounceEnablePushZeroOnClientsOnly) {
         auto client_frames = parse_frames(std::string_view(client.written).substr(kClientConnectionPreface.size()));
         const auto *client_settings = find_frame(client_frames, 4, 0);
         ASSERT_NE(client_settings, nullptr) << describe_frames(client_frames);
-        EXPECT_EQ(client_settings->length, 24u);
+        EXPECT_EQ(client_settings->length, 24U);
         EXPECT_TRUE(settings_contain_id(*client_settings, 0x2));
         EXPECT_EQ(client_settings->payload.substr(0, 6), std::string("\0\2\0\0\0\0", 6));
     });
@@ -6792,7 +6800,7 @@ struct RawSendProbe {
 
 // Sends `total` DATA payload bytes, at most `batch` per encoded batch.
 struct RawDataSendOp {
-    inline static constexpr fiber::http::Http2OutboundKind kOutboundKind = fiber::http::Http2OutboundKind::Data;
+    static constexpr fiber::http::Http2OutboundKind kOutboundKind = fiber::http::Http2OutboundKind::Data;
 
     RawDataSendOp(RawSendProbe &probe, std::size_t total, std::size_t batch) noexcept :
         probe_(&probe), remaining_(total), batch_(batch) {}
@@ -6852,7 +6860,7 @@ RawStream attach_raw_stream(fiber::http::Http2Connection &connection) {
     // DATA-only probes model an already opened stream and capture traffic
     // after its opening HEADERS. Real opening/cancellation uses exchanges below.
     owner->stream.opening_committed_ = true;
-    return {&owner->stream, std::move(*attached)};
+    return {.stream = &owner->stream, .held = std::move(*attached)};
 }
 
 // Runs `scenario` against a started client connection whose peer stays
@@ -7091,7 +7099,8 @@ TEST(Http2ConnectionTest, ControlFramesQueueAheadOfStreamsNotYetEncoded) {
                     // stream stays queued without being encoded.
                     transport.limit_writes(0);
                     RawSendProbe first_probe;
-                    auto first_send = send_raw_data(first.stream, &first_probe, 64 * 1024, 64 * 1024);
+                    auto first_send = send_raw_data(first.stream, &first_probe, static_cast<std::size_t>(64 * 1024),
+                                                    static_cast<std::size_t>(64 * 1024));
                     auto first_handle = start_task(first_send);
                     RawSendProbe second_probe;
                     auto second_send = send_raw_data(second.stream, &second_probe, 5, 5);
@@ -7113,6 +7122,7 @@ TEST(Http2ConnectionTest, ControlFramesQueueAheadOfStreamsNotYetEncoded) {
                     EXPECT_TRUE(second_handle.done());
                     const auto frames = parse_frames(strip_client_initial_flight(transport.written()));
                     std::vector<std::pair<std::uint32_t, std::uint8_t>> order;
+                    order.reserve(frames.size());
                     for (const EncodedFrame &frame: frames) {
                         order.emplace_back(frame.stream_id, frame.type);
                     }
@@ -7163,6 +7173,7 @@ TEST(Http2ConnectionTest, EncodeFailureFailsOnlyItsSend) {
 
                     const auto frames = parse_frames(strip_client_initial_flight(transport.written()));
                     std::vector<std::pair<std::uint32_t, std::uint8_t>> order;
+                    order.reserve(frames.size());
                     for (const EncodedFrame &frame: frames) {
                         order.emplace_back(frame.stream_id, frame.type);
                     }
@@ -7538,7 +7549,7 @@ TEST(Http2ConnectionTest, ClientWriteAllTaskDestroyedWithFirstBatchInFlightStops
 
                     // 80 KiB goes out as a 64 KiB batch and then the rest; 100 bytes
                     // of the first batch reach the wire before the transport blocks.
-                    const std::string body(80 * 1024, 'b');
+                    const std::string body(std::size_t{80} * 1024, 'b');
                     transport.limit_writes(100);
                     auto write =
                             exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);

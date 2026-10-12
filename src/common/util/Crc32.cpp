@@ -186,7 +186,7 @@ std::uint32_t crc32_update(std::uint32_t crc, const std::uint8_t *buf, std::size
 void Crc32::update(std::span<const std::uint8_t> data) noexcept { crc_ = crc32_update(crc_, data.data(), data.size()); }
 
 std::uint32_t Crc32::compute(std::span<const std::uint8_t> data) noexcept {
-    return crc32_update(0xFFFFFFFFu, data.data(), data.size()) ^ 0xFFFFFFFFu;
+    return crc32_update(0xFFFFFFFFU, data.data(), data.size()) ^ 0xFFFFFFFFU;
 }
 
 std::uint32_t Crc32::compute(std::string_view data) noexcept {

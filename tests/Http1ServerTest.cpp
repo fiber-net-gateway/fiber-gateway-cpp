@@ -74,6 +74,7 @@ std::string recv_all(int fd) {
     std::string out;
     std::array<char, 4096> buf{};
     for (;;) {
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test-side blocking helper
         ssize_t rc = ::recv(fd, buf.data(), buf.size(), 0);
         if (rc == 0) {
             break;
@@ -98,6 +99,7 @@ std::string recv_http_response(int fd) {
         if (header_end != std::string::npos && out.size() >= header_end + content_length) {
             return out.substr(0, header_end + content_length);
         }
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test-side blocking helper
         ssize_t rc = ::recv(fd, buf.data(), buf.size(), 0);
         if (rc <= 0) {
             return out;
@@ -141,9 +143,10 @@ HttpResponseReadResult recv_http_response_with_extra(int fd) {
             result.extra = out.substr(header_end + content_length);
             return result;
         }
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test-side blocking helper
         ssize_t rc = ::recv(fd, buf.data(), buf.size(), 0);
         if (rc <= 0) {
-            return {out, {}};
+            return {.response = out, .extra = {}};
         }
         out.append(buf.data(), static_cast<size_t>(rc));
         if (header_end == std::string::npos) {
@@ -217,6 +220,7 @@ DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandle
         endpoint_options.address = addr;
         endpoint_options.listen = options;
         auto *endpoint = server->add_endpoint<fiber::http::Http1Endpoint>(std::move(endpoint_options));
+        EXPECT_NE(endpoint, nullptr);
         auto bind_result = server->start();
         if (!bind_result) {
             delete server;
@@ -764,6 +768,7 @@ TEST(Http1ServerTest, CloseResponseSkipsConfiguredUnreadBodyDrain) {
     };
     ASSERT_GT(::poll(&descriptor, 1, 500), 0);
     char byte = 0;
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test-side blocking helper
     EXPECT_EQ(::recv(client, &byte, 1, 0), 0);
     ::close(client);
 

@@ -288,7 +288,7 @@ fiber::nacos::NacosClientConfig make_config(std::uint16_t port, std::vector<std:
     fiber::nacos::NacosClientConfigParams params;
     params.server_hosts = std::move(hosts);
     if (params.server_hosts.empty()) {
-        params.server_hosts.push_back("127.0.0.1");
+        params.server_hosts.emplace_back("127.0.0.1");
     }
     params.username = "user name";
     params.password = "p@ ss&";
@@ -300,7 +300,7 @@ fiber::nacos::NacosClientConfig make_config(std::uint16_t port, std::vector<std:
 
 fiber::nacos::NacosClientConfig make_config_without_auth(std::uint16_t port) {
     fiber::nacos::NacosClientConfigParams params;
-    params.server_hosts.push_back("127.0.0.1");
+    params.server_hosts.emplace_back("127.0.0.1");
     params.http_port = port;
     auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
     EXPECT_TRUE(result.has_value());
@@ -377,7 +377,7 @@ DetachedTask collect_domain_auth_and_release_dns(NacosClient *client, NacosClien
         !fiber::net::IpAddress::parse("127.0.0.1", addresses[1])) {
         outcome.error = fiber::common::IoErr::Invalid;
     } else {
-        const fiber::dns::DnsCacheKey key{Host, fiber::dns::dns_cache_hash(Host)};
+        const fiber::dns::DnsCacheKey key{.normalized_name = Host, .hash = fiber::dns::dns_cache_hash(Host)};
         const auto now = fiber::event::EventLoop::current().now();
         const auto expire_at = now + 60s;
         const auto v4 = cache->upsert_address_set(key, now, fiber::net::IpFamily::V4, addresses, 2, expire_at);
@@ -502,7 +502,7 @@ TEST(NacosClientTest, AuthSubscriberStartsWithoutPublishedSnapshot) {
     auto subscriber = (*client_result)->subscribe_auth();
     auto snapshot = subscriber.current();
     EXPECT_EQ(snapshot.value, nullptr);
-    EXPECT_EQ(snapshot.version, 0u);
+    EXPECT_EQ(snapshot.version, 0U);
 }
 
 TEST(NacosClientTest, PublishesNotConfiguredWithoutHttpLogin) {
@@ -527,7 +527,7 @@ TEST(NacosClientTest, PublishesNotConfiguredWithoutHttpLogin) {
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 2u);
+    ASSERT_EQ(outcome.events.size(), 2U);
     EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::NotConfigured);
     EXPECT_TRUE(outcome.events[0].access_token.empty());
     EXPECT_EQ(outcome.events[1].kind, NacosAuthAccessKind::Stopped);
@@ -558,13 +558,13 @@ TEST(NacosClientTest, LogsInWithNacos2EndpointAndBroadcastsToken) {
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 2u);
+    ASSERT_EQ(outcome.events.size(), 2U);
     EXPECT_EQ(outcome.events[0].access_token, "token-1");
     EXPECT_EQ(outcome.events[1].kind, NacosAuthAccessKind::Stopped);
 
     ASSERT_TRUE(server.wait_for_requests(1, 1s));
     const auto requests = server.requests();
-    ASSERT_EQ(requests.size(), 1u);
+    ASSERT_EQ(requests.size(), 1U);
     EXPECT_TRUE(requests[0].starts_with("POST /nacos/v1/auth/users/login HTTP/1.1\r\n"));
     EXPECT_NE(requests[0].find("content-type: application/x-www-form-urlencoded\r\n"), std::string::npos);
     EXPECT_NE(requests[0].find("connection: close\r\n"), std::string::npos);
@@ -624,11 +624,11 @@ TEST(NacosClientTest, ResolvesHostnameTriesAllAddressesAndPreservesHostHeader) {
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 1u);
+    ASSERT_EQ(outcome.events.size(), 1U);
     EXPECT_EQ(outcome.events[0].access_token, "domain-token");
     ASSERT_TRUE(server.wait_for_requests(1, 1s));
     const auto requests = server.requests();
-    ASSERT_EQ(requests.size(), 1u);
+    ASSERT_EQ(requests.size(), 1U);
     EXPECT_NE(requests[0].find("host: nacos.test:" + std::to_string(server.port()) + "\r\n"), std::string::npos);
 }
 
@@ -661,12 +661,12 @@ TEST(NacosClientTest, RetriesOnlyTheNacos2LoginEndpoint) {
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 3u);
+    ASSERT_EQ(outcome.events.size(), 3U);
     EXPECT_TRUE(outcome.events[0].access_token.empty());
     EXPECT_EQ(outcome.events[1].access_token, "legacy-token");
     ASSERT_TRUE(server.wait_for_requests(2, 1s));
     const auto requests = server.requests();
-    ASSERT_EQ(requests.size(), 2u);
+    ASSERT_EQ(requests.size(), 2U);
     EXPECT_TRUE(requests[0].starts_with("POST /nacos/v1/auth/users/login HTTP/1.1\r\n"));
     EXPECT_TRUE(requests[1].starts_with("POST /nacos/v1/auth/users/login HTTP/1.1\r\n"));
 }
@@ -702,7 +702,7 @@ TEST(NacosClientTest, RetriesInitialFailureAndRecovers) {
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 3u);
+    ASSERT_EQ(outcome.events.size(), 3U);
     EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::InitialFailed);
     EXPECT_EQ(outcome.events[1].access_token, "recovered");
     EXPECT_TRUE(server.wait_for_requests(3, 1s));
@@ -733,7 +733,7 @@ TEST(NacosClientTest, RefreshFailureKeepsLastPublishedToken) {
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 2u);
+    ASSERT_EQ(outcome.events.size(), 2U);
     EXPECT_EQ(outcome.events[0].access_token, "short-lived");
     EXPECT_EQ(outcome.events[1].access_token, "short-lived");
     EXPECT_TRUE(server.wait_for_requests(2, 1s));
@@ -765,8 +765,8 @@ TEST(NacosClientTest, RefreshesAtJavaMinimumFiveSecondDelay) {
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 3u);
-    ASSERT_EQ(outcome.elapsed.size(), 2u);
+    ASSERT_EQ(outcome.events.size(), 3U);
+    ASSERT_EQ(outcome.elapsed.size(), 2U);
     EXPECT_EQ(outcome.events[0].access_token, "token-1");
     EXPECT_EQ(outcome.events[1].access_token, "token-2");
     EXPECT_GE(outcome.elapsed[1], 4500ms);
@@ -805,7 +805,7 @@ TEST(NacosClientTest, FallsBackAcrossConfiguredIpAddresses) {
 TEST(NacosClientTest, RetriesInvalidLoginResponses) {
     struct TestCase {
         std::string body;
-        std::size_t max_response_bytes = 64 * 1024;
+        std::size_t max_response_bytes = static_cast<std::size_t>(64 * 1024);
     };
 
     const std::vector<TestCase> cases{
@@ -848,7 +848,7 @@ TEST(NacosClientTest, RetriesInvalidLoginResponses) {
         group.join();
 
         ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-        ASSERT_EQ(outcome.events.size(), 3u);
+        ASSERT_EQ(outcome.events.size(), 3U);
         EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::InitialFailed);
         EXPECT_EQ(outcome.events[1].access_token, "recovered");
         EXPECT_TRUE(server.wait_for_requests(2, 1s));
@@ -872,7 +872,7 @@ TEST(NacosClientTest, ShutdownBeforeStartPublishesStopped) {
     group.join();
 
     ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 1u);
+    ASSERT_EQ(outcome.events.size(), 1U);
     EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::Stopped);
 }
 
@@ -910,7 +910,7 @@ TEST(NacosClientTest, ShutdownWaitsOnlyForCurrentBoundedHttpOperation) {
     group.join();
 
     EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
-    ASSERT_EQ(outcome.events.size(), 1u);
+    ASSERT_EQ(outcome.events.size(), 1U);
     EXPECT_EQ(outcome.events[0].kind, NacosAuthAccessKind::Stopped);
     EXPECT_LT(elapsed, 1s);
     EXPECT_TRUE(server.wait_for_peer_close(1s));

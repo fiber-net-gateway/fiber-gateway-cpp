@@ -98,7 +98,7 @@ struct FakeConnectTraits {
         return fds[0];
     }
 
-    static fiber::common::IoErr connect_once(int, const Address &address) noexcept {
+    static fiber::common::IoErr connect_once(int /*unused*/, const Address &address) noexcept {
         switch (address.state->behaviors[address.id]) {
             case FakeBehavior::Pending:
                 return fiber::common::IoErr::WouldBlock;
@@ -152,10 +152,10 @@ struct PolicyOutcome {
 DetachedTask run_policy_case(FakeConnectState *state, fiber::net::HappyEyeballsAddressPolicy policy,
                              std::promise<PolicyOutcome> *promise) {
     std::array<FakeAddress, 4> addresses{{
-            {state, fiber::net::IpFamily::V4, 0},
-            {state, fiber::net::IpFamily::V6, 1},
-            {state, fiber::net::IpFamily::V6, 2},
-            {state, fiber::net::IpFamily::V4, 3},
+            {.state = state, .ip_family = fiber::net::IpFamily::V4, .id = 0},
+            {.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 1},
+            {.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 2},
+            {.state = state, .ip_family = fiber::net::IpFamily::V4, .id = 3},
     }};
     fiber::net::HappyEyeballsOptions options;
     options.address_policy = policy;
@@ -245,10 +245,10 @@ DetachedTask cancel_after(FakeConnector::ConnectAwaiter *connect) {
 
 DetachedTask run_concurrency_cap(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
     std::array<FakeAddress, 4> addresses{{
-            {state, fiber::net::IpFamily::V6, 0},
-            {state, fiber::net::IpFamily::V4, 1},
-            {state, fiber::net::IpFamily::V6, 2},
-            {state, fiber::net::IpFamily::V4, 3},
+            {.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 0},
+            {.state = state, .ip_family = fiber::net::IpFamily::V4, .id = 1},
+            {.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 2},
+            {.state = state, .ip_family = fiber::net::IpFamily::V4, .id = 3},
     }};
     fiber::net::HappyEyeballsOptions options;
     options.connection_attempt_delay = 10ms;
@@ -286,8 +286,8 @@ TEST(TcpConnectorTest, EnforcesConcurrencyCapAndCallerCancellationClosesAttempts
 
 DetachedTask run_staggered_winner(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
     std::array<FakeAddress, 2> addresses{{
-            {state, fiber::net::IpFamily::V6, 0},
-            {state, fiber::net::IpFamily::V4, 1},
+            {.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 0},
+            {.state = state, .ip_family = fiber::net::IpFamily::V4, .id = 1},
     }};
     fiber::net::HappyEyeballsOptions options;
     options.connection_attempt_delay = 20ms;
@@ -349,8 +349,8 @@ DetachedTask make_attempts_writable(FakeConnectState *state) {
 
 DetachedTask run_simultaneous_ready_attempts(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
     std::array<FakeAddress, 2> addresses{{
-            {state, fiber::net::IpFamily::V6, 0},
-            {state, fiber::net::IpFamily::V4, 1},
+            {.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 0},
+            {.state = state, .ip_family = fiber::net::IpFamily::V4, .id = 1},
     }};
     fiber::net::HappyEyeballsOptions options;
     options.connection_attempt_delay = 10ms;
@@ -390,9 +390,9 @@ TEST(TcpConnectorTest, SimultaneousReadyAttemptsKeepLoserCallbacksAliveThroughPo
 
 DetachedTask run_deadline(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
     std::array<FakeAddress, 3> addresses{{
-            {state, fiber::net::IpFamily::V6, 0},
-            {state, fiber::net::IpFamily::V4, 1},
-            {state, fiber::net::IpFamily::V6, 2},
+            {.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 0},
+            {.state = state, .ip_family = fiber::net::IpFamily::V4, .id = 1},
+            {.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 2},
     }};
     fiber::net::HappyEyeballsOptions options;
     options.connection_attempt_delay = 10ms;
@@ -432,7 +432,7 @@ TEST(TcpConnectorTest, OneTotalDeadlineCoversAllAttempts) {
 }
 
 DetachedTask run_zero_deadline(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
-    std::array<FakeAddress, 1> addresses{{{state, fiber::net::IpFamily::V6, 0}}};
+    std::array<FakeAddress, 1> addresses{{{.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 0}}};
     fiber::net::HappyEyeballsOptions options;
     options.connection_attempt_delay = 10ms;
     options.total_timeout = 0ms;
@@ -463,7 +463,7 @@ TEST(TcpConnectorTest, ZeroDeadlineMakesOneImmediateAttemptWithoutWaiting) {
 }
 
 DetachedTask run_awaiter_destruction(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
-    std::array<FakeAddress, 1> addresses{{{state, fiber::net::IpFamily::V6, 0}}};
+    std::array<FakeAddress, 1> addresses{{{.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 0}}};
     fiber::net::HappyEyeballsOptions options;
     options.connection_attempt_delay = 10ms;
 
@@ -497,7 +497,7 @@ TEST(TcpConnectorTest, AwaiterDestructionClosesPendingAttempts) {
 
 DetachedTask run_stopping_refusal(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
     fiber::event::EventLoop::current().stop();
-    std::array<FakeAddress, 1> addresses{{{state, fiber::net::IpFamily::V6, 0}}};
+    std::array<FakeAddress, 1> addresses{{{.state = state, .ip_family = fiber::net::IpFamily::V6, .id = 0}}};
     fiber::net::HappyEyeballsOptions options;
     options.connection_attempt_delay = 10ms;
     auto result = co_await FakeConnector::connect(fiber::event::EventLoop::current(), addresses, options);

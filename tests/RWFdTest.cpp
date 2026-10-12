@@ -25,11 +25,13 @@ namespace {
 using fiber::async::DetachedTask;
 using namespace std::chrono_literals;
 
-void noop_ready_callback(void *, fiber::common::IoErr) noexcept {}
+void noop_ready_callback(void * /*unused*/, fiber::common::IoErr /*unused*/) noexcept {}
 
-fiber::common::IoResult<bool> gate_proceed(void *, fiber::event::IoEvent) noexcept { return true; }
-fiber::common::IoResult<bool> gate_pass(void *, fiber::event::IoEvent) noexcept { return false; }
-fiber::common::IoResult<bool> gate_fail(void *, fiber::event::IoEvent) noexcept {
+fiber::common::IoResult<bool> gate_proceed(void * /*unused*/, fiber::event::IoEvent /*unused*/) noexcept {
+    return true;
+}
+fiber::common::IoResult<bool> gate_pass(void * /*unused*/, fiber::event::IoEvent /*unused*/) noexcept { return false; }
+fiber::common::IoResult<bool> gate_fail(void * /*unused*/, fiber::event::IoEvent /*unused*/) noexcept {
     return std::unexpected(fiber::common::IoErr::ConnReset);
 }
 
@@ -43,7 +45,7 @@ struct ReplaceDuringDispatchCtx {
     fiber::common::IoErr clear_err = fiber::common::IoErr::Invalid;
 };
 
-void replace_rwfd_on_read(void *raw_ctx, fiber::common::IoErr) noexcept {
+void replace_rwfd_on_read(void *raw_ctx, fiber::common::IoErr /*unused*/) noexcept {
     auto *ctx = static_cast<ReplaceDuringDispatchCtx *>(raw_ctx);
     ctx->called = true;
     ctx->clear_err = ctx->current->clear_read_callback(&replace_rwfd_on_read, ctx);
@@ -77,7 +79,7 @@ fiber::common::IoResult<std::size_t> raw_recv_once(fiber::net::detail::RWFd &rwf
                 fiber::net::detail::RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<std::size_t> {
                 const auto out = ::recv(socket_fd, buf, len, MSG_DONTWAIT);
                 if (out >= 0) {
-                    if (static_cast<std::size_t>(out) < len) {
+                    if (std::cmp_less(out, len)) {
                         state.mark_blocked();
                     } else {
                         state.mark_ready();
@@ -250,13 +252,13 @@ TEST(RWFdTest, StopsDispatchAfterCallbackDestroysAndReplacesOwner) {
         auto *rwfd =
                 new (static_cast<void *>(storage)) fiber::net::detail::RWFd(loop, std::exchange(original_fds[0], -1));
         ReplaceDuringDispatchCtx ctx{
-                &loop,
-                rwfd,
-                storage,
-                std::exchange(replacement_fds[0], -1),
-                nullptr,
-                false,
-                fiber::common::IoErr::Invalid,
+                .loop = &loop,
+                .current = rwfd,
+                .storage = storage,
+                .replacement_fd = std::exchange(replacement_fds[0], -1),
+                .replacement = nullptr,
+                .called = false,
+                .clear_err = fiber::common::IoErr::Invalid,
         };
 
         set_err = rwfd->set_read_callback(&replace_rwfd_on_read, &ctx);
@@ -313,7 +315,7 @@ TEST(RWFdTest, PersistentReadCallbackSeesLaterEdges) {
 
     fiber::event::EventLoop loop;
     fiber::net::detail::RWFd rwfd(loop, fds[0]);
-    PersistentReadCallbackCtx ctx{&rwfd, &loop, fds[1]};
+    PersistentReadCallbackCtx ctx{.rwfd = &rwfd, .loop = &loop, .peer_fd = fds[1]};
     fiber::common::IoErr set_err = fiber::common::IoErr::Invalid;
 
     fiber::async::spawn(loop, [&]() -> DetachedTask {
@@ -494,7 +496,7 @@ TEST(RWFdTest, IoLambdaRecordsDirectionState) {
 
     loop.run();
     EXPECT_TRUE(drained.has_value());
-    EXPECT_EQ(*drained, 1u);
+    EXPECT_EQ(*drained, 1U);
     EXPECT_EQ(state_after_drain, fiber::net::detail::RWFd::State::Ready);
     EXPECT_FALSE(exhausted.has_value());
     EXPECT_EQ(exhausted.error(), fiber::common::IoErr::WouldBlock);
@@ -798,7 +800,7 @@ struct ReplaceSubscription {
             ++static_cast<ReplaceSubscription *>(ctx)->writes;
         }
     }
-    static void read(void *ctx, fiber::common::IoErr) noexcept {
+    static void read(void *ctx, fiber::common::IoErr /*unused*/) noexcept {
         auto &self = *static_cast<ReplaceSubscription *>(ctx);
         EXPECT_EQ(self.fd.clear_write_callback(&write, ctx), fiber::common::IoErr::None);
         // Advance the write direction by doing I/O before re-subscribing: a
@@ -822,7 +824,7 @@ TEST(RWFdTest, SameBatchSubscriptionReplacementSkipsStaleEventWithoutRearming) {
     fiber::event::EventLoop loop;
     fiber::async::spawn(loop, [&]() -> DetachedTask {
         fiber::net::detail::RWFd fd(loop, fds[0], fiber::net::detail::RWFd::Kind::Stream);
-        ReplaceSubscription context{fd};
+        ReplaceSubscription context{.fd = fd};
         EXPECT_EQ(fd.set_read_callback(&ReplaceSubscription::read, &context), fiber::common::IoErr::None);
         EXPECT_EQ(fd.set_write_callback(&ReplaceSubscription::write, &context), fiber::common::IoErr::None);
         const auto epoch = fd.efd_.epoch();

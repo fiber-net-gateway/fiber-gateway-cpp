@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -13,7 +14,7 @@
 #include <thread>
 #include <vector>
 
-#include <signal.h>
+#include <csignal>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -45,7 +46,7 @@ class SuspendFalseAwaiter {
 public:
     bool await_ready() const noexcept { return false; }
 
-    bool await_suspend(std::coroutine_handle<>) noexcept {
+    bool await_suspend(std::coroutine_handle<> /*unused*/) noexcept {
         completed_ = true;
         return false;
     }
@@ -131,7 +132,7 @@ std::string make_temp_path(const char *tag) {
     path.push_back('_');
     path.append(std::to_string(static_cast<long>(::getpid())));
     path.push_back('_');
-    path.append(std::to_string(static_cast<long>(::random())));
+    path.append(std::to_string(::random()));
     path.append(".pem");
     return path;
 }
@@ -185,9 +186,7 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
-fiber::net::SocketAddress loopback_peer(std::uint16_t port) {
-    return fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-}
+fiber::net::SocketAddress loopback_peer(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
 // server_name borrows a string literal, so the views outlive every connect that takes a copy.
 fiber::http::HttpClientTlsOptions https_tls_options(const fiber::net::TlsClientSecurity &tls) {
@@ -283,7 +282,7 @@ DetachedTask run_reset_after_accept_server(fiber::event::EventLoop *loop, std::p
     while (!allow_reset->load(std::memory_order_acquire)) {
         co_await fiber::async::sleep(1ms);
     }
-    linger reset_linger{1, 0};
+    linger reset_linger{.l_onoff = 1, .l_linger = 0};
     if (::setsockopt(client, SOL_SOCKET, SO_LINGER, &reset_linger, sizeof(reset_linger)) != 0) {
         const fiber::common::IoErr err = fiber::common::io_err_from_errno(errno);
         ::close(client);
@@ -487,6 +486,7 @@ DetachedTask run_blocked_body_write(fiber::http::ClientHttp1Exchange *exchange, 
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, StealsIdleConnectionFromOtherLoopAndReturnsItHome) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -563,9 +563,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, StealsIdleConnectionFromOtherLoopAndRe
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, DifferentNamePinnedToSameAddressDoesNotStealConnection) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -633,9 +635,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, DifferentNamePinnedToSameAddressDoesNo
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireStateAliveUntilDrained) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -677,7 +681,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireS
     auto direct_gate_entered = direct_gate_entered_promise.get_future();
     std::promise<void> direct_gate_release_promise;
     auto direct_gate_release = direct_gate_release_promise.get_future().share();
-    BlockingLoopGate direct_gate{&direct_gate_entered_promise, &direct_gate_release};
+    BlockingLoopGate direct_gate{.entered = &direct_gate_entered_promise, .release = &direct_gate_release};
     home_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(direct_gate);
     ASSERT_EQ(direct_gate_entered.wait_for(2s), std::future_status::ready);
 
@@ -707,7 +711,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireS
     auto task_gate_entered = task_gate_entered_promise.get_future();
     std::promise<void> task_gate_release_promise;
     auto task_gate_release = task_gate_release_promise.get_future().share();
-    BlockingLoopGate task_gate{&task_gate_entered_promise, &task_gate_release};
+    BlockingLoopGate task_gate{.entered = &task_gate_entered_promise, .release = &task_gate_release};
     home_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(task_gate);
     ASSERT_EQ(task_gate_entered.wait_for(2s), std::future_status::ready);
 
@@ -737,7 +741,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireS
     auto hit_home_gate_entered = hit_home_gate_entered_promise.get_future();
     std::promise<void> hit_home_gate_release_promise;
     auto hit_home_gate_release = hit_home_gate_release_promise.get_future().share();
-    BlockingLoopGate hit_home_gate{&hit_home_gate_entered_promise, &hit_home_gate_release};
+    BlockingLoopGate hit_home_gate{.entered = &hit_home_gate_entered_promise, .release = &hit_home_gate_release};
     home_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(hit_home_gate);
     ASSERT_EQ(hit_home_gate_entered.wait_for(2s), std::future_status::ready);
 
@@ -755,7 +759,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireS
     auto hit_borrower_gate_entered = hit_borrower_gate_entered_promise.get_future();
     std::promise<void> hit_borrower_gate_release_promise;
     auto hit_borrower_gate_release = hit_borrower_gate_release_promise.get_future().share();
-    BlockingLoopGate hit_borrower_gate{&hit_borrower_gate_entered_promise, &hit_borrower_gate_release};
+    BlockingLoopGate hit_borrower_gate{.entered = &hit_borrower_gate_entered_promise,
+                                       .release = &hit_borrower_gate_release};
     borrower_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(hit_borrower_gate);
     ASSERT_EQ(hit_borrower_gate_entered.wait_for(2s), std::future_status::ready);
 
@@ -797,7 +802,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireS
     auto shutdown_gate_entered = shutdown_gate_entered_promise.get_future();
     std::promise<void> shutdown_gate_release_promise;
     auto shutdown_gate_release = shutdown_gate_release_promise.get_future().share();
-    BlockingLoopGate shutdown_gate{&shutdown_gate_entered_promise, &shutdown_gate_release};
+    BlockingLoopGate shutdown_gate{.entered = &shutdown_gate_entered_promise, .release = &shutdown_gate_release};
     home_loop->post<BlockingLoopGate, &BlockingLoopGate::notify, &BlockingLoopGate::run>(shutdown_gate);
     ASSERT_EQ(shutdown_gate_entered.wait_for(2s), std::future_status::ready);
 
@@ -829,12 +834,12 @@ TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireS
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, LocalMissReturnsCallerLoopLeaseWhenNoRemoteHintMatches) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup group(2);
-    auto *loop0 = &group.at(0);
-    auto *loop1 = &group.at(1);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
 
@@ -860,9 +865,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, LocalMissReturnsCallerLoopLeaseWhenNoR
     EXPECT_TRUE(result_future.get());
     group.stop();
     group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, ClearAllowsBorrowedConnectionToReturnHome) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -879,8 +886,6 @@ TEST(StealableHttp1ConnectionPoolSetTest, ClearAllowsBorrowedConnectionToReturnH
     ASSERT_NE(port, 0);
 
     fiber::event::EventLoopGroup group(2);
-    auto *loop0 = &group.at(0);
-    auto *loop1 = &group.at(1);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
     const auto key = *fiber::http::HttpConnectionGroupKey::make("clear.test", port,
@@ -945,9 +950,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, ClearAllowsBorrowedConnectionToReturnH
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, ShutdownWaitsForBorrowedLeaseAndDropsItOnReturn) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -964,8 +971,6 @@ TEST(StealableHttp1ConnectionPoolSetTest, ShutdownWaitsForBorrowedLeaseAndDropsI
     ASSERT_NE(port, 0);
 
     fiber::event::EventLoopGroup group(2);
-    auto *loop0 = &group.at(0);
-    auto *loop1 = &group.at(1);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
     const auto key = *fiber::http::HttpConnectionGroupKey::make("shutdown.test", port,
@@ -1030,9 +1035,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, ShutdownWaitsForBorrowedLeaseAndDropsI
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionHeldByOneLoopMakesOtherLoopMiss) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -1121,9 +1128,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionHeldByOneLoopMakesOt
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoopDropsItAtHome) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     std::promise<std::uint16_t> server_port_promise;
     std::promise<fiber::common::IoErr> server_result_promise;
@@ -1215,9 +1224,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadAndWriteBeforeReturningStolenConnection) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -1266,7 +1277,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadAndWriteBeforeReturnin
             fiber::mem::BufPool pool;
             fiber::http::HttpHeaders headers(pool);
             headers.add_view("host", "example.com");
-            std::vector<std::uint8_t> body(32U * 1024U * 1024U, static_cast<std::uint8_t>('x'));
+            std::vector<std::uint8_t> body(std::size_t{32} * 1024 * 1024, static_cast<std::uint8_t>('x'));
             fiber::http::ClientHttp1Exchange exchange(borrowed.connection(), pool);
             fiber::http::Http1RequestHead head;
             head.method = fiber::http::HttpMethod::Post;
@@ -1320,9 +1331,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadAndWriteBeforeReturnin
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, AbandonedReadTaskInvalidatesExchangeBeforeReturningStolenConnection) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -1419,9 +1432,11 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbandonedReadTaskInvalidatesExchangeBe
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(StealableHttp1ConnectionPoolSetTest, HttpsIdentitiesPinnedToSameAddressStayIsolatedAcrossWorkersAndReturnHome) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     SigpipeGuard sigpipe_guard;
     TempFile cert("cert", kSelfSignedCertPem);
     TempFile key_file("key", kSelfSignedKeyPem);
@@ -1507,6 +1522,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, HttpsIdentitiesPinnedToSameAddressStay
     group.join();
     server_group.stop();
     server_group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 } // namespace

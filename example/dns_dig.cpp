@@ -479,7 +479,7 @@ std::optional<CliOptions> parse_args(int argc, char **argv) {
             if (!parsed_port) {
                 return std::nullopt;
             }
-            port_override = *parsed_port;
+            port_override = parsed_port;
             continue;
         }
         if (arg == "+tcp") {
@@ -689,7 +689,7 @@ DetachedTask run_query(fiber::event::EventLoop *loop, const CliOptions *options,
     }
 
     MessageParser parser;
-    if (!parser.init({2, 64, 4096})) {
+    if (!parser.init({.max_questions = 2, .max_records = 64, .max_name_storage = 4096})) {
         std::cerr << "message parser init failed\n";
         *exit_code = 1;
         loop->stop();

@@ -84,7 +84,7 @@ std::string_view contiguous_view_of(const TlsRecord &record) {
 }
 
 TEST(TlsRecordReaderTest, SingleRecordTakenAsOneWholeNode) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         const std::vector<std::uint8_t> bytes = make_record(TlsContentType::Handshake, 0x0303, "hello");
@@ -99,19 +99,19 @@ TEST(TlsRecordReaderTest, SingleRecordTakenAsOneWholeNode) {
         ASSERT_EQ(r.status, TlsRecordReader::Result::Status::Ok);
         EXPECT_EQ(r.record.type, TlsContentType::Handshake);
         EXPECT_EQ(r.record.legacy_version, 0x0303);
-        EXPECT_EQ(r.record.length, 5u);
-        EXPECT_EQ(r.record.payload.readable_bytes(), 5u);
+        EXPECT_EQ(r.record.length, 5U);
+        EXPECT_EQ(r.record.payload.readable_bytes(), 5U);
         // The fed node moved into the record whole: single span, zero-copy, and
         // the take is immediate (no lazy retirement).
-        EXPECT_EQ(r.record.payload.size(), 1u);
+        EXPECT_EQ(r.record.payload.size(), 1U);
         EXPECT_EQ(r.record.contiguous_payload(), keep.readable_data() + fiber::tls::kTlsRecordHeaderSize);
         EXPECT_EQ(contiguous_view_of(r.record), "hello");
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
     });
 }
 
 TEST(TlsRecordReaderTest, MultipleRecordsSplitSequentially) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         std::vector<std::uint8_t> bytes = make_record(TlsContentType::Handshake, 0x0301, "abc");
@@ -135,22 +135,22 @@ TEST(TlsRecordReaderTest, MultipleRecordsSplitSequentially) {
         const auto r3 = reader.next();
         ASSERT_EQ(r3.status, TlsRecordReader::Result::Status::Ok);
         EXPECT_EQ(r3.record.type, TlsContentType::Alert);
-        EXPECT_EQ(r3.record.length, 2u);
+        EXPECT_EQ(r3.record.length, 2U);
         EXPECT_EQ(contiguous_view_of(r3.record), "\x01\x28");
 
         EXPECT_EQ(reader.next().status, TlsRecordReader::Result::Status::NeedMore);
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
     });
 }
 
 TEST(TlsRecordReaderTest, PartialHeaderDefersUntilComplete) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         const std::vector<std::uint8_t> bytes = make_record(TlsContentType::ApplicationData, 0x0303, "xyz");
         ASSERT_TRUE(reader.feed(make_buf(bytes.data(), 3)));
         EXPECT_EQ(reader.next().status, TlsRecordReader::Result::Status::NeedMore);
-        EXPECT_EQ(reader.pending_bytes(), 3u);
+        EXPECT_EQ(reader.pending_bytes(), 3U);
 
         ASSERT_TRUE(reader.feed(make_buf(bytes.data() + 3, bytes.size() - 3)));
         auto r = reader.next();
@@ -160,7 +160,7 @@ TEST(TlsRecordReaderTest, PartialHeaderDefersUntilComplete) {
 }
 
 TEST(TlsRecordReaderTest, RecordAcrossThreeFeedsKeepsSpannedLayout) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         const std::vector<std::uint8_t> bytes = make_record(TlsContentType::ApplicationData, 0x0303, "0123456789");
@@ -174,16 +174,16 @@ TEST(TlsRecordReaderTest, RecordAcrossThreeFeedsKeepsSpannedLayout) {
         ASSERT_EQ(r.status, TlsRecordReader::Result::Status::Ok);
         // Three fed nodes moved into the record as-is: no gather, no copy — the
         // payload is a three-node chain and contiguous_payload() says so.
-        EXPECT_EQ(r.record.payload.size(), 3u);
+        EXPECT_EQ(r.record.payload.size(), 3U);
         EXPECT_EQ(r.record.contiguous_payload(), nullptr);
         EXPECT_EQ(drain_payload(r.record),
                   (std::vector<std::uint8_t>{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}));
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
     });
 }
 
 TEST(TlsRecordReaderTest, PayloadStraddlingNodesKeepsSpannedLayout) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         std::string payload(64, 'a');
@@ -196,17 +196,17 @@ TEST(TlsRecordReaderTest, PayloadStraddlingNodesKeepsSpannedLayout) {
 
         auto r = reader.next();
         ASSERT_EQ(r.status, TlsRecordReader::Result::Status::Ok);
-        EXPECT_EQ(r.record.length, 64u);
-        EXPECT_EQ(r.record.payload.size(), 2u);
+        EXPECT_EQ(r.record.length, 64U);
+        EXPECT_EQ(r.record.payload.size(), 2U);
         EXPECT_EQ(r.record.contiguous_payload(), nullptr);
         EXPECT_EQ(drain_payload(r.record), std::vector<std::uint8_t>(payload.begin(), payload.end()));
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
         EXPECT_EQ(reader.next().status, TlsRecordReader::Result::Status::NeedMore);
     });
 }
 
 TEST(TlsRecordReaderTest, HeaderStraddlingNodesKeepsSpannedLayout) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         const std::vector<std::uint8_t> bytes = make_record(TlsContentType::Handshake, 0x0303, "body");
@@ -219,12 +219,12 @@ TEST(TlsRecordReaderTest, HeaderStraddlingNodesKeepsSpannedLayout) {
         ASSERT_EQ(r.status, TlsRecordReader::Result::Status::Ok);
         EXPECT_EQ(r.record.contiguous_payload(), nullptr);
         EXPECT_EQ(drain_payload(r.record), (std::vector<std::uint8_t>{'b', 'o', 'd', 'y'}));
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
     });
 }
 
 TEST(TlsRecordReaderTest, OneByteNodesProduceSpannedChain) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         const std::vector<std::uint8_t> bytes =
@@ -238,12 +238,12 @@ TEST(TlsRecordReaderTest, OneByteNodesProduceSpannedChain) {
         EXPECT_EQ(r.record.payload.size(), bytes.size());
         EXPECT_EQ(r.record.contiguous_payload(), nullptr);
         EXPECT_EQ(drain_payload(r.record), std::vector<std::uint8_t>(bytes.begin() + 5, bytes.end()));
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
     });
 }
 
 TEST(TlsRecordReaderTest, ZeroLengthRecordPassesThrough) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         std::vector<std::uint8_t> bytes = make_record(TlsContentType::ApplicationData, 0x0303, "");
@@ -253,20 +253,20 @@ TEST(TlsRecordReaderTest, ZeroLengthRecordPassesThrough) {
 
         const auto r1 = reader.next();
         ASSERT_EQ(r1.status, TlsRecordReader::Result::Status::Ok);
-        EXPECT_EQ(r1.record.length, 0u);
-        EXPECT_EQ(r1.record.payload.readable_bytes(), 0u);
+        EXPECT_EQ(r1.record.length, 0U);
+        EXPECT_EQ(r1.record.payload.readable_bytes(), 0U);
         // Empty records have no payload span by definition.
         EXPECT_EQ(r1.record.contiguous_payload(), nullptr);
 
         const auto r2 = reader.next();
         ASSERT_EQ(r2.status, TlsRecordReader::Result::Status::Ok);
         EXPECT_EQ(contiguous_view_of(r2.record), "next");
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
     });
 }
 
 TEST(TlsRecordReaderTest, UnknownContentTypeIsFatal) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         // heartbeat(24) and 0x00 are not valid TLS content types.
         for (const std::uint8_t type: {std::uint8_t{24}, std::uint8_t{0}}) {
 
@@ -282,7 +282,7 @@ TEST(TlsRecordReaderTest, UnknownContentTypeIsFatal) {
 }
 
 TEST(TlsRecordReaderTest, OversizedLengthIsFatalRecordOverflow) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         const std::uint16_t oversize = static_cast<std::uint16_t>(fiber::tls::kTlsMaxCiphertextRecordSize + 1);
@@ -297,7 +297,7 @@ TEST(TlsRecordReaderTest, OversizedLengthIsFatalRecordOverflow) {
 }
 
 TEST(TlsRecordReaderTest, MaxCiphertextLengthFramingOk) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         std::vector<std::uint8_t> bytes;
@@ -316,7 +316,7 @@ TEST(TlsRecordReaderTest, MaxCiphertextLengthFramingOk) {
         EXPECT_NE(r.record.contiguous_payload(), nullptr);
         EXPECT_EQ(r.record.contiguous_payload()[0], 0x5a);
         EXPECT_EQ(r.record.contiguous_payload()[len - 1], 0x5a);
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
     });
 }
 
@@ -338,7 +338,7 @@ TEST(TlsRecordReaderTest, TakenRecordOutlivesReader) {
 }
 
 TEST(TlsRecordReaderTest, ResetClearsPendingOnly) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         ASSERT_TRUE(reader.feed(make_buf(make_record(TlsContentType::ApplicationData, 0x0303, "keep"))));
@@ -347,7 +347,7 @@ TEST(TlsRecordReaderTest, ResetClearsPendingOnly) {
         const std::string_view snapshot = contiguous_view_of(r.record);
 
         reader.reset();
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
         EXPECT_EQ(reader.next().status, TlsRecordReader::Result::Status::NeedMore);
         // The taken record is independent of the reader's pending buffer.
         EXPECT_EQ(snapshot, "keep");
@@ -360,7 +360,7 @@ TEST(TlsRecordReaderTest, ResetClearsPendingOnly) {
 }
 
 TEST(TlsRecordReaderTest, LegacyVersionsParsedNotRejected) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         for (const std::uint16_t version: {0x0301, 0x0302, 0x0303}) {
@@ -373,7 +373,7 @@ TEST(TlsRecordReaderTest, LegacyVersionsParsedNotRejected) {
 }
 
 TEST(TlsRecordReaderTest, ContiguousAndSpannedRecordsInterleave) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsRecordReader reader;
 
         // One buffer holding a complete record plus the head of the next one.
@@ -386,17 +386,17 @@ TEST(TlsRecordReaderTest, ContiguousAndSpannedRecordsInterleave) {
 
         const auto r1 = reader.next();
         ASSERT_EQ(r1.status, TlsRecordReader::Result::Status::Ok);
-        EXPECT_EQ(r1.record.payload.size(), 1u);
+        EXPECT_EQ(r1.record.payload.size(), 1U);
         EXPECT_EQ(contiguous_view_of(r1.record), "complete");
         EXPECT_EQ(reader.pending_bytes(), bytes.size() - first.size());
 
         ASSERT_TRUE(reader.feed(make_buf(second.data() + 10, second.size() - 10)));
         auto r2 = reader.next();
         ASSERT_EQ(r2.status, TlsRecordReader::Result::Status::Ok);
-        EXPECT_EQ(r2.record.payload.size(), 2u);
+        EXPECT_EQ(r2.record.payload.size(), 2U);
         EXPECT_EQ(r2.record.contiguous_payload(), nullptr);
         EXPECT_EQ(drain_payload(r2.record), std::vector<std::uint8_t>(second.begin() + 5, second.end()));
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
 
         // Back to a single-span record aligned in its own node.
         ASSERT_TRUE(reader.feed(make_buf(make_record(TlsContentType::Alert, 0x0303, "\x02\x28"))));
@@ -404,7 +404,7 @@ TEST(TlsRecordReaderTest, ContiguousAndSpannedRecordsInterleave) {
         ASSERT_EQ(r3.status, TlsRecordReader::Result::Status::Ok);
         EXPECT_EQ(r3.record.type, TlsContentType::Alert);
         EXPECT_EQ(contiguous_view_of(r3.record), "\x02\x28");
-        EXPECT_EQ(reader.pending_bytes(), 0u);
+        EXPECT_EQ(reader.pending_bytes(), 0U);
     });
 }
 

@@ -80,7 +80,7 @@ TEST(TextEncoderTest, EncodesMetadataEscapesLabelsAndGaugeReductionsInOrder) {
 }
 
 TEST(TextEncoderTest, EncodesCumulativeHistogramAndExactDurationSeconds) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         RegistryData data({});
         auto histogram = family(MetricType::Histogram, "request_duration_seconds", "Request duration.", 0);
         histogram.histogram_unit = HistogramUnit::Microseconds;
@@ -126,7 +126,7 @@ TEST(TextEncoderTest, FixedBufferFailureDoesNotCommitPartialOutput) {
 }
 
 TEST(TextEncoderTest, ChainHonorsOutputLimitAndRejectsZeroChunk) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         RegistryData data({});
         data.families.push_back(family(MetricType::Counter, "requests_total", "Requests", 0));
         data.word_count = 1;
@@ -145,7 +145,7 @@ TEST(TextEncoderTest, ChainHonorsOutputLimitAndRejectsZeroChunk) {
 }
 
 TEST(TextEncoderTest, EmptyRegistryProducesReadableEmptyChain) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         RegistryData data({});
 
         auto encoded = fiber::prometheus::detail::encode_text_chain(data, {});

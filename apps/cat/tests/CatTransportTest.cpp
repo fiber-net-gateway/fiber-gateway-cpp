@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <future>
 #include <memory>
 #include <netinet/in.h>
@@ -78,7 +79,7 @@ fiber::async::Task<void> exercise_transport(CatClientCore &core, fiber::net::Tcp
 
     if (scenario == Scenario::BufferedHalfClose || scenario == Scenario::Healthy) {
         // Exceed the read pump budget and send a second burst after it becomes idle.
-        std::array<char, 256 * 1024> bytes{};
+        std::array<char, static_cast<size_t>(256 * 1024)> bytes{};
         for (int burst = 0; burst < 2; ++burst) {
             std::size_t offset = 0;
             while (offset < bytes.size()) {
@@ -105,13 +106,13 @@ fiber::async::Task<void> exercise_transport(CatClientCore &core, fiber::net::Tcp
     }
 
     if (scenario == Scenario::PartialReset) {
-        auto large = fiber::mem::IoBuf::allocate(8 * 1024 * 1024);
+        auto large = fiber::mem::IoBuf::allocate(static_cast<std::size_t>(8 * 1024 * 1024));
         if (!large) {
             ADD_FAILURE() << "frame allocation failed";
             co_return;
         }
         std::fill_n(large.writable_data(), 8 * 1024 * 1024, 1);
-        large.commit(8 * 1024 * 1024);
+        large.commit(static_cast<std::size_t>(8 * 1024 * 1024));
         EXPECT_EQ(core.submit_encoded(std::move(large)), fiber::cat::detail::SubmitResult::Submitted);
         auto complete = fiber::mem::IoBuf::allocate(8);
         if (!complete) {
@@ -205,8 +206,8 @@ fiber::async::DetachedTask run_transport(fiber::event::EventLoop &loop, Scenario
     options.reconnect_max_delay = 80ms;
     options.collector_write_timeout = 100ms;
     options.shutdown_drain_timeout = 0ms;
-    options.max_queued_bytes = 16 * 1024 * 1024;
-    options.max_send_bytes_per_pump = 16 * 1024 * 1024;
+    options.max_queued_bytes = static_cast<std::size_t>(16 * 1024 * 1024);
+    options.max_send_bytes_per_pump = static_cast<std::size_t>(16 * 1024 * 1024);
     auto core = std::make_shared<CatClientCore>(loop, std::move(*config), options, nullptr);
     if (core->start()) {
         co_await exercise_transport(*core, listener, scenario);

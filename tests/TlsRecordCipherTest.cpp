@@ -172,27 +172,36 @@ struct SuiteVectors {
 
 const std::vector<SuiteVectors> &tls13_suites() {
     static const std::vector<SuiteVectors> suites = {
-            {TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13,
-             key_iv("3fce516009c21727d0f2e4e86ee403bc"), key_iv("5d313eb2671276ee13000b30")},
-            {TlsCipherSuiteId::TlsAes256GcmSha384, TlsRecordProtectionKind::Tls13,
-             key_iv("dbfaa693d1762c5b666af5d950258d019f02283b6c9c07efc26bb9f2ac92e356"),
-             key_iv("5bd3c71b836e0b76bb73265f")},
-            {TlsCipherSuiteId::TlsChacha20Poly1305Sha256, TlsRecordProtectionKind::Tls13,
-             key_iv("17422dda596ed5d9acd890e3c63f50519f02283b6c9c07efc26bb9f2ac92e356"),
-             key_iv("5b78923dee08579033e523d9")},
+            {.suite = TlsCipherSuiteId::TlsAes128GcmSha256,
+             .kind = TlsRecordProtectionKind::Tls13,
+             .key = key_iv("3fce516009c21727d0f2e4e86ee403bc"),
+             .iv = key_iv("5d313eb2671276ee13000b30")},
+            {.suite = TlsCipherSuiteId::TlsAes256GcmSha384,
+             .kind = TlsRecordProtectionKind::Tls13,
+             .key = key_iv("dbfaa693d1762c5b666af5d950258d019f02283b6c9c07efc26bb9f2ac92e356"),
+             .iv = key_iv("5bd3c71b836e0b76bb73265f")},
+            {.suite = TlsCipherSuiteId::TlsChacha20Poly1305Sha256,
+             .kind = TlsRecordProtectionKind::Tls13,
+             .key = key_iv("17422dda596ed5d9acd890e3c63f50519f02283b6c9c07efc26bb9f2ac92e356"),
+             .iv = key_iv("5b78923dee08579033e523d9")},
     };
     return suites;
 }
 
 const std::vector<SuiteVectors> &tls12_suites() {
     static const std::vector<SuiteVectors> suites = {
-            {TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsRecordProtectionKind::Tls12,
-             key_iv("0102030405060708090a0b0c0d0e0f10"), key_iv("11121314")},
-            {TlsCipherSuiteId::EcdheRsaAes256GcmSha384, TlsRecordProtectionKind::Tls12,
-             key_iv("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"), key_iv("11121314")},
-            {TlsCipherSuiteId::EcdheRsaChacha20Poly1305, TlsRecordProtectionKind::Tls12,
-             key_iv("21022dda596ed5d9acd890e3c63f5051a1b2c3d4e5f60718293a4b5c6d7e8f90"),
-             key_iv("1112131415161718191a1b1c")}, // RFC 7905: 12-byte implicit IV
+            {.suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256,
+             .kind = TlsRecordProtectionKind::Tls12,
+             .key = key_iv("0102030405060708090a0b0c0d0e0f10"),
+             .iv = key_iv("11121314")},
+            {.suite = TlsCipherSuiteId::EcdheRsaAes256GcmSha384,
+             .kind = TlsRecordProtectionKind::Tls12,
+             .key = key_iv("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+             .iv = key_iv("11121314")},
+            {.suite = TlsCipherSuiteId::EcdheRsaChacha20Poly1305,
+             .kind = TlsRecordProtectionKind::Tls12,
+             .key = key_iv("21022dda596ed5d9acd890e3c63f5051a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+             .iv = key_iv("1112131415161718191a1b1c")}, // RFC 7905: 12-byte implicit IV
     };
     return suites;
 }
@@ -250,7 +259,7 @@ TEST(TlsRecordCipherInit, RejectsBadPairingAndLengths) {
         EXPECT_TRUE(good.initialized());
         EXPECT_EQ(good.suite(), TlsCipherSuiteId::TlsAes128GcmSha256);
         EXPECT_EQ(good.kind(), TlsRecordProtectionKind::Tls13);
-        EXPECT_EQ(good.sequence(), 0u);
+        EXPECT_EQ(good.sequence(), 0U);
     });
 }
 
@@ -321,7 +330,7 @@ TEST_P(TlsRecordCipherKat, OpenRestoresPlaintextAndType) {
         ASSERT_EQ(r.status, TlsRecordCipher::Status::Ok);
         EXPECT_EQ(r.plain_len, plain.size());
         EXPECT_EQ(std::vector<std::uint8_t>(out.begin(), out.begin() + r.plain_len), plain);
-        EXPECT_EQ(second.sequence(), 1u);
+        EXPECT_EQ(second.sequence(), 1U);
     });
 }
 
@@ -334,37 +343,37 @@ TEST(TlsRecordCipherSizes, BoundariesPerKind) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         TlsRecordCipher c13;
         init_cipher(c13, tls13_suites()[0]);
-        EXPECT_EQ(c13.seal_output_size(0), 17u);
-        EXPECT_EQ(c13.seal_output_size(1), 18u);
+        EXPECT_EQ(c13.seal_output_size(0), 17U);
+        EXPECT_EQ(c13.seal_output_size(1), 18U);
         EXPECT_EQ(c13.seal_output_size(fiber::tls::kTlsMaxPlaintextSize), fiber::tls::kTlsMaxPlaintextSize + 17);
         // 1.3 open capacity includes the type + padding workspace; the plaintext
         // itself can be smaller (OpenResult::plain_len).
-        EXPECT_EQ(c13.open_output_size(17), 1u);
-        EXPECT_EQ(c13.open_output_size(17 + 32), 33u);
-        EXPECT_EQ(c13.min_ciphertext_size(), 17u);
-        EXPECT_EQ(c13.max_ciphertext_size(), fiber::tls::kTlsMaxPlaintextSize + 256u);
+        EXPECT_EQ(c13.open_output_size(17), 1U);
+        EXPECT_EQ(c13.open_output_size(17 + 32), 33U);
+        EXPECT_EQ(c13.min_ciphertext_size(), 17U);
+        EXPECT_EQ(c13.max_ciphertext_size(), fiber::tls::kTlsMaxPlaintextSize + 256U);
 
         TlsRecordCipher c12;
         init_cipher(c12, tls12_suites()[1]);
-        EXPECT_EQ(c12.seal_output_size(0), 24u);
+        EXPECT_EQ(c12.seal_output_size(0), 24U);
         EXPECT_EQ(c12.seal_output_size(fiber::tls::kTlsMaxPlaintextSize), fiber::tls::kTlsMaxPlaintextSize + 24);
-        EXPECT_EQ(c12.open_output_size(24), 0u); // exact for 1.2
-        EXPECT_EQ(c12.open_output_size(100), 76u);
-        EXPECT_EQ(c12.min_ciphertext_size(), 24u);
-        EXPECT_EQ(c12.max_ciphertext_size(), fiber::tls::kTlsMaxPlaintextSize + 2048u);
-        EXPECT_EQ(c13.explicit_nonce_len(), 0u);
-        EXPECT_EQ(c12.explicit_nonce_len(), 8u); // RFC 5288 GCM form
+        EXPECT_EQ(c12.open_output_size(24), 0U); // exact for 1.2
+        EXPECT_EQ(c12.open_output_size(100), 76U);
+        EXPECT_EQ(c12.min_ciphertext_size(), 24U);
+        EXPECT_EQ(c12.max_ciphertext_size(), fiber::tls::kTlsMaxPlaintextSize + 2048U);
+        EXPECT_EQ(c13.explicit_nonce_len(), 0U);
+        EXPECT_EQ(c12.explicit_nonce_len(), 8U); // RFC 5288 GCM form
 
         // 1.2 ChaCha20 (RFC 7905 §2): no wire nonce — overhead is the tag alone.
         TlsRecordCipher cc12;
         init_cipher(cc12, tls12_suites()[2]);
-        EXPECT_EQ(cc12.explicit_nonce_len(), 0u);
-        EXPECT_EQ(cc12.seal_output_size(0), 16u);
+        EXPECT_EQ(cc12.explicit_nonce_len(), 0U);
+        EXPECT_EQ(cc12.seal_output_size(0), 16U);
         EXPECT_EQ(cc12.seal_output_size(fiber::tls::kTlsMaxPlaintextSize), fiber::tls::kTlsMaxPlaintextSize + 16);
-        EXPECT_EQ(cc12.open_output_size(16), 0u);
-        EXPECT_EQ(cc12.open_output_size(100), 84u);
-        EXPECT_EQ(cc12.min_ciphertext_size(), 16u);
-        EXPECT_EQ(cc12.max_ciphertext_size(), fiber::tls::kTlsMaxPlaintextSize + 2048u);
+        EXPECT_EQ(cc12.open_output_size(16), 0U);
+        EXPECT_EQ(cc12.open_output_size(100), 84U);
+        EXPECT_EQ(cc12.min_ciphertext_size(), 16U);
+        EXPECT_EQ(cc12.max_ciphertext_size(), fiber::tls::kTlsMaxPlaintextSize + 2048U);
     });
 }
 
@@ -395,7 +404,7 @@ TEST(TlsRecordCipherRoundTrip, SequenceAdvanceAndCiphertextUniqueness) {
 
                     if (wire_nonce_len(v) == 8) {
                         // 1.2 GCM: the explicit nonce is BE64(seq) on the wire
-                        EXPECT_EQ(wire[0], 0u);
+                        EXPECT_EQ(wire[0], 0U);
                         EXPECT_EQ(wire[7], static_cast<std::uint8_t>(seq));
                     }
 
@@ -424,7 +433,7 @@ TEST(TlsRecordCipherRoundTrip, AuthFailDoesNotAdvanceSequence) {
         const auto r = cipher.open(TlsContentType::ApplicationData, 0x0303, static_cast<std::uint16_t>(wire.size()),
                                    wire, out);
         EXPECT_EQ(r.status, TlsRecordCipher::Status::AuthFail);
-        EXPECT_EQ(cipher.sequence(), 0u);
+        EXPECT_EQ(cipher.sequence(), 0U);
     });
 }
 
@@ -827,7 +836,7 @@ TEST(Tls12Failure, LengthBoundsAndReplayAreRejected) {
 // ------------------------------------- §10.7: reader -> cipher -> writer
 
 TEST(TlsRecordCipherEndToEnd, Tls13InPlaceChainOrchestration) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         using fiber::mem::IoBuf;
         using fiber::mem::IoBufChain;
         using fiber::mem::IoBufNodePool;
@@ -856,7 +865,7 @@ TEST(TlsRecordCipherEndToEnd, Tls13InPlaceChainOrchestration) {
         IoBuf *back = payload.back();
         ASSERT_NE(back, nullptr);
         ASSERT_TRUE(back->unique());
-        ASSERT_GE(back->tailroom(), 17u);
+        ASSERT_GE(back->tailroom(), 17U);
         const auto s = seal_side.seal(
                 TlsContentType::ApplicationData, std::span<const std::uint8_t>(back->readable_data(), back->readable()),
                 std::span<std::uint8_t>(back->readable_data(), back->readable() + back->tailroom()));
@@ -896,7 +905,7 @@ TEST(TlsRecordCipherEndToEnd, Tls13InPlaceChainOrchestration) {
 }
 
 TEST(TlsRecordCipherEndToEnd, Tls12FreshNodeOrchestration) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         using fiber::mem::IoBuf;
         using fiber::mem::IoBufChain;
         using fiber::mem::IoBufNodePool;
@@ -1054,7 +1063,7 @@ TEST(TlsRecordCipherScatter, OpenScatterRestoresPlaintext) {
             // the wire (a different buffer — the cross-node shape).
             TlsRecordCipher in_place;
             init_cipher(in_place, v);
-            std::vector<std::uint8_t> staged(wire.begin() + off, wire.end());
+            std::vector<std::uint8_t> staged(wire.begin() + static_cast<std::ptrdiff_t>(off), wire.end());
             const auto r2 = in_place.open_scatter(type, 0x0303, length, nonce,
                                                   std::span<const std::uint8_t>(staged.data(), body_len),
                                                   std::span<const std::uint8_t>(staged.data() + body_len, 16),
@@ -1097,7 +1106,7 @@ TEST(TlsRecordCipherScatter, EmptyPlaintextCrossFormRoundTrip) {
                                        std::span<std::uint8_t>(wire.data() + open_off, wire.size() - open_off));
             ASSERT_EQ(o.status, TlsRecordCipher::Status::Ok);
             EXPECT_EQ(o.inner_type, type);
-            EXPECT_EQ(o.plain_len, 0u);
+            EXPECT_EQ(o.plain_len, 0U);
 
             // And the mirror: regular seal, scatter open. Fresh opener — the one
             // above already consumed sequence 0.
@@ -1115,7 +1124,7 @@ TEST(TlsRecordCipherScatter, EmptyPlaintextCrossFormRoundTrip) {
                                                  std::span<const std::uint8_t>(wire2.data() + off + body_len, 16),
                                                  std::span<std::uint8_t>(wire2.data(), wire2.size()));
             ASSERT_EQ(o2.status, TlsRecordCipher::Status::Ok);
-            EXPECT_EQ(o2.plain_len, 0u);
+            EXPECT_EQ(o2.plain_len, 0U);
             EXPECT_EQ(o2.inner_type, type);
         }
     });
@@ -1150,7 +1159,7 @@ TEST(TlsRecordCipherScatter, AuthFailAndMalformed) {
                                       std::span<const std::uint8_t>(bad.data() + body_len, 16), dst)
                           .status,
                   TlsRecordCipher::Status::AuthFail);
-        EXPECT_EQ(opener.sequence(), 0u); // failures never advance
+        EXPECT_EQ(opener.sequence(), 0U); // failures never advance
 
         // Out-of-range lengths are Malformed BEFORE any buffer contract assert
         // (the tiny spans below must not trip the capacity checks).
@@ -1178,15 +1187,17 @@ TEST(TlsRecordCipherMove, StealsSequenceAndNeutralizesSource) {
             const auto first = ramp(32, 0x40);
             std::vector<std::uint8_t> wire(cipher.seal_output_size(first.size()));
             ASSERT_EQ(cipher.seal(TlsContentType::Handshake, first, wire).status, TlsRecordCipher::Status::Ok);
-            ASSERT_EQ(cipher.sequence(), 1u);
+            ASSERT_EQ(cipher.sequence(), 1U);
 
             // Move-construct: state travels, source goes inert.
             TlsRecordCipher moved(std::move(cipher));
             EXPECT_TRUE(moved.initialized());
-            EXPECT_EQ(moved.sequence(), 1u);
+            EXPECT_EQ(moved.sequence(), 1U);
             EXPECT_EQ(moved.suite(), v.suite);
+            // NOLINTBEGIN(bugprone-use-after-move, clang-analyzer-cplusplus.Move) moved-from inspection is the point
             EXPECT_FALSE(cipher.initialized());
-            EXPECT_EQ(cipher.sequence(), 0u);
+            EXPECT_EQ(cipher.sequence(), 0U);
+            // NOLINTEND(bugprone-use-after-move, clang-analyzer-cplusplus.Move)
 
             // The moved instance continues the epoch: its record at seq=1 must
             // match the hand-built expected wire — proof the key bytes traveled.
@@ -1199,11 +1210,13 @@ TEST(TlsRecordCipherMove, StealsSequenceAndNeutralizesSource) {
             // the source's place.
             TlsRecordCipher target;
             init_cipher(target, tls13_suites()[1]);
-            ASSERT_EQ(target.sequence(), 0u);
+            ASSERT_EQ(target.sequence(), 0U);
             target = std::move(moved);
             EXPECT_TRUE(target.initialized());
-            EXPECT_EQ(target.sequence(), 2u);
+            EXPECT_EQ(target.sequence(), 2U);
+            // NOLINTBEGIN(bugprone-use-after-move, clang-analyzer-cplusplus.Move) moved-from inspection is the point
             EXPECT_FALSE(moved.initialized());
+            // NOLINTEND(bugprone-use-after-move, clang-analyzer-cplusplus.Move)
 
             // The moved-from instances are re-initializable (single-shot init
             // contract applies to the fresh state) and destroy safely at scope end.

@@ -245,7 +245,8 @@ AbiResult url_build_query_fn(void * /*userdata*/, const Library::HostCallFrame &
     if (heap == nullptr) {
         return AbiResult::abort(ScriptAbortReason::InvalidState);
     }
-    QueryPairSource src{obj, gc_object_first_entry(obj), nullptr, 0, std::string{}};
+    QueryPairSource src{
+            .obj = obj, .entry = gc_object_first_entry(obj), .arr = nullptr, .arr_idx = 0, .key_buf = std::string{}};
     std::string out;
     fiber::util::form_build_query(out, src);
     JsValue result = JsValue::make_string(*heap, out.data(), out.size());

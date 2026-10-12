@@ -69,14 +69,14 @@ struct BusyResetGuard {
 
 // Wire-read chunk for the handshake engine feeds: large enough that a full
 // flight lands in one try_read, one node's worth of memory.
-constexpr std::size_t kReadChunk = 32 * 1024;
+constexpr std::size_t kReadChunk = static_cast<const std::size_t>(32 * 1024);
 // Connected-phase wire buffer (feature/tls/12 §2): sized from the caller's
 // read size plus record overhead, clamped to [min, max]. The minimum holds
 // the largest record the framer accepts, so a carried incomplete record
 // always completes in the next buffer; both bounds leave room for IoBuf's
 // control block so the allocation lands exactly on a size class.
-constexpr std::size_t kInboundMaxCapacity = 64 * 1024 - mem::kIoBufControlBlockSize;
-constexpr std::size_t kInboundMinCapacity = 20 * 1024 - mem::kIoBufControlBlockSize;
+constexpr std::size_t kInboundMaxCapacity = (static_cast<std::size_t>(64 * 1024)) - mem::kIoBufControlBlockSize;
+constexpr std::size_t kInboundMinCapacity = (static_cast<std::size_t>(20 * 1024)) - mem::kIoBufControlBlockSize;
 constexpr std::size_t kInboundSlack = 200; // ~9 TLS 1.3 records' header + tag + type
 static_assert(kInboundMinCapacity >= tls::kTlsRecordHeaderSize + tls::kTlsMaxCiphertextRecordSize);
 constexpr int kMaxIov = 16;
@@ -85,7 +85,7 @@ constexpr std::size_t kRecordPlaintextMax = tls::kTlsMaxPlaintextSize;
 // Plaintext sealed per try_write before the one flush (feature/tls/13): ~4
 // records, so a chain of small nodes (H2's 9-byte frame headers between
 // payloads) costs one sendmsg per batch instead of one per record.
-constexpr std::size_t kWriteBatchBytes = 64 * 1024;
+constexpr std::size_t kWriteBatchBytes = static_cast<const std::size_t>(64 * 1024);
 
 // Read-only walk over a chain's readable bytes: the current node and the
 // offset into its readable region. Empty nodes are skipped.
@@ -236,6 +236,8 @@ void TlsStreamFd::close() {
         // would pass the truncated stream off as complete.
         if (write_error_ == fiber::common::IoErr::None) {
             if (!conn_->failed() && !conn_->peer_closed()) {
+                // Best-effort close_notify: a failure here must not mask the close path.
+                // NOLINTNEXTLINE(bugprone-unused-return-value)
                 (void) conn_->close_notify();
             }
             fiber::event::IoEvent event = fiber::event::IoEvent::None;
@@ -279,6 +281,8 @@ fiber::common::IoErr TlsStreamFd::detach_for_handover() noexcept {
     // Only writev users hand over (the H1 pools), and writev returns once its
     // batch is on the wire: nothing may still be draining.
     FIBER_ASSERT(out_pending_.empty());
+    // Positive form states the invariant directly.
+    // NOLINTNEXTLINE(readability-simplify-boolean-expr)
     FIBER_ASSERT(write_callback_ == nullptr && !write_subscribed_);
     return stream_fd_.detach_for_handover();
 }
@@ -534,7 +538,7 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, s
 
     // Frame-local staging, declared ahead of the engine that borrows all of
     // it: the selection, the ticket adapters and the source die after it.
-    ServerSelection selection{param};
+    ServerSelection selection{.param = param};
     tls::TlsServerConfig &cfg = selection.cfg;
     if (param.trust_store != nullptr) {
         cfg.client_trust = &param.trust_store->tls_store();
@@ -610,7 +614,7 @@ StreamFd::WaitReadableAwaiter TlsStreamFd::wait_readable(std::chrono::millisecon
 }
 
 TlsStreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
-    return WaitWritableAwaiter(*this, timeout);
+    return {*this, timeout};
 }
 
 TlsStreamFd::WaitWritableAwaiter::WaitWritableAwaiter(TlsStreamFd &stream, std::chrono::milliseconds timeout) noexcept :
@@ -697,6 +701,8 @@ void TlsStreamFd::WaitWritableAwaiter::cancel_timer() noexcept {
     if (!timer_entry_.is_in_heap()) {
         return;
     }
+    // Positive form states the invariant directly.
+    // NOLINTNEXTLINE(readability-simplify-boolean-expr)
     FIBER_ASSERT(loop_ != nullptr && loop_->in_loop());
     loop_->cancel<WaitWritableAwaiter, &WaitWritableAwaiter::timer_entry_>(*this);
 }
@@ -726,6 +732,8 @@ fiber::common::IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem
             return bytes;
         }
         std::size_t got = 0;
+        // conn_ engagement is checked at function entry; helpers cannot reset it.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         const auto status = conn_->take(size, out, got);
         switch (status) {
             case tls::TlsConnection::ReadStatus::Ok:
@@ -793,6 +801,8 @@ fiber::common::IoErr TlsStreamFd::handshake_step(Engine &engine, fiber::event::I
         // output flushed, then done (a leftover-fed record violation
         // surfacing as conn_->failed() reports Invalid here).
         if (handshake_done_) {
+            // handshake_done_ implies an engaged conn_ (set together with it).
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
             return conn_->failed() ? fiber::common::IoErr::Invalid : fiber::common::IoErr::None;
         }
 
@@ -914,7 +924,7 @@ fiber::common::IoErr TlsStreamFd::seal_write_batch(const mem::IoBufChain &buf, s
         // Zero-copy groups take whole records, at least one, within the
         // batch's remaining room.
         const std::size_t room = kWriteBatchBytes - batch_len;
-        const std::size_t record_room = std::max(kRecordPlaintextMax, room - room % kRecordPlaintextMax);
+        const std::size_t record_room = std::max(kRecordPlaintextMax, room - (room % kRecordPlaintextMax));
         const std::span<const std::uint8_t> segment = cursor.segment();
         std::span<const std::uint8_t> group;
         if (cursor.last_segment()) {
@@ -922,10 +932,12 @@ fiber::common::IoErr TlsStreamFd::seal_write_batch(const mem::IoBufChain &buf, s
         } else if (segment.size() >= kRecordPlaintextMax) {
             // Whole records straight from the node; its tail joins the next
             // group so it does not become a short record of its own.
-            group = segment.first(std::min(segment.size() - segment.size() % kRecordPlaintextMax, record_room));
+            group = segment.first(std::min(segment.size() - (segment.size() % kRecordPlaintextMax), record_room));
         } else {
             group = {scratch.data(), cursor.copy_out(scratch)};
         }
+        // conn_ engagement is a write-path precondition (checked by callers).
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         auto sealed = conn_->write(group);
         if (!sealed) {
             // Invalid (a terminal connection) only ever fails the first group,

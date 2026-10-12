@@ -30,7 +30,7 @@ struct LocalIpv4Selection {
     std::uint8_t interface_name_size = 0;
 
     [[nodiscard]] std::string_view interface_name_view() const noexcept {
-        return std::string_view(interface_name.data(), interface_name_size);
+        return {interface_name.data(), interface_name_size};
     }
 };
 

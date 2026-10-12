@@ -11,10 +11,12 @@ namespace {
 
 // PEM material for one source as contiguous text. Content sources copy the
 // string; File sources read the whole file (bounded sanity check included).
+// std::string growth may throw bad_alloc; fatal by house policy (no-exceptions).
+// NOLINTNEXTLINE(bugprone-exception-escape)
 common::IoErr read_pem_text(const TlsPemSource &source, std::string &out) noexcept {
     switch (source.kind) {
         case TlsPemSourceKind::Content:
-            if (source.value.empty() || source.value.size() > (1u << 22)) {
+            if (source.value.empty() || source.value.size() > (1U << 22)) {
                 return common::IoErr::Invalid;
             }
             out.assign(source.value);
@@ -29,13 +31,17 @@ common::IoErr read_pem_text(const TlsPemSource &source, std::string &out) noexce
             }
             char chunk[4096];
             std::size_t got = 0;
+            // Read-all loop; the checker's loop-state modeling imagines a re-entry
+            // after EOF that the loop condition prevents.
+            // NOLINTBEGIN(clang-analyzer-unix.Stream)
             while ((got = std::fread(chunk, 1, sizeof chunk, file)) > 0) {
                 out.append(chunk, got);
-                if (out.size() > (1u << 22)) {
+                if (out.size() > (1U << 22)) {
                     break;
                 }
             }
-            const bool ok = std::ferror(file) == 0 && !out.empty() && out.size() <= (1u << 22);
+            const bool ok = std::ferror(file) == 0 && !out.empty() && out.size() <= (1U << 22);
+            // NOLINTEND(clang-analyzer-unix.Stream)
             std::fclose(file);
             return ok ? common::IoErr::None : common::IoErr::Invalid;
         }
@@ -53,6 +59,8 @@ TlsCredential::TlsCredential(const TlsCredential &other) noexcept : impl_(other.
     }
 }
 
+// Retain-before-release keeps self-assignment balanced without a this==&other guard.
+// NOLINTNEXTLINE(bugprone-unhandled-self-assignment)
 TlsCredential &TlsCredential::operator=(const TlsCredential &other) noexcept {
     // Retain before releasing: self-assignment and two handles to the same
     // material both stay balanced.

@@ -20,8 +20,8 @@ constexpr std::uint8_t kFlagPriority = 0x20;
 } // namespace
 
 const Http2HpackEncoder::OutputOps Http2HeadersFrameEncoder::kOutputOps{
-        &Http2HeadersFrameEncoder::acquire_output,
-        &Http2HeadersFrameEncoder::commit_output,
+        .acquire = &Http2HeadersFrameEncoder::acquire_output,
+        .commit = &Http2HeadersFrameEncoder::commit_output,
 };
 
 Http2HeadersFrameEncoder::Http2HeadersFrameEncoder(Options options) noexcept :

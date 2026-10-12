@@ -116,7 +116,9 @@ private:
         std::string path;
     };
 
-    [[nodiscard]] bool initialize_rotation(int &system_error) noexcept;
+    // Precondition: `rotation` is the engaged rotation_ options (the single
+    // caller checks before entering).
+    [[nodiscard]] bool initialize_rotation(const FileRotationOptions &rotation, int &system_error) noexcept;
     [[nodiscard]] int open_flags() const noexcept;
     [[nodiscard]] bool validate_open_file(int fd, std::uint64_t &active_bytes, int &system_error) const noexcept;
     [[nodiscard]] bool recover_incomplete_tail(int fd, std::uint64_t file_size, std::uint64_t &active_bytes,

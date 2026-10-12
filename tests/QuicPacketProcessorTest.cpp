@@ -63,7 +63,7 @@ fiber::quic::QuicConnectionId cid_from_hex(std::string_view value) {
 
 fiber::net::SocketAddress loopback(std::uint16_t port) { return {fiber::net::IpAddress::loopback_v4(), port}; }
 
-void destroy_test_stream(void *, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
+void destroy_test_stream(void * /*unused*/, fiber::quic::QuicStream &stream) noexcept { delete &stream; }
 
 fiber::quic::QuicStream::Lease create_stream(void * /*owner*/, std::uint64_t /*stream_id*/) noexcept {
     return fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
@@ -177,7 +177,8 @@ struct ApplicationPacketTestContext {
         spec.payload_len = payload_len;
         spec.payload_frame_count = frame_count;
         spec.payload_ack_eliciting = true;
-        return fiber::quic::quic_encode_packet(client, spec, {encode_plaintext.data(), encode_plaintext.size()},
+        return fiber::quic::quic_encode_packet(client, spec,
+                                               {.data = encode_plaintext.data(), .capacity = encode_plaintext.size()},
                                                datagram.data(), datagram.size());
     }
 
@@ -205,7 +206,6 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
         fiber::quic::QuicWriteCursor payload_out(payload.data(), payload.size());
         auto payload_len = fiber::quic::quic_create_output_frame(&payload_out, frame);
         ASSERT_TRUE(payload_len.has_value());
-        fiber::quic::quic_output_frame_release_data(frame);
 
         std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
         fiber::quic::QuicPacketHeader packet{};
@@ -313,8 +313,9 @@ TEST(QuicPacketProcessorTest, MalformedInitialTailIsRejectedBeforeStateCommit) {
         spec.payload_frame_count = 2;
         spec.payload_ack_eliciting = true;
         spec.min_packet_len = fiber::quic::kMinInitialDatagramSize;
-        auto encoded = fiber::quic::quic_encode_packet(client, spec, {encode_plaintext.data(), encode_plaintext.size()},
-                                                       datagram.data(), datagram.size());
+        auto encoded = fiber::quic::quic_encode_packet(
+                client, spec, {.data = encode_plaintext.data(), .capacity = encode_plaintext.size()}, datagram.data(),
+                datagram.size());
         ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
         auto received = received_datagram(datagram.data(), encoded->packet_len);
         auto result = fiber::quic::quic_process_datagram(server, received, 0);
@@ -427,8 +428,9 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
         spec.dcid = server_cid;
         spec.frames = &frame;
         spec.frame_count = 1;
-        auto encoded = fiber::quic::quic_encode_packet(client, spec, {encode_plaintext.data(), encode_plaintext.size()},
-                                                       datagram.data(), datagram.size());
+        auto encoded = fiber::quic::quic_encode_packet(
+                client, spec, {.data = encode_plaintext.data(), .capacity = encode_plaintext.size()}, datagram.data(),
+                datagram.size());
         ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
         auto received = received_datagram(datagram.data(), encoded->packet_len);
         auto first_packet = fiber::quic::quic_parse_packet_header(received.data, received.len,
@@ -556,7 +558,8 @@ TEST(QuicPacketProcessorTest, HandshakeDoneConfirmsClientHandshake) {
         spec.payload_frame_count = 1;
         spec.payload_ack_eliciting = true;
         auto encoded = fiber::quic::quic_encode_packet(
-                context.server, spec, {context.encode_plaintext.data(), context.encode_plaintext.size()},
+                context.server, spec,
+                {.data = context.encode_plaintext.data(), .capacity = context.encode_plaintext.size()},
                 context.datagram.data(), context.datagram.size());
         ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
 
@@ -834,8 +837,9 @@ TEST(QuicPacketProcessorTest, ConnectionCloseDuringGracefulShutdownEntersDrainin
         spec.dcid = server_cid;
         spec.frames = frames.data();
         spec.frame_count = frames.size();
-        auto encoded = fiber::quic::quic_encode_packet(client, spec, {encode_plaintext.data(), encode_plaintext.size()},
-                                                       datagram.data(), datagram.size());
+        auto encoded = fiber::quic::quic_encode_packet(
+                client, spec, {.data = encode_plaintext.data(), .capacity = encode_plaintext.size()}, datagram.data(),
+                datagram.size());
         ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
         auto received = received_datagram(datagram.data(), encoded->packet_len);
         auto result =
@@ -888,8 +892,9 @@ TEST(QuicPacketProcessorTest, PathChallengeQueuesPathResponse) {
         spec.dcid = server_cid;
         spec.frames = &frame;
         spec.frame_count = 1;
-        auto encoded = fiber::quic::quic_encode_packet(client, spec, {encode_plaintext.data(), encode_plaintext.size()},
-                                                       datagram.data(), datagram.size());
+        auto encoded = fiber::quic::quic_encode_packet(
+                client, spec, {.data = encode_plaintext.data(), .capacity = encode_plaintext.size()}, datagram.data(),
+                datagram.size());
         ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
         auto received = received_datagram(datagram.data(), encoded->packet_len);
         auto result =

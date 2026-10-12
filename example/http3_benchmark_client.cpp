@@ -53,7 +53,7 @@ constexpr auto kRequestFailureBackoff = 1ms;
 
 volatile std::sig_atomic_t g_stop_requested = 0;
 
-void on_signal(int) { g_stop_requested = 1; }
+void on_signal(int /*unused*/) { g_stop_requested = 1; }
 
 enum class LoadMode : std::uint8_t {
     Closed,
@@ -83,7 +83,7 @@ constexpr std::size_t kRequestPhaseCount = static_cast<std::size_t>(RequestPhase
 constexpr std::size_t kIoErrCount = static_cast<std::size_t>(fiber::common::IoErr::Unknown) + 1;
 constexpr std::size_t kOutcomeCount = 4;
 constexpr std::size_t kStatusClassCount = 6;
-constexpr std::size_t kMaxLaneCount = 1024 * 1024;
+constexpr std::size_t kMaxLaneCount = static_cast<std::size_t>(1024 * 1024);
 
 struct Target {
     std::string url;
@@ -240,7 +240,7 @@ struct BenchmarkOptions {
         multiplier = 1000;
         text.remove_suffix(1);
     } else if (text.ends_with('m')) {
-        multiplier = 60 * 1000;
+        multiplier = static_cast<std::uint64_t>(60 * 1000);
         text.remove_suffix(1);
     } else {
         return std::nullopt;
@@ -590,7 +590,7 @@ void print_usage(std::ostream &out) {
                 error = "invalid --expect-bytes";
                 return false;
             }
-            options.expected_bytes = *parsed;
+            options.expected_bytes = parsed;
         } else if (arg == "--connect-to") {
             auto value = take(arg);
             if (!value) {
@@ -691,7 +691,7 @@ public:
             return 0;
         }
         const std::uint64_t rank = std::max<std::uint64_t>(
-                1, static_cast<std::uint64_t>(fraction * static_cast<double>(count_) + 0.999999));
+                1, static_cast<std::uint64_t>((fraction * static_cast<double>(count_)) + 0.999999));
         std::uint64_t seen = 0;
         for (std::size_t i = 0; i < buckets_.size(); ++i) {
             seen += buckets_[i];
@@ -705,7 +705,7 @@ public:
 private:
     static constexpr std::size_t kLinearBuckets = 256;
     static constexpr std::size_t kLogGroups = 56;
-    static constexpr std::size_t kBucketCount = kLinearBuckets + kLogGroups * kLinearBuckets;
+    static constexpr std::size_t kBucketCount = kLinearBuckets + (kLogGroups * kLinearBuckets);
 
     [[nodiscard]] static std::size_t index_for(std::uint64_t value) noexcept {
         if (value < kLinearBuckets) {
@@ -713,7 +713,7 @@ private:
         }
         const unsigned shift = std::bit_width(value) - 9;
         const std::uint64_t mantissa = value >> shift;
-        const std::size_t index = kLinearBuckets + static_cast<std::size_t>(shift) * kLinearBuckets +
+        const std::size_t index = kLinearBuckets + (static_cast<std::size_t>(shift) * kLinearBuckets) +
                                   static_cast<std::size_t>(mantissa - kLinearBuckets);
         return std::min(index, kBucketCount - 1);
     }
@@ -724,7 +724,7 @@ private:
         }
         const std::size_t relative = index - kLinearBuckets;
         const unsigned shift = static_cast<unsigned>(relative / kLinearBuckets);
-        const std::uint64_t mantissa = kLinearBuckets + relative % kLinearBuckets;
+        const std::uint64_t mantissa = kLinearBuckets + (relative % kLinearBuckets);
         return mantissa << shift;
     }
 
@@ -959,7 +959,7 @@ private:
         client_options.tls.trust_store = trust_store_.get();
         client_options.tls.verify_peer = !options_.insecure;
         client_options.drain_timeout = options_.drain;
-        client_ = std::make_unique<fiber::http::Http3Client>(endpoint_, std::move(client_options));
+        client_ = std::make_unique<fiber::http::Http3Client>(endpoint_, client_options);
 
         if (!options_.body.empty()) {
             request_body_ = fiber::mem::IoBuf::allocate(options_.body.size());
@@ -1010,7 +1010,7 @@ private:
             } else {
                 const std::uint64_t ticket = next_rate_ticket_++;
                 const std::uint64_t global_ticket =
-                        index_ + ticket * static_cast<std::uint64_t>(coordinator_.worker_count);
+                        index_ + (ticket * static_cast<std::uint64_t>(coordinator_.worker_count));
                 scheduled = scheduled_time(global_ticket);
                 if (scheduled >= measurement_end_) {
                     break;
@@ -1174,7 +1174,8 @@ private:
 
         while (!result.response_complete) {
             auto chunk = co_await exchange.read_body(
-                    64 * 1024, remaining_timeout(request_deadline, fiber::event::EventLoop::current().now()));
+                    static_cast<std::size_t>(64 * 1024),
+                    remaining_timeout(request_deadline, fiber::event::EventLoop::current().now()));
             if (!chunk) {
                 result.error = chunk.error();
                 result.error_phase = RequestPhase::BodyRead;
@@ -1303,9 +1304,9 @@ private:
     // once every connection object may be destroyed.
     void start_close_joins() noexcept {
         close_group_.add(connections_.size());
-        for (std::size_t i = 0; i < connections_.size(); ++i) {
-            fiber::async::spawn([this, i]() -> fiber::async::DetachedTask {
-                co_await connections_[i]->wait_closed();
+        for (const auto &connection: connections_) {
+            fiber::async::spawn([this, &connection]() -> fiber::async::DetachedTask {
+                co_await connection->wait_closed();
                 close_group_.done();
             });
         }
@@ -1374,7 +1375,7 @@ private:
     if (elapsed.count() <= 0 || rps == 0) {
         return 0;
     }
-    const unsigned __int128 numerator = static_cast<unsigned __int128>(elapsed.count()) * rps + 1000000000ULL - 1;
+    const unsigned __int128 numerator = (static_cast<unsigned __int128>(elapsed.count()) * rps) + 1000000000ULL - 1;
     return static_cast<std::uint64_t>(numerator / 1000000000ULL);
 }
 

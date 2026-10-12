@@ -164,6 +164,7 @@ template<typename T>
 [[nodiscard]] ParseStatus parse_value(JsonParser &parser, mem::BufPool &pool, T &out) noexcept {
     using Value = std::remove_cvref_t<T>;
 
+    // NOLINTNEXTLINE(bugprone-branch-clone) type-dispatch chain; same-shaped calls are distinct parsers
     if constexpr (detail::HasCustomValueDecoder<Value>) {
         return CustomValueDecoder<Value>::parse(parser, pool, out);
     } else if constexpr (std::same_as<Value, std::nullptr_t>) {

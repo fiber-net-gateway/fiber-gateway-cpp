@@ -57,7 +57,7 @@ bool is_pseudo_header(std::string_view name) noexcept { return !name.empty() && 
 } // namespace
 
 struct ServerHttp2Request::SendResponseHeaderOp {
-    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
+    static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
 
     SendResponseHeaderOp(const OutgoingHeaderBlockView &header) noexcept :
         kind_(header.kind), headers_(header.headers), status_code_(header.status_code), end_stream_(header.end_stream) {
@@ -74,20 +74,23 @@ struct ServerHttp2Request::SendResponseHeaderOp {
 
 const Http2Stream::Ops &ServerHttp2Request::stream_ops() noexcept {
     static const Http2Stream::Ops kOps{
-            &ServerHttp2Request::destroy_owner,
-            &ServerHttp2Request::on_header_block_start,
-            &ServerHttp2Request::on_header_block_complete,
-            &ServerHttp2Request::on_body,
-            &ServerHttp2Request::on_stream_abort,
+            .on_destroy = &ServerHttp2Request::destroy_owner,
+            .on_header_block_start = &ServerHttp2Request::on_header_block_start,
+            .on_header_block_complete = &ServerHttp2Request::on_header_block_complete,
+            .on_body = &ServerHttp2Request::on_body,
+            .on_abort = &ServerHttp2Request::on_stream_abort,
     };
     return kOps;
 }
 
 const Http2HpackDecoder::Ops &ServerHttp2Request::decoder_ops() noexcept {
     static const Http2HpackDecoder::Ops kOps{
-            &ServerHttp2Request::on_indexed_field, &ServerHttp2Request::on_indexed_name,
-            &ServerHttp2Request::on_name_raw,      &ServerHttp2Request::on_name_huffman,
-            &ServerHttp2Request::on_value_raw,     &ServerHttp2Request::on_value_huffman,
+            .on_indexed_field = &ServerHttp2Request::on_indexed_field,
+            .on_indexed_name = &ServerHttp2Request::on_indexed_name,
+            .on_name_raw = &ServerHttp2Request::on_name_raw,
+            .on_name_huffman = &ServerHttp2Request::on_name_huffman,
+            .on_value_raw = &ServerHttp2Request::on_value_raw,
+            .on_value_huffman = &ServerHttp2Request::on_value_huffman,
     };
     return kOps;
 }
@@ -265,8 +268,7 @@ common::IoErr ServerHttp2Request::SendResponseHeaderOp::on_encode(const Http2Out
     }
 
     if (headers_ != nullptr) {
-        for (auto it = headers_->begin(); it != headers_->end(); ++it) {
-            const auto &field = *it;
+        for (const auto &field: *headers_) {
             if (field.name_len == 0) {
                 continue;
             }
@@ -345,7 +347,8 @@ void ServerHttp2Request::mark_response_channel_closed() noexcept {
 }
 
 fiber::async::Task<common::IoResult<mem::IoBufChain>>
-ServerHttp2Request::read_body(HttpExchange &, std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept {
+ServerHttp2Request::read_body(HttpExchange & /*exchange*/, std::size_t max_bytes,
+                              std::chrono::milliseconds timeout) noexcept {
     co_return co_await request_body_recv_.read_body(stream_, max_bytes, timeout);
 }
 
@@ -675,7 +678,7 @@ common::IoErr ServerHttp2Request::commit_field(std::string_view name, std::uint6
             return common::IoErr::Invalid;
         }
 
-        auto *handler = pseudo_header_handler_map().get(name);
+        const auto *handler = pseudo_header_handler_map().get(name);
         if (!handler) {
             return common::IoErr::Invalid;
         }

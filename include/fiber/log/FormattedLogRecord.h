@@ -42,8 +42,8 @@ public:
 
     FormattedLogRecord() noexcept = default;
 
-    [[nodiscard]] Cursor cursor() const noexcept { return Cursor(*this, true); }
-    [[nodiscard]] Cursor message_cursor() const noexcept { return Cursor(*this, false); }
+    [[nodiscard]] Cursor cursor() const noexcept { return {*this, true}; }
+    [[nodiscard]] Cursor message_cursor() const noexcept { return {*this, false}; }
     [[nodiscard]] std::size_t size() const noexcept { return total_size_; }
     [[nodiscard]] std::size_t message_line_size() const noexcept { return record_->message_size() + 1; }
     [[nodiscard]] const OwnedLogRecord &record() const noexcept { return *record_; }

@@ -60,7 +60,7 @@ class HeaderMap {
             return 0;
         }
         // Keep the immutable open-addressed table at or below a 75% load factor.
-        return next_pow2(entry_count + (entry_count + 2) / 3);
+        return next_pow2(entry_count + ((entry_count + 2) / 3));
     }
 
 public:
@@ -125,9 +125,7 @@ public:
         Builder() = default;
 
         explicit Builder(std::size_t expected_size) {
-            if (expected_size > kMaxEntries) {
-                expected_size = kMaxEntries;
-            }
+            expected_size = std::min(expected_size, kMaxEntries);
             entries_.reserve(expected_size);
         }
 

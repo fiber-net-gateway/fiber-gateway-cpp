@@ -384,7 +384,7 @@ TEST(Http1EndpointTest, ConnectionsSpreadOverWorkerLoops) {
                                 },
                                 &workers);
     ASSERT_NE(running.server, nullptr);
-    EXPECT_EQ(running.server->worker_count(), 3u);
+    EXPECT_EQ(running.server->worker_count(), 3U);
 
     // Round-robin over three workers: keep all three connections open at once
     // so each lands on a different loop.
@@ -400,7 +400,7 @@ TEST(Http1EndpointTest, ConnectionsSpreadOverWorkerLoops) {
 
     {
         std::lock_guard guard(loops_mu);
-        EXPECT_EQ(seen_loops.size(), 3u);
+        EXPECT_EQ(seen_loops.size(), 3U);
         for (fiber::event::EventLoop *loop: seen_loops) {
             EXPECT_NE(loop, &accept_group.at(0));
         }
@@ -546,6 +546,7 @@ TEST(Http1EndpointTest, ConcurrentAcceptAndStopReleasesEveryConnection) {
         std::atomic<int> dropped{0};
         std::atomic<int> truncated{0};
         std::vector<std::thread> clients;
+        clients.reserve(4);
         for (int i = 0; i < 4; ++i) {
             clients.emplace_back([&] {
                 while (!stopping.load()) {
@@ -576,7 +577,7 @@ TEST(Http1EndpointTest, ConcurrentAcceptAndStopReleasesEveryConnection) {
         while (attempts.load() < 8) {
             std::this_thread::yield();
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2 + 3 * (iteration % 5)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2 + (3 * (iteration % 5))));
         running.server->stop(); // off the owner loop, racing the accept path
         stopping.store(true);
         for (auto &client: clients) {

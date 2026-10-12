@@ -29,7 +29,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -79,6 +79,6 @@ TEST(MathFuncsTest, AbsNegativeFloat) { expect_script_double("return math.abs(-2
 TEST(MathFuncsTest, AbsPositiveFloat) { expect_script_double("return math.abs(2.5);", 2.5); }
 
 TEST(MathFuncsTest, NonNumericRaisesCatchableTypeError) {
-    expect_script_string("try { math.floor(\"x\"); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_script_string("try { math.abs(null); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_script_string(R"(try { math.floor("x"); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_script_string(R"(try { math.abs(null); return "no-throw"; } catch (e) { return "caught"; })", "caught");
 }

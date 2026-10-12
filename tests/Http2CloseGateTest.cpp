@@ -14,7 +14,9 @@ using namespace std::chrono_literals;
 
 struct Owner {
     Owner() :
-        connection(options(), this, {nullptr, &changed, nullptr}), gate(event::EventLoop::current(), connection) {}
+        connection(options(), this,
+                   {.create_peer_stream = nullptr, .on_state_change = &changed, .on_capacity_change = nullptr}),
+        gate(event::EventLoop::current(), connection) {}
     static http::Http2Connection::Options options() {
         http::Http2Connection::Options opts;
         opts.role = http::Http2Connection::ConnectionRole::Client;
@@ -62,7 +64,7 @@ TEST(Http2CloseGateTest, ClosureIsDeferredAndObserversPrecedeJoiners) {
                 &order);
         owner->connection.shutdown();
         owner->connection.shutdown();
-        EXPECT_EQ(owner->notifications, 1u);
+        EXPECT_EQ(owner->notifications, 1U);
         EXPECT_FALSE(owner->gate.closed());
         EXPECT_TRUE(order.empty());
         EXPECT_TRUE((co_await owner->gate.join()).has_value());

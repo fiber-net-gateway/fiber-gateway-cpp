@@ -144,7 +144,7 @@ private:
     [[nodiscard]] RemoveDecision on_subscription_remove(EntryPtr entry);
 
     [[nodiscard]] static async::Task<common::IoResult<dto::resp::ConfigChangeNotifyResponse>>
-    handle_config_change(void *context, NacosServerRequestContext &,
+    handle_config_change(void *context, NacosServerRequestContext & /*unused*/,
                          const dto::req::ConfigChangeNotifyRequest &request) noexcept;
 
     [[nodiscard]] ConfigServiceError validate_key(std::string_view data_id, std::string_view group) const;
@@ -232,7 +232,7 @@ private:
     NacosRpc *ready_rpc_ = nullptr;
     NacosServerAddressResolver server_resolver_;
     std::size_t preferred_server_index_ = 0;
-    std::uint64_t random_state_ = 0x9e3779b97f4a7c15ull;
+    std::uint64_t random_state_ = 0x9e3779b97f4a7c15ULL;
     bool connection_attempt_started_ = false;
 };
 
@@ -266,6 +266,7 @@ common::IoResult<void> ConfigServiceImpl::start() noexcept {
     if (state() != NacosServiceState::Created) {
         return std::unexpected(common::IoErr::Already);
     }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     lifecycle_publisher_->publish(NacosServiceState::Running);
     set_connection_status(NacosServicePhase::Connecting, authentication_failure(), false);
     async::spawn([this]() { return run(); });
@@ -350,6 +351,7 @@ void ConfigServiceImpl::publish_status(ConfigServiceStatus next) {
         return;
     }
     status_ = next;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     status_publisher_->publish(status_);
 }
 
@@ -879,7 +881,7 @@ void ConfigServiceImpl::register_all() {
     std::vector<EntryPtr> entries;
     pool_.for_each([&entries](ConfigEntry &entry) {
         if (!entry.proto.draining) {
-            entries.push_back(EntryPtr(&entry));
+            entries.emplace_back(&entry);
         }
     });
     schedule_registration(std::move(entries), true);
@@ -900,7 +902,7 @@ void ConfigServiceImpl::process_changed(const dto::resp::ConfigChangeBatchListen
 }
 
 async::Task<common::IoResult<dto::resp::ConfigChangeNotifyResponse>>
-ConfigServiceImpl::handle_config_change(void *context, NacosServerRequestContext &,
+ConfigServiceImpl::handle_config_change(void *context, NacosServerRequestContext & /*unused*/,
                                         const dto::req::ConfigChangeNotifyRequest &request) noexcept {
     FIBER_ASSERT(context != nullptr);
     auto *self = static_cast<ConfigServiceImpl *>(context);
@@ -928,6 +930,7 @@ async::DetachedTask ConfigServiceImpl::run() noexcept {
     pool_.close_all();
     refresh_status();
     FIBER_ASSERT(state() == NacosServiceState::Stopping);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     lifecycle_publisher_->publish(NacosServiceState::Stopped);
     set_connection_status(NacosServicePhase::Stopped, NacosServiceFailureCategory::Shutdown, false);
 }
@@ -960,6 +963,7 @@ void ConfigServiceImpl::request_shutdown() noexcept {
         return;
     }
     FIBER_ASSERT(state() == NacosServiceState::Created || state() == NacosServiceState::Running);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     lifecycle_publisher_->publish(NacosServiceState::Stopping);
     set_connection_status(NacosServicePhase::Stopping, NacosServiceFailureCategory::Shutdown, false);
     pool_.disable();
@@ -1134,7 +1138,7 @@ std::chrono::milliseconds ConfigServiceImpl::jittered(std::chrono::milliseconds 
     if (spread <= std::chrono::milliseconds::zero()) {
         return delay;
     }
-    const std::uint64_t width = static_cast<std::uint64_t>(spread.count()) * 2 + 1;
+    const std::uint64_t width = (static_cast<std::uint64_t>(spread.count()) * 2) + 1;
     const auto offset = static_cast<std::int64_t>(random_state_ % width) - spread.count();
     return delay + std::chrono::milliseconds(offset);
 }

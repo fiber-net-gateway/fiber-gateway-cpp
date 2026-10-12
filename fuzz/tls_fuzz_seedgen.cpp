@@ -87,7 +87,7 @@ EVP_PKEY *load_key(const char *pem) {
 
 SSL_SESSION *g_last_session = nullptr;
 
-int keep_session(SSL *, SSL_SESSION *session) {
+int keep_session(SSL * /*unused*/, SSL_SESSION *session) {
     if (g_last_session != nullptr) {
         SSL_SESSION_free(g_last_session);
     }
@@ -95,9 +95,9 @@ int keep_session(SSL *, SSL_SESSION *session) {
     return 1;
 }
 
-int select_first_alpn(SSL *, const unsigned char **out, unsigned char *out_len, const unsigned char *in,
-                      unsigned in_len, void *) {
-    if (in_len < 1 || in[0] + 1u > in_len) {
+int select_first_alpn(SSL * /*unused*/, const unsigned char **out, unsigned char *out_len, const unsigned char *in,
+                      unsigned in_len, void * /*unused*/) {
+    if (in_len < 1 || in[0] + 1U > in_len) {
         return SSL_TLSEXT_ERR_NOACK;
     }
     *out = in + 1;
@@ -382,15 +382,20 @@ void server_engine_corpus() {
         bool require_client_cert;
     };
     const Case cases[] = {
-            {"tls13-default", PeerOptions{}, false},
-            {"tls12-only", PeerOptions{.tls12_only = true}, false},
-            {"tls13-grease", PeerOptions{.grease = true}, false},
-            {"tls13-hrr-x25519", PeerOptions{.groups = "P-256:X25519"}, false}, // share P-256, we prefer X25519
-            {"tls13-p384", PeerOptions{.groups = "P-384"}, false},
-            {"tls13-mtls", PeerOptions{.client_cert = true}, true},
-            {"tls12-mtls", PeerOptions{.tls12_only = true, .client_cert = true}, true},
-            {"tls12-ecdsa-offer", PeerOptions{.tls12_only = true, .tls12_cipher = "ECDHE-ECDSA-AES128-GCM-SHA256"},
-             false},
+            {.name = "tls13-default", .opt = PeerOptions{}, .require_client_cert = false},
+            {.name = "tls12-only", .opt = PeerOptions{.tls12_only = true}, .require_client_cert = false},
+            {.name = "tls13-grease", .opt = PeerOptions{.grease = true}, .require_client_cert = false},
+            {.name = "tls13-hrr-x25519",
+             .opt = PeerOptions{.groups = "P-256:X25519"},
+             .require_client_cert = false}, // share P-256, we prefer X25519
+            {.name = "tls13-p384", .opt = PeerOptions{.groups = "P-384"}, .require_client_cert = false},
+            {.name = "tls13-mtls", .opt = PeerOptions{.client_cert = true}, .require_client_cert = true},
+            {.name = "tls12-mtls",
+             .opt = PeerOptions{.tls12_only = true, .client_cert = true},
+             .require_client_cert = true},
+            {.name = "tls12-ecdsa-offer",
+             .opt = PeerOptions{.tls12_only = true, .tls12_cipher = "ECDHE-ECDSA-AES128-GCM-SHA256"},
+             .require_client_cert = false},
     };
     for (const Case &c: cases) {
         const Bytes stream = client_stream_to_our_server(c.name, c.opt, c.require_client_cert);
@@ -431,20 +436,23 @@ void client_engine_corpus() {
         bool tls12_client;
     };
     const Case cases[] = {
-            {"tls13-default", PeerOptions{.server = true}, false},
-            {"tls13-hrr-p384", PeerOptions{.server = true, .groups = "P-384"}, false},
-            {"tls12-rsa",
-             PeerOptions{.server = true, .tls12_only = true, .tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"}, false},
-            {"tls12-ecdsa-p384",
-             PeerOptions{.server = true,
-                         .tls12_only = true,
-                         .groups = "P-384",
-                         .tls12_cipher = "ECDHE-ECDSA-AES128-GCM-SHA256",
-                         .leaf_pem = certfix::kLeafEcP384Pem,
-                         .key_pem = certfix::kP384KeyPem},
-             false},
-            {"tls12-client-cert-request", PeerOptions{.server = true, .tls12_only = true, .client_cert = true}, false},
-            {"tls12-client-only", PeerOptions{.server = true}, true},
+            {.name = "tls13-default", .opt = PeerOptions{.server = true}, .tls12_client = false},
+            {.name = "tls13-hrr-p384", .opt = PeerOptions{.server = true, .groups = "P-384"}, .tls12_client = false},
+            {.name = "tls12-rsa",
+             .opt = PeerOptions{.server = true, .tls12_only = true, .tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"},
+             .tls12_client = false},
+            {.name = "tls12-ecdsa-p384",
+             .opt = PeerOptions{.server = true,
+                                .tls12_only = true,
+                                .groups = "P-384",
+                                .tls12_cipher = "ECDHE-ECDSA-AES128-GCM-SHA256",
+                                .leaf_pem = certfix::kLeafEcP384Pem,
+                                .key_pem = certfix::kP384KeyPem},
+             .tls12_client = false},
+            {.name = "tls12-client-cert-request",
+             .opt = PeerOptions{.server = true, .tls12_only = true, .client_cert = true},
+             .tls12_client = false},
+            {.name = "tls12-client-only", .opt = PeerOptions{.server = true}, .tls12_client = true},
     };
     for (const Case &c: cases) {
         const Bytes stream = server_stream_to_our_client(c.name, c.opt, c.tls12_client);

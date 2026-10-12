@@ -131,7 +131,7 @@ async::DetachedTask Http3ControlStreams::run_peer_uni_stream(quic::QuicStream::L
             .link = {},
     };
     peer_readers_.push_back(reader);
-    ReaderScope scope{*this, reader};
+    ReaderScope scope{.conn = *this, .reader = reader};
     mem::IoBufChain input;
 
     Http3VarintParser stream_type_parser;
@@ -351,6 +351,6 @@ async::Task<common::IoResult<void>> Http3ControlStreams::send_goaway(std::uint64
     co_return common::IoResult<void>{};
 }
 async::Task<void> Http3ControlStreams::join_readers() noexcept { co_await peer_reader_group_.join(); }
-void Http3ControlStreams::destroy_stream(void *, quic::QuicStream &stream) noexcept { delete &stream; }
+void Http3ControlStreams::destroy_stream(void * /*unused*/, quic::QuicStream &stream) noexcept { delete &stream; }
 
 } // namespace fiber::http

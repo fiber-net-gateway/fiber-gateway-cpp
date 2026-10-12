@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <string_view>
 
@@ -142,7 +143,7 @@ common::IoResult<Tls12WriteKeys> tls12_key_block(TlsCipherSuiteId suite, const T
     // (the other 8 nonce bytes ride the wire), 12 for RFC 7905 ChaCha20 (the
     // whole nonce is implicit).
     const std::size_t iv_len = info.aead == TlsAeadAlgorithm::Chacha20Poly1305 ? 12 : 4;
-    const std::size_t block_len = 2 * info.key_len + 2 * iv_len;
+    const std::size_t block_len = (static_cast<std::size_t>(2 * info.key_len)) + (2 * iv_len);
     std::array<std::uint8_t, 88> block{}; // largest: 2*32 key + 2*12 iv (chacha)
     if (!prf(info.hash, master.bytes(), kPrfLabelKeyExpansion, seed, {block.data(), block_len})) {
         tls_secure_wipe(seed.data(), seed.size());
@@ -158,8 +159,8 @@ common::IoResult<Tls12WriteKeys> tls12_key_block(TlsCipherSuiteId suite, const T
     keys.server.iv_len = static_cast<std::uint8_t>(iv_len);
     std::memcpy(keys.client.key.data(), block.data(), info.key_len);
     std::memcpy(keys.server.key.data(), block.data() + info.key_len, info.key_len);
-    std::memcpy(keys.client.iv.data(), block.data() + 2 * info.key_len, iv_len);
-    std::memcpy(keys.server.iv.data(), block.data() + 2 * info.key_len + iv_len, iv_len);
+    std::memcpy(keys.client.iv.data(), block.data() + (static_cast<ptrdiff_t>(2 * info.key_len)), iv_len);
+    std::memcpy(keys.server.iv.data(), block.data() + (static_cast<ptrdiff_t>(2 * info.key_len)) + iv_len, iv_len);
     tls_secure_wipe(block.data(), block.size());
     return keys;
 }

@@ -51,7 +51,7 @@ void append_chunk(mem::IoBufChain &chunk, std::string &out) {
 NacosClientImpl::NacosClientImpl(event::EventLoop &loop, dns::AddressResolver *resolver, NacosClientConfig config,
                                  NacosClientOptions options) :
     loop_(&loop), resolver_(resolver), config_(std::make_shared<const NacosClientConfig>(std::move(config))),
-    options_(std::move(options)) {
+    options_(options) {
     shutdown_publisher_ = shutdown_watch_.acquire_publisher();
     auth_publisher_ = auth_watch_.acquire_publisher();
     FIBER_ASSERT(shutdown_publisher_.has_value());
@@ -130,6 +130,7 @@ void NacosClientImpl::end_task() noexcept {
 void NacosClientImpl::publish_auth(NacosAuthAccess auth_access) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT((auth_access.kind == NacosAuthAccessKind::Present) == !auth_access.access_token.empty());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) publisher is acquired in start() before any publish site
     auth_publisher_->publish(std::move(auth_access));
 }
 

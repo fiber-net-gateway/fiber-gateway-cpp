@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <coroutine>
+#include <cstddef>
 #include <cstring>
 #include <expected>
 #include <limits>
@@ -51,7 +52,7 @@ constexpr std::chrono::milliseconds kQuicCloseFrameMinInterval{1000};
     if (left.size() != right.size()) {
         return false;
     }
-    if (left.size() == 0) {
+    if (left.empty()) {
         return true;
     }
     return std::memcmp(left.data(), right.data(), left.size()) == 0;
@@ -133,23 +134,23 @@ void QuicApplicationCryptoBlock::reset() noexcept {
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::current_read() noexcept {
-    return {&read_keys[current_read_index], &read_header};
+    return {.packet = &read_keys[current_read_index], .header = &read_header};
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::next_read() noexcept {
-    return {&read_keys[next_read_index], &read_header};
+    return {.packet = &read_keys[next_read_index], .header = &read_header};
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::previous_read() noexcept {
-    return {&read_keys[previous_read_index], &read_header};
+    return {.packet = &read_keys[previous_read_index], .header = &read_header};
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::current_write() noexcept {
-    return {&write_keys[current_write_index], &write_header};
+    return {.packet = &write_keys[current_write_index], .header = &write_header};
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::next_write() noexcept {
-    return {&write_keys[next_write_index], &write_header};
+    return {.packet = &write_keys[next_write_index], .header = &write_header};
 }
 
 void QuicApplicationCryptoBlock::promote() noexcept {
@@ -642,7 +643,7 @@ common::IoResult<void> QuicConnection::connect(const QuicClientConnectParams &pa
     if (!initial_crypto) {
         return fail(QuicConnectPhase::InitialCrypto, initial_crypto.error());
     }
-    auto initialized_tls = tls_.init_client(params.tls, *this, params.allow_insecure, params.resumption_session);
+    auto initialized_tls = tls_.init_client(params.tls, params.allow_insecure, params.resumption_session);
     if (!initialized_tls) {
         return fail(QuicConnectPhase::Tls, initialized_tls.error());
     }
@@ -797,9 +798,6 @@ bool QuicConnection::queue_close_frame_for_level(QuicEncryptionLevel level) noex
         frame->u.close.error_code = close_info_.error_code;
     }
     frame->u.close.frame_type = close_info_.frame_kind == QuicCloseFrameKind::Transport ? close_info_.frame_type : 0;
-    frame->u.close.reason = nullptr;
-    frame->u.close.reason_length = 0;
-    frame->u.close.owned_reason = nullptr;
     frame->ignore_congestion = true;
     frame->ignore_loss = true;
 
@@ -849,7 +847,7 @@ void QuicConnection::close_all_streams(std::uint64_t error_code) noexcept {
 }
 
 void QuicConnection::clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept {
-    auto release_queue = [this, &space](QuicOutputFrameQueue &queue, bool drop_stream_tickets) noexcept {
+    auto release_queue = [this, &space](QuicOutputFrameList &queue, bool drop_stream_tickets) noexcept {
         while (QuicOutputFrame *frame = queue.pop_front()) {
             if (drop_stream_tickets && frame->type == QuicFrameType::Stream) {
                 drop_stream_send_ticket(frame->u.stream.stream_id);
@@ -863,8 +861,7 @@ void QuicConnection::clear_packet_space_frames_for_detach(QuicPacketNumberSpace 
     release_queue(space.sending_frames, false);
     release_queue(space.sent_frames, false);
 
-    quic_output_frame_release_data(space.ack_frame);
-    space.ack_frame = QuicOutputFrame{};
+    space.ack_frame.reset();
     space.send_ack = false;
     space.send_ack_count = 0;
     space.pending_ack = kUnsetPacketNumber;
@@ -1906,9 +1903,7 @@ common::IoResult<void> QuicConnection::record_peer_stream_id(std::uint64_t strea
     const QuicStreamType type = stream_type(stream_id);
     PeerStreamLimitWindow &window = peer_stream_window(type);
     const std::uint64_t opened = stream_sequence(stream_id) + 1;
-    if (opened > window.opened_count) {
-        window.opened_count = opened;
-    }
+    window.opened_count = std::max(opened, window.opened_count);
     return {};
 }
 
@@ -2293,7 +2288,7 @@ common::IoResult<void> QuicConnection::reinit_initial_crypto(const QuicConnectio
 }
 
 common::IoResult<void> QuicConnection::set_initial_token(const std::uint8_t *token, std::size_t token_len) noexcept {
-    constexpr std::size_t kMaxInitialTokenLength = 16 * 1024;
+    constexpr std::size_t kMaxInitialTokenLength = static_cast<const std::size_t>(16 * 1024);
     if ((token == nullptr && token_len != 0) || token_len > kMaxInitialTokenLength) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -2312,7 +2307,7 @@ common::IoResult<void> QuicConnection::set_initial_token(const std::uint8_t *tok
 }
 
 common::IoResult<void> QuicConnection::recv_new_token_frame(const QuicInputFrame &frame) noexcept {
-    constexpr std::size_t kMaxNewTokenLength = 16 * 1024;
+    constexpr std::size_t kMaxNewTokenLength = static_cast<const std::size_t>(16 * 1024);
     if (role() != QuicConnectionRole::Client || frame.type != QuicFrameType::NewToken || frame.data.data == nullptr ||
         frame.data.len == 0 || frame.data.len > kMaxNewTokenLength) {
         return std::unexpected(common::IoErr::Invalid);
@@ -2334,8 +2329,8 @@ void QuicConnection::reset_after_retry() noexcept {
     loss_timer_mode_ = QuicLossTimerMode::None;
 
     QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Initial);
-    QuicOutputFrameQueue retransmit{};
-    auto recover = [&](QuicOutputFrameQueue &queue) noexcept {
+    QuicOutputFrameList retransmit{};
+    auto recover = [&](QuicOutputFrameList &queue) noexcept {
         while (QuicOutputFrame *frame = queue.pop_front()) {
             frame->packet_number = 0;
             frame->packet_len = 0;
@@ -2354,7 +2349,7 @@ void QuicConnection::reset_after_retry() noexcept {
     };
     recover(space.sent_frames);
     recover(space.sending_frames);
-    space.pending_frames.prepend_all(retransmit);
+    space.pending_frames.splice_front(retransmit);
 
     space.largest_acked_packet_number = kUnsetPacketNumber;
     space.send_ack = false;
@@ -2362,14 +2357,13 @@ void QuicConnection::reset_after_retry() noexcept {
     space.pending_ack = kUnsetPacketNumber;
     space.ecn_sent_counters = {};
     space.peer_ecn_counters = {};
-    if (!space.ack_frame.queued) {
-        quic_output_frame_release_data(space.ack_frame);
-        space.ack_frame = QuicOutputFrame{};
+    if (!space.ack_frame.hook.linked()) {
+        space.ack_frame.reset();
     }
 
     QuicPacketNumberSpace &application = packet_number_space(QuicEncryptionLevel::Application);
-    QuicOutputFrameQueue early_retransmit{};
-    auto recover_early = [&](QuicOutputFrameQueue &queue) noexcept {
+    QuicOutputFrameList early_retransmit{};
+    auto recover_early = [&](QuicOutputFrameList &queue) noexcept {
         QuicOutputFrame *frame = queue.front();
         while (frame != nullptr) {
             QuicOutputFrame *next = queue.next_of(*frame);
@@ -2390,7 +2384,7 @@ void QuicConnection::reset_after_retry() noexcept {
     };
     recover_early(application.sent_frames);
     recover_early(application.sending_frames);
-    application.pending_frames.prepend_all(early_retransmit);
+    application.pending_frames.splice_front(early_retransmit);
 
     const QuicTime now = active_timer_loop() != nullptr ? quic_time_ms(loop_.now()) : QuicTime{0};
     quic_congestion_reset_for_path(congestion_, rtt_, now);
@@ -2401,7 +2395,7 @@ void QuicConnection::reset_after_retry() noexcept {
 
 common::IoResult<bool> QuicConnection::handle_retry(const QuicPacketHeader &packet,
                                                     const QuicReceivedDatagram &datagram) noexcept {
-    constexpr std::size_t kMaxRetryTokenLength = 16 * 1024;
+    constexpr std::size_t kMaxRetryTokenLength = static_cast<const std::size_t>(16 * 1024);
     if (role() != QuicConnectionRole::Client || state_ != QuicConnectionState::Handshaking || retry_processed_ ||
         has_authenticated_server_packet_ || packet.type != QuicPacketType::Retry || packet.version != kQuicVersion1 ||
         packet.scid.empty() || packet.token.len == 0 || packet.token.len > kMaxRetryTokenLength ||
@@ -2523,7 +2517,7 @@ common::IoResult<void> QuicConnection::ensure_server_tls() noexcept {
     if (options_.server_tls == nullptr) {
         return {};
     }
-    return tls_.init_server(*options_.server_tls, *this);
+    return tls_.init_server(*options_.server_tls);
 }
 
 common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTransportParams &params) noexcept {
@@ -2538,7 +2532,7 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
                                                               : options_.remote_connection_id;
     if ((options_.role == QuicConnectionRole::Client && !has_server_initial_source_connection_id_) ||
         params.initial_source_connection_id.size() != expected_initial_source.size() ||
-        (params.initial_source_connection_id.size() != 0 &&
+        (!params.initial_source_connection_id.empty() &&
          std::memcmp(params.initial_source_connection_id.data(), expected_initial_source.data(),
                      params.initial_source_connection_id.size()) != 0)) {
         return std::unexpected(common::IoErr::Invalid);
@@ -2700,7 +2694,7 @@ void QuicConnection::on_early_data_rejected() noexcept {
     }
 
     QuicPacketNumberSpace &space = packet_number_space(QuicEncryptionLevel::Application);
-    auto discard = [this, &space](QuicOutputFrameQueue &queue) noexcept {
+    auto discard = [this, &space](QuicOutputFrameList &queue) noexcept {
         QuicOutputFrame *frame = queue.front();
         while (frame != nullptr) {
             QuicOutputFrame *next = queue.next_of(*frame);
@@ -3062,9 +3056,7 @@ common::IoResult<bool> QuicConnection::recv_new_connection_id_frame(const QuicNe
         slot->in_use = true;
         slot->used = false;
         install_remote_stateless_reset_token(*slot, frame.stateless_reset_token);
-        if (frame.sequence_number > largest_seen_remote_seq_) {
-            largest_seen_remote_seq_ = frame.sequence_number;
-        }
+        largest_seen_remote_seq_ = std::max(frame.sequence_number, largest_seen_remote_seq_);
     }
 
     if (frame.retire_prior_to > max_retired_remote_seq_) {
@@ -3102,7 +3094,7 @@ void QuicConnection::recount_in_flight_after_reset() noexcept {
     // whose numbers clear the Application-space threshold.
     for (const QuicEncryptionLevel level:
          {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake, QuicEncryptionLevel::Application}) {
-        const QuicOutputFrameQueue &sent = packet_number_space(level).sent_frames;
+        const QuicOutputFrameList &sent = packet_number_space(level).sent_frames;
         for (const QuicOutputFrame *frame = sent.front(); frame != nullptr; frame = sent.next_of(*frame)) {
             if (frame->packet_len != 0 && frame->packet_number >= reset_packet_number_) {
                 congestion_.in_flight += frame->packet_len;
@@ -3413,7 +3405,7 @@ bool QuicConnection::has_pacing_exempt_send_work() const noexcept {
         return has_pending_send_work();
     }
     for (const QuicPacketNumberSpace &space: packet_number_spaces_) {
-        if (space.ack_frame.queued || (space.send_ack && space.pending_ack != kUnsetPacketNumber)) {
+        if (space.ack_frame.hook.linked() || (space.send_ack && space.pending_ack != kUnsetPacketNumber)) {
             return true;
         }
     }

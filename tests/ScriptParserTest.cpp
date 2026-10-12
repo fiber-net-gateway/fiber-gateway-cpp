@@ -82,7 +82,7 @@ const fiber::script::ast::InlineObject *as_inline_object(const fiber::script::as
 
 std::string nested_parenthesized_expression(std::size_t depth) {
     std::string expression;
-    expression.reserve(depth * 2 + 1);
+    expression.reserve((depth * 2) + 1);
     expression.append(depth, '(');
     expression.push_back('1');
     expression.append(depth, ')');
@@ -92,7 +92,8 @@ std::string nested_parenthesized_expression(std::size_t depth) {
 std::string nested_template_literal(std::size_t depth) {
     std::string expression = "`x`";
     for (std::size_t i = 0; i < depth; ++i) {
-        expression = "`${" + expression + "}`";
+        expression.append("}`");
+        expression.insert(0, "`${");
     }
     return expression;
 }
@@ -208,7 +209,7 @@ TEST(ScriptParserTest, ParseInlineList) {
 
     const auto *list = as_inline_list(result.value().get());
     ASSERT_NE(list, nullptr);
-    ASSERT_EQ(list->values().size(), 3u);
+    ASSERT_EQ(list->values().size(), 3U);
     const auto *lit0 = as_literal(list->values()[0].get());
     const auto *lit1 = as_literal(list->values()[1].get());
     const auto *lit2 = as_literal(list->values()[2].get());
@@ -229,7 +230,7 @@ TEST(ScriptParserTest, ParseInlineObject) {
 
     const auto *obj = as_inline_object(result.value().get());
     ASSERT_NE(obj, nullptr);
-    ASSERT_EQ(obj->entries().size(), 2u);
+    ASSERT_EQ(obj->entries().size(), 2U);
     ASSERT_EQ(obj->entries()[0].key.kind, fiber::script::ast::InlineObject::KeyKind::String);
     ASSERT_EQ(obj->entries()[1].key.kind, fiber::script::ast::InlineObject::KeyKind::String);
     EXPECT_EQ(obj->entries()[0].key.string_key, "a");
@@ -250,7 +251,7 @@ TEST(ScriptParserTest, ParseScriptExpressionStatement) {
     ASSERT_TRUE(result.has_value()) << result.error().message;
 
     const auto &statements = result.value()->statements();
-    ASSERT_EQ(statements.size(), 1u);
+    ASSERT_EQ(statements.size(), 1U);
     const auto *stmt = dynamic_cast<const fiber::script::ast::ExpressionStatement *>(statements.front().get());
     ASSERT_NE(stmt, nullptr);
     EXPECT_NE(as_binary(stmt->expression()), nullptr);
@@ -281,7 +282,7 @@ TEST(ScriptParserTest, ParseReturnStatement) {
     ASSERT_TRUE(result.has_value()) << result.error().message;
 
     const auto &statements = result.value()->statements();
-    ASSERT_EQ(statements.size(), 1u);
+    ASSERT_EQ(statements.size(), 1U);
     const auto *stmt = dynamic_cast<const fiber::script::ast::ReturnStatement *>(statements.front().get());
     ASSERT_NE(stmt, nullptr);
     EXPECT_NE(as_binary(stmt->value()), nullptr);
@@ -295,19 +296,19 @@ TEST(ScriptParserTest, ParseIfStatement) {
     ASSERT_TRUE(result.has_value()) << result.error().message;
 
     const auto &statements = result.value()->statements();
-    ASSERT_EQ(statements.size(), 1u);
+    ASSERT_EQ(statements.size(), 1U);
     const auto *stmt = dynamic_cast<const fiber::script::ast::IfStatement *>(statements.front().get());
     ASSERT_NE(stmt, nullptr);
     EXPECT_NE(as_variable(stmt->condition()), nullptr);
     const auto *then_block = dynamic_cast<const fiber::script::ast::Block *>(stmt->then_branch());
     ASSERT_NE(then_block, nullptr);
-    ASSERT_EQ(then_block->statements().size(), 1u);
+    ASSERT_EQ(then_block->statements().size(), 1U);
     EXPECT_NE(dynamic_cast<const fiber::script::ast::ReturnStatement *>(then_block->statements().front().get()),
               nullptr);
 
     const auto *else_block = dynamic_cast<const fiber::script::ast::Block *>(stmt->else_branch());
     ASSERT_NE(else_block, nullptr);
-    ASSERT_EQ(else_block->statements().size(), 1u);
+    ASSERT_EQ(else_block->statements().size(), 1U);
     EXPECT_NE(dynamic_cast<const fiber::script::ast::ReturnStatement *>(else_block->statements().front().get()),
               nullptr);
 }
@@ -333,7 +334,7 @@ TEST(ScriptParserTest, ParseReturnWithoutValue) {
     ASSERT_TRUE(result.has_value()) << result.error().message;
 
     const auto &statements = result.value()->statements();
-    ASSERT_EQ(statements.size(), 1u);
+    ASSERT_EQ(statements.size(), 1U);
     const auto *stmt = dynamic_cast<const fiber::script::ast::ReturnStatement *>(statements.front().get());
     ASSERT_NE(stmt, nullptr);
     EXPECT_EQ(stmt->value(), nullptr);
@@ -347,10 +348,10 @@ TEST(ScriptParserTest, ParseBlockStatement) {
     ASSERT_TRUE(result.has_value()) << result.error().message;
 
     const auto &statements = result.value()->statements();
-    ASSERT_EQ(statements.size(), 1u);
+    ASSERT_EQ(statements.size(), 1U);
     const auto *block = dynamic_cast<const fiber::script::ast::Block *>(statements.front().get());
     ASSERT_NE(block, nullptr);
-    EXPECT_EQ(block->statements().size(), 2u);
+    EXPECT_EQ(block->statements().size(), 2U);
 }
 
 TEST(ScriptParserTest, ParseInvalidExpression) {
@@ -458,26 +459,26 @@ TEST(ScriptParserTest, ParseOctalEscapeShortForms) {
     TestLibrary library;
     fiber::script::parse::Parser parser(library, true);
 
-    auto r0 = parser.parse_expression("\"\\0\"");
+    auto r0 = parser.parse_expression(R"("\0")");
     ASSERT_TRUE(r0.has_value()) << r0.error().message;
     const auto *lit0 = as_literal(r0.value().get());
     ASSERT_NE(lit0, nullptr);
     EXPECT_EQ(lit0->string_value(), std::string("\0", 1));
 
-    auto r1 = parser.parse_expression("\"\\12\"");
+    auto r1 = parser.parse_expression(R"("\12")");
     ASSERT_TRUE(r1.has_value()) << r1.error().message;
     const auto *lit1 = as_literal(r1.value().get());
     ASSERT_NE(lit1, nullptr);
     EXPECT_EQ(lit1->string_value(), std::string("\n"));
 
-    auto r2 = parser.parse_expression("\"\\012\"");
+    auto r2 = parser.parse_expression(R"("\012")");
     ASSERT_TRUE(r2.has_value()) << r2.error().message;
     const auto *lit2 = as_literal(r2.value().get());
     ASSERT_NE(lit2, nullptr);
     EXPECT_EQ(lit2->string_value(), std::string("\n"));
 
     // \0 stops at one digit when followed by a non-octal char.
-    auto r3 = parser.parse_expression("\"\\0x\"");
+    auto r3 = parser.parse_expression(R"("\0x")");
     ASSERT_TRUE(r3.has_value()) << r3.error().message;
     const auto *lit3 = as_literal(r3.value().get());
     ASSERT_NE(lit3, nullptr);

@@ -46,7 +46,7 @@ common::IoResult<void> TlsRecordWriter::write(TlsContentType type, mem::IoBufCha
 }
 
 common::IoResult<void> TlsRecordWriter::write_header(TlsContentType type, std::size_t length,
-                                                     mem::IoBufChain &out) noexcept {
+                                                     mem::IoBufChain &out) const noexcept {
     mem::IoBuf header = mem::IoBuf::allocate(kTlsRecordHeaderSize);
     if (!header.valid()) {
         return std::unexpected(common::IoErr::NoMem);

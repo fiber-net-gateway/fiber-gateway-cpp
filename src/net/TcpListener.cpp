@@ -8,7 +8,7 @@ namespace fiber::net {
 
 TcpListener::TcpListener(fiber::event::EventLoop &loop) : acceptor_(loop) {}
 
-TcpListener::~TcpListener() {}
+TcpListener::~TcpListener() = default;
 
 fiber::common::IoResult<void> TcpListener::bind(const SocketAddress &addr, const ListenOptions &options) {
     return acceptor_.bind(addr, options);
@@ -94,7 +94,7 @@ fiber::common::IoErr TcpTraits::accept_once(int fd, AcceptResult &out) {
                 ::close(client);
                 return fiber::common::IoErr::NotSupported;
             }
-            out = AcceptResult(client, std::move(peer));
+            out = AcceptResult(client, peer);
             return fiber::common::IoErr::None;
         }
         int err = errno;

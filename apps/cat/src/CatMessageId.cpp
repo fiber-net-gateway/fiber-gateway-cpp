@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
 #include <limits>
 #include <unistd.h>
 
@@ -12,7 +13,7 @@ namespace fiber::cat::detail {
 namespace {
 
 inline constexpr char kHexDigits[] = "0123456789abcdef";
-inline constexpr std::uint64_t kMillisPerHour = 60U * 60U * 1000U;
+inline constexpr std::uint64_t kMillisPerHour = static_cast<std::uint64_t>(60U * 60U * 1000U);
 inline constexpr std::uint64_t kMaxCat3NumericField =
         static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max());
 inline constexpr std::uint64_t kMaxProcessSequenceSeed = 1'000'000U;

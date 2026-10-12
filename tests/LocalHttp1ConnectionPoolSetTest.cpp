@@ -25,6 +25,7 @@ TEST(LocalHttp1ConnectionPoolSetTest, CreatesOnePoolPerLoopAndInitializesThem) {
 }
 
 TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
+    // NOLINTBEGIN(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
     fiber::event::EventLoopGroup group(2);
     fiber::http::LocalHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
@@ -63,6 +64,7 @@ TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
     EXPECT_TRUE(loop1_future.get());
     group.stop();
     group.join();
+    // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(LocalHttp1ConnectionPoolSetTest, ShutdownCompletesInlineOnTheOnlyWorker) {

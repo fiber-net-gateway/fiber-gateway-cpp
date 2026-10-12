@@ -12,9 +12,11 @@
 
 namespace fiber::quic {
 
-inline constexpr std::size_t kQuicMaxCryptoBuffered = 64 * 1024;
+inline constexpr std::size_t kQuicMaxCryptoBuffered =
+        static_cast<const std::size_t>(static_cast<const std::size_t>(static_cast<const std::size_t>(64 * 1024)));
 inline constexpr std::size_t kQuicCryptoRecvMaxActiveExtents = 1024;
-inline constexpr std::size_t kQuicRecvCompactMinBackingCapacity = 4 * 1024;
+inline constexpr std::size_t kQuicRecvCompactMinBackingCapacity =
+        static_cast<const std::size_t>(static_cast<const std::size_t>(static_cast<const std::size_t>(4 * 1024)));
 inline constexpr std::uint8_t kQuicRecvCompactRatio = 4;
 
 class QuicDataReassembler : public common::NonCopyable, public common::NonMovable {

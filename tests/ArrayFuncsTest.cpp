@@ -28,7 +28,7 @@ std::string string_to_utf8(const JsValue &value) {
         out.assign(native.data, native.len);
         return out;
     }
-    auto *str = as_string(value);
+    const auto *str = as_string(value);
     if (str) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
@@ -62,7 +62,7 @@ void expect_script_int(std::string_view source, std::int64_t expected) {
 
 TEST(ArrayFuncsTest, JoinWithDelimiter) { expect_script_string("return array.join([1, 2, 3], \",\");", "1,2,3"); }
 
-TEST(ArrayFuncsTest, JoinDefaultDelimiter) { expect_script_string("return array.join([\"a\", \"b\", \"c\"]);", "abc"); }
+TEST(ArrayFuncsTest, JoinDefaultDelimiter) { expect_script_string(R"(return array.join(["a", "b", "c"]);)", "abc"); }
 
 TEST(ArrayFuncsTest, JoinEmptyArray) { expect_script_string("return array.join([], \",\");", ""); }
 
@@ -84,12 +84,12 @@ TEST(ArrayFuncsTest, PopEmptyReturnsNull) { expect_script_null("return array.pop
 
 TEST(ArrayFuncsTest, PushAppendsVariadicAndReturnsArray) {
     expect_script_string("let a = [1]; array.push(a, 2, 3); return array.join(a, \",\");", "1,2,3");
-    expect_script_string("let a = []; let b = array.push(a, \"x\"); return array.join(b, \",\");", "x");
+    expect_script_string(R"(let a = []; let b = array.push(a, "x"); return array.join(b, ",");)", "x");
 }
 
 TEST(ArrayFuncsTest, NonArrayRaisesCatchableTypeError) {
-    expect_script_string("try { array.join(123, \",\"); return \"no-throw\"; } catch (e) { return \"caught\"; }",
+    expect_script_string(R"(try { array.join(123, ","); return "no-throw"; } catch (e) { return "caught"; })",
                          "caught");
-    expect_script_string("try { array.pop(123); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
-    expect_script_string("try { array.push(123, 1); return \"no-throw\"; } catch (e) { return \"caught\"; }", "caught");
+    expect_script_string(R"(try { array.pop(123); return "no-throw"; } catch (e) { return "caught"; })", "caught");
+    expect_script_string(R"(try { array.push(123, 1); return "no-throw"; } catch (e) { return "caught"; })", "caught");
 }

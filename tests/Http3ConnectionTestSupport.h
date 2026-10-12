@@ -206,11 +206,14 @@ public:
 
 private:
     static fiber::http::Http3ControlStreams::Ops control_ops() noexcept {
-        return {[](void *, const fiber::http::Http3ControlStreamEvent &) noexcept {
-                    return fiber::http::Http3ErrorCode::NoError;
-                },
-                [](void *owner) noexcept { return static_cast<ControlFixture *>(owner)->push_result_; },
-                [](void *p, fiber::http::Http3ErrorCode e) noexcept { static_cast<ControlFixture *>(p)->close(e); }};
+        return {.on_control_event =
+                        [](void *, const fiber::http::Http3ControlStreamEvent &) noexcept {
+                            return fiber::http::Http3ErrorCode::NoError;
+                        },
+                .on_push_stream =
+                        [](void *owner) noexcept { return static_cast<ControlFixture *>(owner)->push_result_; },
+                .on_error = [](void *p,
+                               fiber::http::Http3ErrorCode e) noexcept { static_cast<ControlFixture *>(p)->close(e); }};
     }
     fiber::http::Http3ErrorCode push_result_;
     fiber::quic::QuicConnection quic_;

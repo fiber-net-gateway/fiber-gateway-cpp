@@ -342,7 +342,7 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
     if (!bind_result) {
         port_promise->set_value(0);
         outcome.err = bind_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -350,7 +350,7 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
     port_promise->set_value(port_result ? *port_result : 0);
     if (!port_result) {
         outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -358,7 +358,7 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
     auto recv_result = co_await socket.recv_from(buf.data(), buf.size(), 2s);
     if (!recv_result) {
         outcome.err = recv_result.error();
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
     ++outcome.recv_count;
@@ -366,7 +366,7 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
     response[1] = buf[1];
     if (!echo_question_name(buf.data(), recv_result->size, response)) {
         outcome.err = IoErr::Invalid;
-        outcome_promise->set_value(std::move(outcome));
+        outcome_promise->set_value(outcome);
         co_return;
     }
 
@@ -385,7 +385,7 @@ DetachedTask run_single_response_server(fiber::event::EventLoop *loop, std::prom
         }
     }
     socket.close();
-    outcome_promise->set_value(std::move(outcome));
+    outcome_promise->set_value(outcome);
 }
 
 DetachedTask run_cache_hit_resolve(fiber::event::EventLoop *loop, fiber::dns::SharedDnsCache2 *cache,
@@ -404,7 +404,8 @@ DetachedTask run_cache_hit_resolve(fiber::event::EventLoop *loop, fiber::dns::Sh
     std::array<fiber::net::IpAddress, 1> records{fiber::net::IpAddress::v4({10, 0, 0, 1})};
     auto now = loop->now();
     const std::string_view cache_name = "cache.example";
-    const fiber::dns::DnsCacheKey cache_key{cache_name, fiber::dns::dns_cache_hash(cache_name)};
+    const fiber::dns::DnsCacheKey cache_key{.normalized_name = cache_name,
+                                            .hash = fiber::dns::dns_cache_hash(cache_name)};
     auto cache_err = cache->upsert_address_set(cache_key, now, fiber::net::IpFamily::V4, records.data(), 1, now + 30s);
     if (cache_err != IoErr::None) {
         outcome.err = cache_err;
@@ -563,7 +564,7 @@ DetachedTask run_cache_lookup(fiber::event::EventLoop *loop, fiber::dns::SharedD
                               std::promise<CacheLookupOutcome> *promise) {
     CacheLookupOutcome outcome;
     fiber::dns::DnsCacheOut cache_out;
-    const fiber::dns::DnsCacheKey key{qname, fiber::dns::dns_cache_hash(qname)};
+    const fiber::dns::DnsCacheKey key{.normalized_name = qname, .hash = fiber::dns::dns_cache_hash(qname)};
     outcome.err = cache->lookup(key, loop->now(), cache_out);
     outcome.found = outcome.err == IoErr::None && cache_out.kind != fiber::dns::DnsCacheOutKind::Miss;
     promise->set_value(outcome);
@@ -588,7 +589,7 @@ TEST(DnsResolverLocalTest, ResolvesFromCacheWithoutUpstreamQuery) {
     ASSERT_EQ(outcome.err, IoErr::None);
     ASSERT_EQ(outcome.status, ResolveStatus::Success);
     ASSERT_EQ(outcome.canonical, "cache.example");
-    ASSERT_EQ(outcome.records.size(), 1u);
+    ASSERT_EQ(outcome.records.size(), 1U);
     EXPECT_EQ(outcome.records[0], "10.0.0.1");
 }
 
@@ -620,11 +621,11 @@ TEST(DnsResolverLocalTest, ResolvesCnameAndUsesCacheOnSecondLookup) {
     group.join();
 
     ASSERT_EQ(server.err, IoErr::None);
-    ASSERT_EQ(server.recv_count, 1u);
+    ASSERT_EQ(server.recv_count, 1U);
     ASSERT_EQ(outcome.err, IoErr::None);
     ASSERT_EQ(outcome.status, ResolveStatus::Success);
     ASSERT_EQ(outcome.canonical, "edge.example.net");
-    ASSERT_EQ(outcome.records.size(), 1u);
+    ASSERT_EQ(outcome.records.size(), 1U);
     EXPECT_EQ(outcome.records[0], "7.7.7.7");
 }
 
@@ -654,10 +655,10 @@ TEST(DnsResolverLocalTest, ResolvesAnswerWithLargeUnneededSections) {
     group.join();
 
     ASSERT_EQ(server.err, IoErr::None);
-    EXPECT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(server.recv_count, 1U);
     ASSERT_EQ(outcome.err, IoErr::None);
     ASSERT_EQ(outcome.status, ResolveStatus::Success);
-    ASSERT_EQ(outcome.records.size(), 1u);
+    ASSERT_EQ(outcome.records.size(), 1U);
     EXPECT_EQ(outcome.records[0], "203.0.113.7");
 }
 
@@ -687,7 +688,7 @@ TEST(DnsResolverLocalTest, FindsNegativeSoaAfterLargeNsSection) {
     group.join();
 
     ASSERT_EQ(server.err, IoErr::None);
-    EXPECT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(server.recv_count, 1U);
     EXPECT_EQ(outcome.err, IoErr::None);
     EXPECT_EQ(outcome.status, ResolveStatus::NoData);
     EXPECT_TRUE(outcome.records.empty());
@@ -720,7 +721,7 @@ TEST(DnsResolverLocalTest, DoesNotTreatReferralAsNoData) {
     group.join();
 
     EXPECT_EQ(server.err, IoErr::None);
-    EXPECT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(server.recv_count, 1U);
     EXPECT_EQ(outcome.err, IoErr::None);
     EXPECT_EQ(outcome.status, ResolveStatus::ServerFailure);
     EXPECT_TRUE(outcome.records.empty());
@@ -759,10 +760,10 @@ TEST(DnsResolverLocalTest, CachesOnlyReachableCnameAnswers) {
     group.join();
 
     ASSERT_EQ(server.err, IoErr::None);
-    ASSERT_EQ(server.recv_count, 1u);
+    ASSERT_EQ(server.recv_count, 1U);
     ASSERT_EQ(outcome.err, IoErr::None);
     ASSERT_EQ(outcome.status, ResolveStatus::Success);
-    ASSERT_EQ(outcome.records.size(), 1u);
+    ASSERT_EQ(outcome.records.size(), 1U);
     EXPECT_EQ(outcome.records[0], "7.7.7.7");
     ASSERT_EQ(cache_outcome.err, IoErr::None);
     EXPECT_FALSE(cache_outcome.found);
@@ -814,7 +815,7 @@ TEST(DnsResolverLocalTest, RejectsUnrelatedAnswerWithoutRetryingOrOrphaningWaite
     group.join();
 
     ASSERT_EQ(server.err, IoErr::None);
-    ASSERT_EQ(server.recv_count, 1u);
+    ASSERT_EQ(server.recv_count, 1U);
     EXPECT_EQ(first.err, IoErr::Invalid);
     EXPECT_EQ(second.err, IoErr::Invalid);
     ASSERT_EQ(cache_outcome.err, IoErr::None);
@@ -852,7 +853,7 @@ TEST(DnsResolverLocalTest, RejectsConflictingCnameTargetsBeforeCaching) {
     group.join();
 
     ASSERT_EQ(server.err, IoErr::None);
-    ASSERT_EQ(server.recv_count, 1u);
+    ASSERT_EQ(server.recv_count, 1U);
     EXPECT_EQ(outcome.err, IoErr::Invalid);
     ASSERT_EQ(cache_outcome.err, IoErr::None);
     EXPECT_FALSE(cache_outcome.found);
@@ -887,7 +888,7 @@ TEST(DnsResolverLocalTest, DoesNotRequeryWhenExpectedCacheEntryIsMissing) {
     group.join();
 
     ASSERT_EQ(server.err, IoErr::None);
-    EXPECT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(server.recv_count, 1U);
     EXPECT_EQ(outcome.err, IoErr::Invalid);
 }
 
@@ -922,13 +923,13 @@ TEST(DnsResolverLocalTest, ConcurrentLookupsShareSingleUpstreamQuery) {
     group.join();
 
     ASSERT_EQ(server.err, IoErr::None);
-    ASSERT_EQ(server.recv_count, 1u);
+    ASSERT_EQ(server.recv_count, 1U);
     ASSERT_EQ(first.err, IoErr::None);
     ASSERT_EQ(second.err, IoErr::None);
     ASSERT_EQ(first.status, ResolveStatus::Success);
     ASSERT_EQ(second.status, ResolveStatus::Success);
-    ASSERT_EQ(first.records.size(), 1u);
-    ASSERT_EQ(second.records.size(), 1u);
+    ASSERT_EQ(first.records.size(), 1U);
+    ASSERT_EQ(second.records.size(), 1U);
     EXPECT_EQ(first.records[0], "9.8.7.6");
     EXPECT_EQ(second.records[0], "9.8.7.6");
 }

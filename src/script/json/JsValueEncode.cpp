@@ -81,7 +81,7 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
                 NativeStr native = js_value_native_string(value);
                 return gen.string(native.data, native.len);
             } else {
-                auto *str = js_value_heap_ptr<const GcString>(value);
+                const auto *str = js_value_heap_ptr<const GcString>(value);
                 if (!str) {
                     return Generator::Result::InvalidString;
                 }
@@ -92,7 +92,7 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
         case JsNodeType::Object:
             return encode_object(gen, js_value_heap_ptr<const GcObject>(value));
         case JsNodeType::Exception: {
-            auto *exc = js_value_heap_ptr<const GcException>(value);
+            const auto *exc = js_value_heap_ptr<const GcException>(value);
             if (!exc) {
                 return Generator::Result::InvalidValue;
             }
@@ -151,7 +151,7 @@ Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
                 NativeBin native = js_value_native_binary(value);
                 return gen.binary(native.data, native.len);
             } else {
-                auto *bin = js_value_heap_ptr<const GcBinary>(value);
+                const auto *bin = js_value_heap_ptr<const GcBinary>(value);
                 if (!bin) {
                     return Generator::Result::InvalidString;
                 }

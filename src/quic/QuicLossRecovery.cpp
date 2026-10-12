@@ -150,10 +150,13 @@ common::IoResult<QuicLossRecoveryResult> quic_detect_lost(QuicConnection &connec
 
             if (front->packet_len != 0) {
                 record_ecn_probe_lost(connection, *front);
-                const bool unblocked = quic_congestion_on_loss(
-                        connection.congestion(),
-                        QuicLossSample{front->packet_len, front->packet_number, front->send_time, front->ignore_loss},
-                        connection.reset_packet_number(), now, connection.congestion().mtu);
+                const bool unblocked =
+                        quic_congestion_on_loss(connection.congestion(),
+                                                QuicLossSample{.packet_len = front->packet_len,
+                                                               .packet_number = front->packet_number,
+                                                               .send_time = front->send_time,
+                                                               .ignore_loss = front->ignore_loss},
+                                                connection.reset_packet_number(), now, connection.congestion().mtu);
                 result.unblocked = result.unblocked || unblocked;
             }
 

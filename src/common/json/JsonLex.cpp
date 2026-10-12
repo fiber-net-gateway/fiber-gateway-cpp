@@ -545,7 +545,7 @@ LexStatus Lexer::scan_current(const char *data, std::size_t len, std::size_t &of
                               ScanStatus (*scanner)(TokenReader &, bool, ParseError &, std::size_t,
                                                     ScannedToken &) noexcept) noexcept {
     const std::size_t start = offset;
-    TokenReader reader{nullptr, data + start, len - start, nullptr};
+    TokenReader reader{.prefix = nullptr, .data = data + start, .len = len - start, .out = nullptr};
     ScannedToken scanned;
     ScanStatus status = scanner(reader, final, error, token_offset, scanned);
     if (status == ScanStatus::NeedMore) {
@@ -576,7 +576,7 @@ LexStatus Lexer::scan_current_literal(const char *data, std::size_t len, std::si
                                       std::size_t token_offset, const char *literal, TokenKind kind, Token &out,
                                       ParseError &error) noexcept {
     const std::size_t start = offset;
-    TokenReader reader{nullptr, data + start, len - start, nullptr};
+    TokenReader reader{.prefix = nullptr, .data = data + start, .len = len - start, .out = nullptr};
     ScannedToken scanned;
     ScanStatus status = scan_literal(reader, final, error, token_offset, literal, kind, scanned);
     if (status == ScanStatus::NeedMore) {
@@ -606,7 +606,7 @@ LexStatus Lexer::scan_current_literal(const char *data, std::size_t len, std::si
 LexStatus Lexer::continue_partial(const char *data, std::size_t len, std::size_t &offset, bool final, Token &out,
                                   ParseError &error) noexcept {
     token_storage_.clear();
-    TokenReader reader{&partial_, data + offset, len - offset, &token_storage_};
+    TokenReader reader{.prefix = &partial_, .data = data + offset, .len = len - offset, .out = &token_storage_};
     ScannedToken scanned;
     ScanStatus status = ScanStatus::Error;
     const unsigned char first = static_cast<unsigned char>(partial_.data[0]);

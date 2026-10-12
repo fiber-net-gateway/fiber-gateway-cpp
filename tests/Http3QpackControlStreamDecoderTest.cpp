@@ -41,7 +41,7 @@ void append_prefixed_integer(std::vector<std::uint8_t> &out, std::uint8_t prefix
 } // namespace
 
 TEST(Http3QpackControlStreamDecoderTest, EncoderAcceptsCapacityZero) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         fiber::mem::IoBufChain chain;
         append_chain(chain, {0x20});
 
@@ -52,7 +52,7 @@ TEST(Http3QpackControlStreamDecoderTest, EncoderAcceptsCapacityZero) {
 }
 
 TEST(Http3QpackControlStreamDecoderTest, EncoderRejectsCapacityNonZero) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         fiber::mem::IoBufChain chain;
         append_chain(chain, {0x21});
 
@@ -63,7 +63,7 @@ TEST(Http3QpackControlStreamDecoderTest, EncoderRejectsCapacityNonZero) {
 }
 
 TEST(Http3QpackControlStreamDecoderTest, EncoderRejectsInsertInstruction) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         fiber::mem::IoBufChain chain;
         append_chain(chain, {0x80});
 
@@ -74,7 +74,7 @@ TEST(Http3QpackControlStreamDecoderTest, EncoderRejectsInsertInstruction) {
 }
 
 TEST(Http3QpackControlStreamDecoderTest, DecoderAcceptsStreamCancellation) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         std::vector<std::uint8_t> bytes;
         append_prefixed_integer(bytes, 0x40, 6, 67);
 
@@ -91,7 +91,7 @@ TEST(Http3QpackControlStreamDecoderTest, DecoderAcceptsStreamCancellation) {
 }
 
 TEST(Http3QpackControlStreamDecoderTest, DecoderRejectsSectionAcknowledgement) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         fiber::mem::IoBufChain chain;
         append_chain(chain, {0x80});
 
@@ -103,7 +103,7 @@ TEST(Http3QpackControlStreamDecoderTest, DecoderRejectsSectionAcknowledgement) {
 }
 
 TEST(Http3QpackControlStreamDecoderTest, DecoderRejectsInsertCountIncrement) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         fiber::mem::IoBufChain chain;
         append_chain(chain, {0x00});
 

@@ -17,6 +17,8 @@ std::string base64_encode(const std::uint8_t *data, std::size_t len);
 // alphabet (incl. whitespace/newlines), or misplaced/overlong '=' padding. On
 // success, writes decoded bytes to `out` (cleared first). Does not validate
 // non-zero padding bits (matches Java's basic-decoder leniency there).
+// Allocation failure is fatal by house policy (no-exceptions; bad_alloc would terminate).
+// NOLINTNEXTLINE(bugprone-exception-escape)
 bool base64_decode(std::string_view in, std::string &out) noexcept;
 
 } // namespace fiber::util

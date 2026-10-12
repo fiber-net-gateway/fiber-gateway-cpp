@@ -104,7 +104,7 @@ EVP_PKEY *load_key(const char *pem) {
 // collecting test scopes a guard that frees what it gathered.
 std::vector<SSL_SESSION *> g_new_sessions;
 
-int stash_new_session(SSL *, SSL_SESSION *sess) noexcept {
+int stash_new_session(SSL * /*unused*/, SSL_SESSION *sess) noexcept {
     g_new_sessions.push_back(sess);
     return 1; // the stash took ownership
 }
@@ -391,7 +391,9 @@ struct ServerMaterial {
 
     [[nodiscard]] TlsServerConfig config() const {
         TlsServerConfig cfg;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
         cfg.chain = &*chain;
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) ASSERT guard is opaque to the checker
         cfg.key = &*key;
         cfg.alpn = alpn;
         cfg.now_unix_ms = certfix::kRefNowMs;
@@ -574,7 +576,7 @@ TEST(TlsServerHandshake13Full, OurClientDrivesOurServer) {
         EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
         EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
         // The server saw the full server chain; the client saw none.
-        EXPECT_EQ(2u, client_state.peer_chain.size());
+        EXPECT_EQ(2U, client_state.peer_chain.size());
         EXPECT_TRUE(server_state.peer_chain.empty());
     });
 }
@@ -931,8 +933,8 @@ Event feed_handshake_header(TlsServerHandshakeEngine &engine, std::uint8_t type,
 TEST(TlsServerHandshake13Refuse, OversizedHandshakeHeaderRefusedBeforeBody) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         ServerMaterial material;
-        constexpr std::size_t kOrdinary = 16u << 10;
-        constexpr std::size_t kCertificate = 100u << 10;
+        constexpr std::size_t kOrdinary = 16U << 10;
+        constexpr std::size_t kCertificate = 100U << 10;
         {
             TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
             EXPECT_EQ(Event::None, feed_handshake_header(engine, 1, kOrdinary)); // at cap: awaits the body
@@ -999,7 +1001,7 @@ TEST(TlsServerHandshake13Mtls, ClientCertificateVerified) {
         ASSERT_TRUE(drive(*client, engine, false));
 
         TlsConnectedState state = engine.take_state();
-        ASSERT_EQ(2u, state.peer_chain.size()); // kClientRsaPem leaf + RSA intermediate
+        ASSERT_EQ(2U, state.peer_chain.size()); // kClientRsaPem leaf + RSA intermediate
         EXPECT_FALSE(state.session_resumed);
     });
 }
@@ -1218,7 +1220,7 @@ TEST(TlsServerHandshake12Full, ClientCertificateVerified) {
 
         TlsConnectedState state = engine.take_state();
         EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
-        ASSERT_EQ(2u, state.peer_chain.size()); // kClientRsaPem leaf + RSA intermediate
+        ASSERT_EQ(2U, state.peer_chain.size()); // kClientRsaPem leaf + RSA intermediate
     });
 }
 
@@ -1247,7 +1249,7 @@ struct CapturingMinter {
         return kTicket.size();
     }
 
-    [[nodiscard]] TlsTicketMinter hook() noexcept { return TlsTicketMinter{&mint, this}; }
+    [[nodiscard]] TlsTicketMinter hook() noexcept { return TlsTicketMinter{.mint = &mint, .ctx = this}; }
 };
 
 } // namespace
@@ -1270,10 +1272,10 @@ TEST(TlsServerHandshake12Full, TicketMintedAfterClientFinished) {
         TlsConnectedState state = engine.take_state();
         ASSERT_TRUE(minter.called);
         EXPECT_EQ(state.suite, minter.suite);
-        EXPECT_EQ(7200u, minter.timeout_s);
-        ASSERT_EQ(2u, minter.alpn.size());
+        EXPECT_EQ(7200U, minter.timeout_s);
+        ASSERT_EQ(2U, minter.alpn.size());
         EXPECT_EQ(0, std::memcmp("h2", minter.alpn.data(), 2));
-        ASSERT_EQ(48u, minter.resumption_master.size());
+        ASSERT_EQ(48U, minter.resumption_master.size());
         EXPECT_EQ(0, std::memcmp(state.tls12_master.bytes().data(), minter.resumption_master.data(), 48));
         // The NST is plaintext on the wire — the ticket blob is verbatim.
         EXPECT_TRUE(wire_contains(log.server_to_client, CapturingMinter::kTicket));
@@ -1380,8 +1382,8 @@ public:
         return true;
     }
 
-    [[nodiscard]] TlsTicketMinter minter_hook() noexcept { return {&mint, this}; }
-    [[nodiscard]] TlsResumptionLookup lookup_hook() noexcept { return {&lookup, this}; }
+    [[nodiscard]] TlsTicketMinter minter_hook() noexcept { return {.mint = &mint, .ctx = this}; }
+    [[nodiscard]] TlsResumptionLookup lookup_hook() noexcept { return {.lookup = &lookup, .ctx = this}; }
 
 private:
     std::map<std::vector<std::uint8_t>, Entry> entries;
@@ -1401,7 +1403,7 @@ void run_ticketed_hop1(const TlsServerConfig &cfg, const TlsTicketMinter &minter
     // BIO; the read path digests it and the stash collects the session.
     std::array<char, 64> sink{};
     (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    ASSERT_EQ(1u, g_new_sessions.size());
+    ASSERT_EQ(1U, g_new_sessions.size());
 }
 
 bool feed_server(TlsServerHandshakeEngine &engine, std::span<const std::uint8_t> bytes) {
@@ -1567,7 +1569,7 @@ TEST(TlsServerHandshake13Psk, BoringClientResumesWithTicket) {
         const TlsResumptionLookup lookup = store.lookup_hook();
 
         run_ticketed_hop1(cfg, minter);
-        ASSERT_EQ(1u, store.size());
+        ASSERT_EQ(1U, store.size());
 
         auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
         ASSERT_NE(nullptr, client);
@@ -1583,13 +1585,13 @@ TEST(TlsServerHandshake13Psk, BoringClientResumesWithTicket) {
         EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
                   static_cast<std::uint16_t>(state.suite));
         EXPECT_EQ(1, SSL_session_reused(client->ssl()));
-        EXPECT_EQ(2u, store.size()); // the resumed connection minted its own NST
+        EXPECT_EQ(2U, store.size()); // the resumed connection minted its own NST
 
         // The NST flew after Done; drive's final spin already shipped it into
         // the client's read BIO. The read path digests it and the stash grows.
         std::array<char, 64> sink{};
         (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-        EXPECT_EQ(2u, g_new_sessions.size());
+        EXPECT_EQ(2U, g_new_sessions.size());
 
         // App-data round trip on the resumed connection.
         const char kPing[] = "ping over psk";
@@ -1627,7 +1629,7 @@ TEST(TlsServerHandshake13Psk, BoringClientEarlyDataAccepted) {
         run_ticketed_hop1(cfg, minter);
         const TestSessionStore::Entry *entry = store.first_entry();
         ASSERT_NE(nullptr, entry);
-        EXPECT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
+        EXPECT_EQ(14336U, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
 
         auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
         ASSERT_NE(nullptr, client);
@@ -1664,13 +1666,13 @@ TEST(TlsServerHandshake13Psk, BoringClientEarlyDataAccepted) {
         const std::vector<std::uint8_t> early = chain_bytes(engine.take_early_data());
         ASSERT_EQ(sizeof(kEarly) - 1, early.size());
         EXPECT_EQ(0, std::memcmp(kEarly, early.data(), early.size()));
-        EXPECT_EQ(2u, store.size()); // NST minted on the 0-RTT connection too
+        EXPECT_EQ(2U, store.size()); // NST minted on the 0-RTT connection too
 
         // The NST flies after Done; deliver it, then round-trip app data.
         ASSERT_TRUE(client->ship(chain_bytes(engine.take_output())));
         std::array<char, 64> sink{};
         (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-        EXPECT_EQ(2u, g_new_sessions.size());
+        EXPECT_EQ(2U, g_new_sessions.size());
 
         const char kPing[] = "ping after 0rtt";
         ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
@@ -1752,7 +1754,7 @@ TEST(TlsServerHandshake13Psk, BoringClientHrrAfterPskResume) {
         EXPECT_FALSE(state.early_data_accepted); // 0-RTT never survives an HRR
         EXPECT_TRUE(chain_bytes(engine.take_early_data()).empty());
         EXPECT_EQ(0, SSL_early_data_accepted(client->ssl()));
-        EXPECT_EQ(2u, store.size());
+        EXPECT_EQ(2U, store.size());
 
         // App data still round-trips.
         const char kPing[] = "ping after hrr-psk";
@@ -1783,7 +1785,7 @@ TEST(TlsServerHandshake13Psk, OurClientResumesOurServer) {
             EXPECT_FALSE(client.failed());
             EXPECT_FALSE(server.take_state().session_resumed);
         }
-        ASSERT_EQ(1u, store.size());
+        ASSERT_EQ(1U, store.size());
         const TestSessionStore::Entry *entry = store.first_entry();
         ASSERT_NE(nullptr, entry);
 
@@ -1809,7 +1811,7 @@ TEST(TlsServerHandshake13Psk, OurClientResumesOurServer) {
         EXPECT_TRUE(client_state.session_resumed);
         EXPECT_FALSE(server_state.early_data_accepted);
         EXPECT_TRUE(chain_bytes(server.take_early_data()).empty());
-        EXPECT_EQ(2u, store.size()); // the resumed connection minted its own NST
+        EXPECT_EQ(2U, store.size()); // the resumed connection minted its own NST
         EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
         EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
 
@@ -1856,7 +1858,7 @@ TEST(TlsServerHandshake13Psk, OurClientEarlyDataAccepted) {
         }
         const TestSessionStore::Entry *entry = store.first_entry();
         ASSERT_NE(nullptr, entry);
-        EXPECT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
+        EXPECT_EQ(14336U, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
 
         TlsSessionOffer offer;
         const std::vector<std::uint8_t> ticket = store.first_ticket();
@@ -1886,7 +1888,7 @@ TEST(TlsServerHandshake13Psk, OurClientEarlyDataAccepted) {
         const std::vector<std::uint8_t> early = chain_bytes(server.take_early_data());
         ASSERT_EQ(early_request.size(), early.size());
         EXPECT_EQ(0, std::memcmp(early_request.data(), early.data(), early.size()));
-        EXPECT_EQ(2u, store.size());
+        EXPECT_EQ(2U, store.size());
         EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
         EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
 
@@ -1931,7 +1933,7 @@ TEST(TlsServerHandshake13Psk, EarlyDataRejectedWhenDisabled) {
         }
         const TestSessionStore::Entry *entry = store.first_entry();
         ASSERT_NE(nullptr, entry);
-        ASSERT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
+        ASSERT_EQ(14336U, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
 
         TlsServerConfig cfg = material.server_material.config(); // early data OFF
         TlsSessionOffer offer;
@@ -2014,12 +2016,12 @@ TEST(TlsServerHandshake13Psk, EarlyDataOverBudgetFatal) {
                 static_cast<std::uint16_t>(alert_len), {tail.data() + fiber::tls::kTlsRecordHeaderSize, alert_len},
                 alert_dst);
         ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, alert.status);
-        ASSERT_EQ(2u, alert.plain_len);
+        ASSERT_EQ(2U, alert.plain_len);
         EXPECT_EQ(static_cast<std::uint8_t>(TlsAlertDesc::UnexpectedMessage), alert_dst[1]);
 
         // What sank before the budget broke stays readable — and bounded.
         const std::vector<std::uint8_t> early = chain_bytes(server.take_early_data());
-        EXPECT_LE(early.size(), 14336u); // kMaxEarlyDataAccepted
+        EXPECT_LE(early.size(), 14336U); // kMaxEarlyDataAccepted
     });
 }
 
@@ -2047,7 +2049,7 @@ TEST(TlsServerHandshake13Psk, UnknownTicketFallsBackToFull) {
         TlsConnectedState state = engine.take_state();
         EXPECT_FALSE(state.session_resumed);
         EXPECT_EQ(0, SSL_session_reused(client->ssl()));
-        EXPECT_EQ(2u, store.size()); // the full handshake minted a fresh ticket
+        EXPECT_EQ(2U, store.size()); // the full handshake minted a fresh ticket
     });
 }
 
@@ -2090,7 +2092,7 @@ TEST(TlsServerHandshake13Psk, StaleTicketFallsBackToFull) {
         const TlsResumptionLookup lookup = store.lookup_hook();
 
         run_ticketed_hop1(cfg, minter);
-        store.age_skew_first(5 * 60 * 1000); // issued 5 min "earlier": server_age = 5 min
+        store.age_skew_first(static_cast<std::int64_t>(5 * 60 * 1000)); // issued 5 min "earlier": server_age = 5 min
 
         auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
         ASSERT_NE(nullptr, client);
@@ -2108,7 +2110,7 @@ TEST(TlsServerHandshake13Psk, StaleTicketFallsBackToFull) {
 // ---- engine surface ----
 
 TEST(TlsServerHandshakeSurface, NullCredentialFailsConstruction) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         TlsServerConfig cfg; // chain/key null
         TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
         EXPECT_TRUE(engine.done());
@@ -2136,7 +2138,7 @@ struct CapturingServiceMinter {
         }
         return len;
     }
-    [[nodiscard]] TlsTicketMinter hook() noexcept { return TlsTicketMinter{&mint, this}; }
+    [[nodiscard]] TlsTicketMinter hook() noexcept { return TlsTicketMinter{.mint = &mint, .ctx = this}; }
 };
 
 // The full 1.3 handshake mints a stateless ticket carrying the DERIVED psk
@@ -2170,7 +2172,7 @@ TEST(TlsServerTicketService, Mint13ThroughEngineBindsSniAndCarriesPsk) {
         EXPECT_EQ(state.suite, contents.suite);
         EXPECT_EQ("h2", contents.alpn_view());
         EXPECT_EQ(certfix::kRefNowMs, contents.issued_ms);
-        EXPECT_EQ(7200u, contents.timeout_s);
+        EXPECT_EQ(7200U, contents.timeout_s);
         // PSK symmetry with the client's own NST-side derivation.
         const std::array<std::uint8_t, 1> nonce{0};
         const auto psk = fiber::tls::tls13_resumption_psk(state.resumption_master, nonce);
@@ -2214,7 +2216,7 @@ TEST(TlsServerTicketService, Mint12ThroughEngineCarriesMaster) {
         EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, contents.version);
         EXPECT_EQ(state.suite, contents.suite);
         EXPECT_EQ("h2", contents.alpn_view());
-        ASSERT_EQ(48u, contents.secret.len());
+        ASSERT_EQ(48U, contents.secret.len());
         EXPECT_TRUE(secrets_equal(state.tls12_master, contents.secret));
         // SNI was sent, so the empty name is not this ticket's name.
         TlsTicketContents wrong;
@@ -2253,7 +2255,7 @@ struct RecordingServiceLookup {
         self.seen_now_ms = now_unix_ms;
         return TlsTicketService::lookup_thunk(&self.service, identity, name, now_unix_ms, quic_early_data_context, out);
     }
-    [[nodiscard]] TlsResumptionLookup hook() noexcept { return TlsResumptionLookup{&lookup, this}; }
+    [[nodiscard]] TlsResumptionLookup hook() noexcept { return TlsResumptionLookup{.lookup = &lookup, .ctx = this}; }
 };
 
 } // namespace
@@ -2281,7 +2283,7 @@ TEST(TlsServerTicketService, StatelessResume13WithBoringClient) {
             ASSERT_TRUE(drive(*client, engine, false));
             std::array<char, 64> sink{};
             (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-            ASSERT_EQ(1u, g_new_sessions.size());
+            ASSERT_EQ(1U, g_new_sessions.size());
         }
 
         // hop 2: same SNI, the stashed session set — the PSK offer rides the ticket.
@@ -2307,7 +2309,7 @@ TEST(TlsServerTicketService, StatelessResume13WithBoringClient) {
         // stateless ticket of its own.
         std::array<char, 64> sink{};
         (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-        EXPECT_EQ(2u, g_new_sessions.size());
+        EXPECT_EQ(2U, g_new_sessions.size());
 
         // App data over the resumed connection, both directions.
         const char kPing[] = "ping stateless";
@@ -2350,7 +2352,7 @@ TEST(TlsServerTicketService, CrossVhostTicketFallsBackToFull) {
             ASSERT_TRUE(drive(*client, engine, false));
             std::array<char, 64> sink{};
             (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-            ASSERT_EQ(1u, g_new_sessions.size());
+            ASSERT_EQ(1U, g_new_sessions.size());
         }
 
         // hop 2: a different vhost presents the ticket.
@@ -2474,7 +2476,7 @@ TEST(TlsServerTicketService, StatelessResume12WithBoringClient) {
             ASSERT_TRUE(drive(*client, engine, false));
             std::array<char, 64> sink{};
             (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-            ASSERT_EQ(1u, g_new_sessions.size());
+            ASSERT_EQ(1U, g_new_sessions.size());
         }
 
         auto client = BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
@@ -2497,7 +2499,7 @@ TEST(TlsServerTicketService, StatelessResume12WithBoringClient) {
         // master) — the NST rides before the CCS, so drive() already digested it.
         std::array<char, 64> sink{};
         (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-        EXPECT_EQ(2u, g_new_sessions.size());
+        EXPECT_EQ(2U, g_new_sessions.size());
 
         // App data over the resumed connection, both directions.
         const char kPing[] = "ping stateless12";
@@ -2539,7 +2541,7 @@ TEST(TlsServerTicketService, CrossVhostTicket12FallsBackToFull) {
             ASSERT_TRUE(drive(*client, engine, false));
             std::array<char, 64> sink{};
             (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-            ASSERT_EQ(1u, g_new_sessions.size());
+            ASSERT_EQ(1U, g_new_sessions.size());
         }
 
         // hop 2: a different vhost presents the ticket.
@@ -2596,7 +2598,7 @@ struct SelectorState {
     }
 
     [[nodiscard]] TlsServerConfigSource source() noexcept {
-        return TlsServerConfigSource{&SelectorState::select, this};
+        return TlsServerConfigSource{.select = &SelectorState::select, .ctx = this};
     }
 };
 
@@ -2620,7 +2622,7 @@ TEST(TlsServerHandshakeSelector, SelectsConfigFromClientHello) {
         EXPECT_TRUE(selector.called);
         EXPECT_TRUE(selector.seen_has_name);
         EXPECT_EQ("example.com", selector.seen_name);
-        ASSERT_EQ(2u, selector.seen_alpn.size());
+        ASSERT_EQ(2U, selector.seen_alpn.size());
         EXPECT_EQ("h2", selector.seen_alpn[0]);
         EXPECT_EQ("http/1.1", selector.seen_alpn[1]);
 
