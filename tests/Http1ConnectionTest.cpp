@@ -760,4 +760,50 @@ TEST(Http1ConnectionTest, HeaderBufferExactlyFullAtLineBoundaryCompletesRequest)
     }
 }
 
+
+TEST(Http1ConnectionTest, RequestTrailersGrowAtLineBoundaryAndMidLine) {
+    std::string trailers = "X-Early: original\r\n";
+    trailers += "X-Pad: " + std::string(256 - trailers.size() - 9, 'P') + "\r\n";
+    ASSERT_EQ(trailers.size(), 256U);
+    trailers += "X-Large: " + std::string(600, 'L') + "\r\nX-Tail: tail\r\n\r\n";
+    const std::string request = "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                "1\r\na\r\n0\r\n" +
+                                trailers;
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    TransportMetrics metrics;
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        auto transport = std::make_unique<RecordingHttp1Transport>(group.at(0), metrics, request);
+        fiber::http::Http1ServerOptions options;
+        options.header_init_size = 256;
+        options.header_large_size = 256;
+        fiber::http::HttpHandler handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            ++metrics.handler_calls;
+            auto discarded = co_await exchange.discard_body(1s);
+            EXPECT_TRUE(discarded);
+            EXPECT_TRUE(exchange.request_trailers_complete());
+            EXPECT_EQ(exchange.request_trailers().get("x-early"), "original");
+            EXPECT_EQ(exchange.request_trailers().get("x-large"), std::string(600, 'L'));
+            EXPECT_EQ(exchange.request_trailers().get("x-tail"), "tail");
+            auto sent = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 204,
+                    .body = fiber::http::ResponseBodySpec::None(),
+                    .end_stream = true,
+            });
+            EXPECT_TRUE(sent);
+        };
+        fiber::http::Http1Connection connection(std::move(transport), handler, options);
+        co_await connection.run();
+        done.set_value();
+    });
+    const auto status = future.wait_for(3s);
+    group.stop();
+    group.join();
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_EQ(metrics.handler_calls, 1U);
+}
+
 } // namespace

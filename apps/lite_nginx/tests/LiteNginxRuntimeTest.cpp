@@ -1647,6 +1647,136 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
     promise->set_value(std::move(outcome));
 }
 
+
+struct UploadTimeoutOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    int status = 0;
+    std::string body;
+    std::string connection_header;
+    bool complete = false;
+    int followup_status = 0;
+};
+
+template<typename Exchange>
+fiber::async::Task<void> read_upload_timeout_response(Exchange &exchange, fiber::mem::BufPool &pool,
+                                                      UploadTimeoutOutcome &out, bool upload) {
+    fiber::http::HttpHeaders headers(pool);
+    if (upload) {
+        headers.set("Content-Length", "100");
+    }
+    // Leave the upload stream open without sending DATA. The timeout must
+    // produce a complete response without waiting for the request's END_STREAM.
+    auto sent = co_await exchange.send_request_header(
+            {.method = upload ? fiber::http::HttpMethod::Post : fiber::http::HttpMethod::Get,
+             .scheme = "https",
+             .authority = "localhost",
+             .path = upload ? "/upload" : "/health",
+             .headers = &headers},
+            !upload, 2s);
+    if (!sent) {
+        out.error = sent.error();
+        co_return;
+    }
+    auto head = co_await exchange.read_header(2s);
+    if (!head) {
+        out.error = head.error();
+        co_return;
+    }
+    if (upload) {
+        out.status = (*head)->status_code;
+        out.connection_header = (*head)->headers.get("connection");
+    } else {
+        out.followup_status = (*head)->status_code;
+    }
+    for (;;) {
+        auto body = co_await exchange.read_body(4096, 2s);
+        if (!body) {
+            out.error = body.error();
+            co_return;
+        }
+        const bool complete = body->complete();
+        if (upload) {
+            out.body += chain_to_string(std::move(*body));
+            out.complete = complete;
+        }
+        if (complete) {
+            break;
+        }
+    }
+}
+
+fiber::async::DetachedTask run_http2_upload_timeout_client(fiber::event::EventLoop &loop, std::uint16_t port,
+                                                           std::promise<UploadTimeoutOutcome> &promise) {
+    UploadTimeoutOutcome out;
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
+    fiber::http::Http2ClientConnection connection(loop);
+    auto connected = co_await connection.connect({fiber::net::IpAddress::loopback_v4(), port}, 2s, tls);
+    if (!connected) {
+        out.error = connected.error();
+    } else {
+        fiber::mem::BufPool pool;
+        {
+            fiber::http::ClientHttp2Exchange exchange(connection, pool);
+            co_await read_upload_timeout_response(exchange, pool, out, true);
+        }
+        if (out.error == fiber::common::IoErr::None) {
+            fiber::http::ClientHttp2Exchange exchange(connection, pool);
+            co_await read_upload_timeout_response(exchange, pool, out, false);
+        }
+        connection.shutdown();
+        (void) co_await connection.wait_closed();
+    }
+    promise.set_value(std::move(out));
+}
+
+fiber::async::DetachedTask run_http3_upload_timeout_client(fiber::quic::QuicUdpEndpoint &endpoint, std::uint16_t port,
+                                                           const std::string &cert_path,
+                                                           std::promise<UploadTimeoutOutcome> &promise) {
+    UploadTimeoutOutcome out;
+    auto trust = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(cert_path));
+    if (!trust) {
+        out.error = trust.error();
+        promise.set_value(std::move(out));
+        co_return;
+    }
+    fiber::http::Http3Client::Options options;
+    options.tls.trust_store = trust->get();
+    options.tls.verify_peer = true;
+    fiber::http::Http3Client client(endpoint, options);
+    auto started = endpoint.start();
+    if (!started) {
+        out.error = started.error();
+        promise.set_value(std::move(out));
+        co_return;
+    }
+    fiber::http::Http3ClientConnectOptions connect_options;
+    connect_options.remote_addr = {fiber::net::IpAddress::loopback_v4(), port};
+    connect_options.server_name = "localhost";
+    connect_options.handshake_timeout = 2s;
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    fiber::mem::BufPool pool;
+    auto connected = co_await connection.connect();
+    if (!connected) {
+        out.error = connected.error().io_error;
+    } else {
+        {
+            auto exchange = connection.open_exchange(pool);
+            co_await read_upload_timeout_response(exchange, pool, out, true);
+            (void) exchange.abort();
+        }
+        if (out.error == fiber::common::IoErr::None) {
+            auto exchange = connection.open_exchange(pool);
+            co_await read_upload_timeout_response(exchange, pool, out, false);
+            (void) exchange.abort();
+        }
+    }
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+    co_await endpoint.shutdown();
+    co_await connection.wait_closed();
+    promise.set_value(std::move(out));
+}
+
 class RuntimeHarness {
 public:
     explicit RuntimeHarness(const fiber::lite_nginx::runtime::RuntimeConfig &runtime) : launcher_(loop_) {
@@ -2850,6 +2980,87 @@ http {
     ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
     EXPECT_NE(upstream_future.get().find("POST /upload"), std::string::npos);
 }
+
+
+class LiteNginxUploadTimeoutTest : public testing::TestWithParam<bool> {};
+
+TEST_P(LiteNginxUploadTimeoutTest, StalledUploadReturns408AndConnectionRemainsUsable) {
+    const bool http3 = GetParam();
+    TestPemFile cert("upload-timeout-cert", kSelfSignedCertPem);
+    TestPemFile key("upload-timeout-key", kSelfSignedKeyPem);
+    TestScriptFile script("upload_timeout_health", "resp.sendJson(200, {ok: true});");
+    ASSERT_TRUE(cert.ok());
+    ASSERT_TRUE(key.ok());
+    ASSERT_TRUE(script.ok());
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+    const auto port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT ssl HTTP3;
+    server {
+        server_name localhost;
+        certificate CERT_FILE;
+        certificate_key KEY_FILE;
+        location /health { script_file SCRIPT_FILE; }
+        location /* {
+            proxy_read_timeout 200ms;
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("HTTP3"), sizeof("HTTP3") - 1, http3 ? "http3" : "");
+    config_text.replace(config_text.find("CERT_FILE"), sizeof("CERT_FILE") - 1, cert.path());
+    config_text.replace(config_text.find("KEY_FILE"), sizeof("KEY_FILE") - 1, key.path());
+    config_text.replace(config_text.find("SCRIPT_FILE"), sizeof("SCRIPT_FILE") - 1, script.path());
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    auto config = ConfigLoader::load_from_string(config_text, "upload_timeout.conf");
+    ASSERT_TRUE(config) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    fiber::event::EventLoopGroup group(1);
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
+    if (http3) {
+        fiber::quic::QuicUdpEndpoint::EndpointOptions options;
+        options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+        ASSERT_TRUE(endpoint.init(options));
+    }
+    group.start();
+    std::promise<UploadTimeoutOutcome> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return http3 ? run_http3_upload_timeout_client(endpoint, harness.port(), cert.path(), done)
+                     : run_http2_upload_timeout_client(group.at(0), harness.port(), done);
+    });
+    const auto status = future.wait_for(8s);
+    UploadTimeoutOutcome out;
+    if (status == std::future_status::ready) {
+        out = future.get();
+    }
+    group.stop();
+    group.join();
+    ASSERT_EQ(status, std::future_status::ready);
+    EXPECT_EQ(out.error, fiber::common::IoErr::None);
+    EXPECT_EQ(out.status, 408);
+    EXPECT_EQ(out.body, "408 Request Timeout\n");
+    EXPECT_TRUE(out.complete);
+    EXPECT_TRUE(out.connection_header.empty());
+    EXPECT_EQ(out.followup_status, 200);
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    EXPECT_NE(upstream_future.get().find("POST /upload"), std::string::npos);
+}
+
+INSTANTIATE_TEST_SUITE_P(Protocols, LiteNginxUploadTimeoutTest, testing::Values(false, true),
+                         [](const testing::TestParamInfo<bool> &info) { return info.param ? "Http3" : "Http2"; });
 
 TEST(LiteNginxRuntimeTest, ProgressingClientBodyStreamsWithinReadTimeout) {
     std::promise<std::string> upstream_request;
