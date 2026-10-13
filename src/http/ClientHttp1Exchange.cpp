@@ -665,7 +665,10 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBufChain &read_buf, std::chro
                 if (!header_buffer.can_grow()) {
                     co_return std::unexpected(common::IoErr::Invalid);
                 }
-                auto grow_result = header_buffer.grow_and_replace(parser);
+                // Trailer fields are pool-copied (no views into this buffer);
+                // only the restage branch is skipped at a line boundary.
+                common::IoResult<void> grow_result =
+                        parser.started() ? header_buffer.grow_and_replace(parser) : header_buffer.grow();
                 if (!grow_result) {
                     co_return std::unexpected(grow_result.error());
                 }
@@ -1565,22 +1568,6 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
         return std::unexpected(err);
     };
 
-    auto append_parsed_prefix = [&](Http1HeaderParseBuffer &buffer,
-                                    mem::IoBufChain &owner_bufs) -> common::IoResult<void> {
-        std::size_t consumed = static_cast<std::size_t>(buffer.buf().readable_data() - buffer.buf().data());
-        if (consumed == 0) {
-            return {};
-        }
-        auto retained = buffer.retain_prefix(consumed);
-        if (!retained) {
-            return std::unexpected(retained.error());
-        }
-        if (!owner_bufs.append(std::move(*retained))) {
-            return std::unexpected(common::IoErr::NoMem);
-        }
-        return {};
-    };
-
     auto init_result = response_header_buffer.ensure_init();
     if (!init_result) {
         co_return fail_exchange(init_result.error());
@@ -1644,6 +1631,8 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
                 header_node->head.reason =
                         std::string_view(reinterpret_cast<const char *>(line.reason_start),
                                          static_cast<std::size_t>(line.reason_end - line.reason_start));
+                // reason view now points into the current storage.
+                response_header_buffer.note_view();
             } else {
                 header_node->head.reason = {};
             }
@@ -1657,9 +1646,9 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
             co_return fail_exchange(common::IoErr::Invalid);
         }
         if (response_header_buffer.buf().writable() == 0) {
-            auto retain_result = append_parsed_prefix(response_header_buffer, header_node->owner_bufs);
-            if (!retain_result) {
-                co_return fail_exchange(retain_result.error());
+            auto pin_result = response_header_buffer.pin_viewed_storage(header_node->owner_bufs);
+            if (!pin_result) {
+                co_return fail_exchange(pin_result.error());
             }
             if (!response_header_buffer.can_grow()) {
                 co_return fail_exchange(common::IoErr::Invalid);
@@ -1699,6 +1688,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
             if (!field) {
                 co_return fail_exchange(common::IoErr::NoMem);
             }
+            response_header_buffer.note_view();
             if (const auto *handler = response_header_handler_map().get(std::string_view(lowercase, name_len),
                                                                         static_cast<std::uint32_t>(hash))) {
                 if (!(*handler)(header_parse_state, *field)) {
@@ -1710,14 +1700,19 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
 
         if (code == ParseCode::Again) {
             if (response_header_buffer.buf().writable() == 0) {
-                auto retain_result = append_parsed_prefix(response_header_buffer, header_node->owner_bufs);
-                if (!retain_result) {
-                    co_return fail_exchange(retain_result.error());
+                auto pin_result = response_header_buffer.pin_viewed_storage(header_node->owner_bufs);
+                if (!pin_result) {
+                    co_return fail_exchange(pin_result.error());
                 }
                 if (!response_header_buffer.can_grow()) {
                     co_return fail_exchange(common::IoErr::Invalid);
                 }
-                auto grow_result = response_header_buffer.grow_and_replace(response_header_parser);
+                // A line may end exactly at the buffer boundary: nothing is in
+                // flight then, so plain grow() applies (no line to restage).
+                common::IoResult<void> grow_result =
+                        response_header_parser.started()
+                                ? response_header_buffer.grow_and_replace(response_header_parser)
+                                : response_header_buffer.grow();
                 if (!grow_result) {
                     co_return fail_exchange(grow_result.error());
                 }
@@ -1733,9 +1728,9 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
             co_return fail_exchange(common::IoErr::Invalid);
         }
 
-        auto retain_result = append_parsed_prefix(response_header_buffer, header_node->owner_bufs);
-        if (!retain_result) {
-            co_return fail_exchange(retain_result.error());
+        auto pin_result = response_header_buffer.pin_viewed_storage(header_node->owner_bufs);
+        if (!pin_result) {
+            co_return fail_exchange(pin_result.error());
         }
 
         if (header_node->head.is_informational()) {

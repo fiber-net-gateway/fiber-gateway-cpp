@@ -569,7 +569,10 @@ Http1ExchangeIo::read_request_trailers(HttpExchange &exchange, std::chrono::mill
                 if (!header_buffer.can_grow()) {
                     co_return std::unexpected(common::IoErr::Invalid);
                 }
-                auto grow_result = header_buffer.grow_and_replace(parser);
+                // Trailer fields are pool-copied (no views into this buffer);
+                // only the restage branch is skipped at a line boundary.
+                common::IoResult<void> grow_result =
+                        parser.started() ? header_buffer.grow_and_replace(parser) : header_buffer.grow();
                 if (!grow_result) {
                     co_return std::unexpected(grow_result.error());
                 }
