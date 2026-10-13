@@ -67,9 +67,10 @@ bool is_java_ws_ascii(unsigned char b) noexcept {
 }
 
 // Mirrors Jackson's JsonNode.asInt(): Integer->value, Float->trunc-toward-zero
-// (NaN->0, +/-Inf->INT32_MAX/MIN like Java's (int)double), Boolean->0/1,
-// Null/Undefined->0, String->leading integer parse else 0, others->0. Used by
-// strings.substring's start/end (which default to 0 / INT32_MAX).
+// (NaN->0, anything past the int32 bounds (incl. +/-Inf)->INT32_MAX/MIN, like
+// Java's saturating (int)double), Boolean->0/1, Null/Undefined->0, String->
+// leading integer parse else 0, others->0. Used by strings.substring's
+// start/end (which default to 0 / INT32_MAX).
 std::int64_t as_int(const JsValue &v) noexcept {
     switch (js_value_type(v)) {
         case JsNodeType::Integer:
@@ -79,8 +80,14 @@ std::int64_t as_int(const JsValue &v) noexcept {
             if (std::isnan(d)) {
                 return 0;
             }
-            if (std::isinf(d)) {
-                return d > 0 ? static_cast<std::int64_t>(INT32_MAX) : static_cast<std::int64_t>(INT32_MIN);
+            // Java's (int)double saturates at the int32 bounds (the +/-Inf cases
+            // fold into these comparisons); a bare double->int64 cast is UB for
+            // finite magnitudes beyond 2^63.
+            if (d >= static_cast<double>(INT32_MAX)) {
+                return static_cast<std::int64_t>(INT32_MAX);
+            }
+            if (d <= static_cast<double>(INT32_MIN)) {
+                return static_cast<std::int64_t>(INT32_MIN);
             }
             return static_cast<std::int64_t>(d); // truncate toward zero
         }
@@ -563,10 +570,12 @@ AbiResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Li
         double d = js_value_double(count_arg);
         if (std::isnan(d)) {
             i = 0;
-        } else if (std::isinf(d)) {
-            i = d > 0 ? INT32_MAX : INT32_MIN;
+        } else if (d >= static_cast<double>(INT32_MAX)) {
+            i = INT32_MAX; // Java's (int)double saturation (+Inf included); bare cast is UB beyond 2^63
+        } else if (d <= static_cast<double>(INT32_MIN)) {
+            i = INT32_MIN; // (-Inf included)
         } else {
-            i = static_cast<std::int32_t>(static_cast<std::int64_t>(d)); // truncate toward zero, narrow
+            i = static_cast<std::int32_t>(d); // truncate toward zero
         }
     } else {
         return AbiResult::success(JsValue::make_null());

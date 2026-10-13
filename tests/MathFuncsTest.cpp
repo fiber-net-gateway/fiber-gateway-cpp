@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -69,6 +70,31 @@ TEST(MathFuncsTest, FloorPositiveFloatRoundsDown) { expect_script_int("return ma
 TEST(MathFuncsTest, FloorNegativeFloatTowardNegativeInf) { expect_script_int("return math.floor(-2.1);", -3); }
 
 TEST(MathFuncsTest, FloorWholeFloatYieldsInteger) { expect_script_int("return math.floor(7.0);", 7); }
+
+// Saturation parity with Java's (long)double: a bare static_cast is UB for
+// NaN/±Inf/out-of-range doubles (on x86-64 cvttsd2si silently yields INT64_MIN).
+TEST(MathFuncsTest, FloorHugeFiniteSaturatesToInt64Max) {
+    expect_script_int("return math.floor(1e300);", std::numeric_limits<std::int64_t>::max());
+}
+
+TEST(MathFuncsTest, FloorHugeFiniteNegativeSaturatesToInt64Min) {
+    expect_script_int("return math.floor(-1e300);", std::numeric_limits<std::int64_t>::min());
+}
+
+TEST(MathFuncsTest, FloorInfinitySaturatesToInt64Max) {
+    // 1e308 + 1e308 overflows to +Inf in float arithmetic.
+    expect_script_int("return math.floor(1e308 + 1e308);", std::numeric_limits<std::int64_t>::max());
+}
+
+TEST(MathFuncsTest, FloorNaNIsZero) {
+    // Inf % 2 is NaN via float_mod; (long)NaN == 0 in Java.
+    expect_script_int("return math.floor((1e308 + 1e308) % 2);", 0);
+}
+
+TEST(MathFuncsTest, FloorLargeInRangesTruncates) {
+    // 1e18 is exactly representable and inside int64; guard against over-clamping.
+    expect_script_int("return math.floor(1e18);", 1000000000000000000LL);
+}
 
 TEST(MathFuncsTest, AbsPositiveInteger) { expect_script_int("return math.abs(5);", 5); }
 
