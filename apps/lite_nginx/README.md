@@ -217,6 +217,17 @@ Top level:
 - `script_file <path>;` - handle the request with a compiled script instead of proxying
   (mutually exclusive with `proxy_pass`).
 
+`proxy_read_timeout` (default `60s`) is shared by upstream response reads and
+client request-body reads while forwarding a `proxy_pass` upload. An upstream
+`read_timeout` inherited by the location has the same effect. It limits each
+read's idle wait, not the total upload duration: clients may upload for longer
+as long as they keep making progress within the timeout. A stalled upload
+aborts the upstream exchange and returns `408 Request Timeout`; HTTP/1 also
+closes the client connection because the request body is incomplete. HTTP/2
+and HTTP/3 finish the affected response stream. There is no separate
+`client_body_timeout` directive, so choose the shared value to accommodate
+both upstream response latency and pauses in client uploads.
+
 `proxy_buffering on` uses a 64 KiB response-body buffer with a 48 KiB low-water mark. The
 two-size form is a lite-nginx extension and enables buffering with explicit values, for example
 `proxy_buffering 64k 48k;`. The proxy reads while fewer than `low-water` bytes are buffered, writes
