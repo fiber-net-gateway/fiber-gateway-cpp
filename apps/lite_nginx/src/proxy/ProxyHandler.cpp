@@ -42,6 +42,7 @@ using namespace fiber::http::proxy_core;
 constexpr std::string_view kNotFoundBody = "404 Not Found\n";
 constexpr std::string_view kScriptErrorBody = "500 Internal Server Error\n";
 constexpr std::string_view kNotImplementedBody = "501 Not Implemented\n";
+constexpr std::string_view kRequestTimeoutBody = "408 Request Timeout\n";
 
 DEFINE_LOGGER(LOG_PROXY, "lite_nginx.proxy");
 
@@ -63,6 +64,13 @@ void record_client_abort(logging::RequestLogContext &context) noexcept {
                          << fiber::log::quoted(context.upstream_host.empty() ? std::string_view("-")
                                                                              : context.upstream_host)
                          << " port=" << context.upstream_port << " phase=client_abort";
+}
+
+void record_client_body_timeout(logging::RequestLogContext &context) noexcept {
+    LOG(LOG_PROXY, WARN) << "request_id=" << context.request_id << " upstream="
+                         << fiber::log::quoted(context.upstream_host.empty() ? std::string_view("-")
+                                                                             : context.upstream_host)
+                         << " port=" << context.upstream_port << " phase=client_body_timeout";
 }
 
 struct ResolvedProxyValues {
@@ -190,9 +198,10 @@ void apply_http3_alt_svc(const runtime::ListenerRuntime &listener, fiber::http::
     }
 }
 
-fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange,
-                                             fiber::http::HttpResponseWriter response, int status_code,
-                                             std::string_view body, const runtime::ListenerRuntime &listener) {
+fiber::async::Task<void>
+send_plain_response(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter response, int status_code,
+                    std::string_view body, const runtime::ListenerRuntime &listener,
+                    fiber::http::ResponseConnectionMode connection_mode = fiber::http::ResponseConnectionMode::Auto) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
     apply_http3_alt_svc(listener, headers);
@@ -202,7 +211,7 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
             .status_code = status_code,
             .headers = &headers,
             .body = fiber::http::HttpBodySpec::ContentLength(body.size()),
-            .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+            .connection_mode = connection_mode,
             .end_stream = body.empty(),
     });
     if (!header_result) {
@@ -309,9 +318,21 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, fiber::http::HttpResp
     if (!request_end_stream) {
         RequestBodyForwardState forward_state(request_body);
         while (true) {
-            auto body_result = co_await request_body_reader.read(kBodyChunkSize, std::chrono::milliseconds::max());
+            // Downstream body reads are bounded by proxy_read_timeout (nginx's client_body_timeout
+            // role; no dedicated knob yet): a stalled client must not pin this coroutine and its
+            // pooled upstream connection indefinitely. The window is per read call, so a slow
+            // client that keeps making progress is never cut off.
+            auto body_result = co_await request_body_reader.read(kBodyChunkSize, location.read_timeout);
             if (!body_result) {
                 (void) upstream_exchange.abort(body_result.error());
+                if (body_result.error() == fiber::common::IoErr::TimedOut) {
+                    record_client_body_timeout(log_context);
+                    // Close mode: the request body is only partially read, so the connection must
+                    // not survive this response (keep-alive would re-block draining the unread
+                    // remainder on the same stalled client).
+                    co_await send_plain_response(exchange, response, 408, kRequestTimeoutBody, listener,
+                                                 fiber::http::ResponseConnectionMode::Close);
+                }
                 co_return;
             }
             const bool last = body_result->complete();

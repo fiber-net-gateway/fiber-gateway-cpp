@@ -2791,6 +2791,122 @@ http {
     EXPECT_EQ(proxied_request.find("Expect:"), std::string::npos) << proxied_request;
 }
 
+TEST(LiteNginxRuntimeTest, StalledClientBodyTimesOutWith408AndClose) {
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    server {
+        server_name localhost;
+        location /* {
+            proxy_read_timeout 200ms;
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = ConfigLoader::load_from_string(config_text, "stalled_body_timeout.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    // Headers promising a body that never arrives: the proxy acquires the upstream connection
+    // and sends the request head before blocking on the downstream body read.
+    const char request[] = "POST /upload HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Content-Length: 100\r\n"
+                           "\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    const std::string response = recv_http_response(client);
+    EXPECT_NE(response.find("HTTP/1.1 408 Request Timeout\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Connection: close\r\n"), std::string::npos) << response;
+
+    // The connection must be closed instead of lingering on the unread body.
+    ASSERT_TRUE(socket_readable(client, 2000ms));
+    char byte = 0;
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test-side blocking helper
+    EXPECT_EQ(::recv(client, &byte, 1, 0), 0);
+    ::close(client);
+
+    // The DoS premise: the upstream request head was already forwarded when the stall hit.
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    EXPECT_NE(upstream_future.get().find("POST /upload"), std::string::npos);
+}
+
+TEST(LiteNginxRuntimeTest, ProgressingClientBodyStreamsWithinReadTimeout) {
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    server {
+        server_name localhost;
+        location /* {
+            proxy_read_timeout 300ms;
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = ConfigLoader::load_from_string(config_text, "progressing_body.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    // The timeout is an idle window per read, not a total budget: a slow client that keeps
+    // making progress within every 300ms window must stream to completion.
+    const char request[] = "POST /upload HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Content-Length: 6\r\n"
+                           "\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+    for (const std::string_view chunk: {"ab", "cd", "ef"}) {
+        std::this_thread::sleep_for(100ms);
+        ASSERT_TRUE(send_all(client, chunk));
+    }
+
+    const std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(upstream_future.get().find("\r\n\r\nabcdef"), std::string::npos);
+}
+
 TEST(LiteNginxRuntimeTest, RejectsKnownOversizedBodyBeforeContinueOrUpstreamConnect) {
     const std::uint16_t port = reserve_loopback_port();
     const std::uint16_t unavailable_upstream_port = reserve_loopback_port();

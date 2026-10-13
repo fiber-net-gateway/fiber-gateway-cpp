@@ -411,7 +411,10 @@ fiber::async::Task<void> Http1Connection::run() {
 
             if (!io.request_body_complete()) {
                 if (options_.drain_unread_body) {
-                    auto discard_result = co_await exchange.discard_body();
+                    // Draining the unread remainder is bounded by header_timeout: a client that
+                    // never finishes sending must not pin the connection indefinitely (nginx
+                    // bounds this with lingering_timeout).
+                    auto discard_result = co_await exchange.discard_body(options_.header_timeout);
                     if (!discard_result) {
                         exchange.set_io(nullptr);
                         break;

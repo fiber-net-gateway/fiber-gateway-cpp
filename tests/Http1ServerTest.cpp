@@ -777,6 +777,60 @@ TEST(Http1ServerTest, CloseResponseSkipsConfiguredUnreadBodyDrain) {
     delete server;
 }
 
+TEST(Http1ServerTest, UnreadBodyDrainIsBoundedByHeaderTimeout) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            // Keep-alive 200 without reading the request body: forces the post-response drain.
+            (void) co_await send_final_header(exchange, 200, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
+                                              fiber::http::ResponseConnectionMode::Auto, true);
+        };
+        fiber::http::Http1Endpoint::Options options;
+        options.http1.drain_unread_body = true;
+        options.http1.header_timeout = 1s;
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise, options);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    const int client = connect_client(port);
+    ASSERT_GE(client, 0);
+    const char request[] = "POST /upload HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Content-Length: 1000\r\n"
+                           "\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    const std::string response = recv_http_response(client);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+
+    // The drain must give up after ~header_timeout (1s) instead of waiting for the stalled
+    // client forever: the close has to arrive well inside the 4s poll budget.
+    pollfd descriptor{
+            .fd = client,
+            .events = POLLIN,
+    };
+    ASSERT_GT(::poll(&descriptor, 1, 4000), 0);
+    char byte = 0;
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test-side blocking helper
+    EXPECT_EQ(::recv(client, &byte, 1, 0), 0);
+    ::close(client);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
 TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesChunkedForStreaming) {
     fiber::event::EventLoopGroup group(1);
     group.start();
