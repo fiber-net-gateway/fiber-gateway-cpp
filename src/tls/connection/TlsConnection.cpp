@@ -312,6 +312,9 @@ void TlsConnection::feed_handshake_fragment(const std::uint8_t *frag, std::size_
             }
             off = len;
             const std::size_t total = reassembly_.readable_bytes();
+            if (total < kTlsHandshakeHeaderSize) {
+                return; // the header itself is still split across records: wait for more
+            }
             std::array<std::uint8_t, kTlsHandshakeHeaderSize> header{};
             if (gather_small(reassembly_, header) == nullptr) {
                 latch_fatal(TlsAlertDesc::InternalError);

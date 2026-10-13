@@ -417,14 +417,10 @@ std::vector<std::uint8_t> craft_12_record(TlsRecordCipher &client_write, TlsCont
     return seal_record(client_write, inner, plain, static_cast<std::uint8_t>(inner));
 }
 
-// Emits a KeyUpdate from the client state AND rotates its write side one
-// generation — exactly what the sender of a KeyUpdate must do (RFC 8446
-// §4.6.1: the message flies under the current keys, the next records under
-// the rotated ones).
-std::vector<std::uint8_t> craft_key_update(TlsConnectedState &client_state, bool request_update) {
-    const std::uint8_t key_update[5] = {static_cast<std::uint8_t>(TlsHandshakeType::KeyUpdate), 0, 0, 1,
-                                        static_cast<std::uint8_t>(request_update ? 1 : 0)};
-    std::vector<std::uint8_t> wire = craft_hs_record(client_state, key_update);
+// Rotates the client's write side one generation — the sender's obligation
+// after a KeyUpdate (RFC 8446 §4.6.1: the message flies under the current
+// keys, the next records under the rotated ones).
+void rotate_client_write(TlsConnectedState &client_state) {
     auto next = fiber::tls::tls13_key_update(client_state.client_app_secret);
     EXPECT_TRUE(next.has_value());
     auto keys = fiber::tls::tls13_traffic_keys(*next, client_state.suite);
@@ -435,6 +431,15 @@ std::vector<std::uint8_t> craft_key_update(TlsConnectedState &client_state, bool
                         .has_value());
     client_state.client_app_secret = std::move(*next);
     client_state.write_cipher = std::move(fresh);
+}
+
+// Emits a KeyUpdate from the client state AND rotates its write side one
+// generation.
+std::vector<std::uint8_t> craft_key_update(TlsConnectedState &client_state, bool request_update) {
+    const std::uint8_t key_update[5] = {static_cast<std::uint8_t>(TlsHandshakeType::KeyUpdate), 0, 0, 1,
+                                        static_cast<std::uint8_t>(request_update ? 1 : 0)};
+    std::vector<std::uint8_t> wire = craft_hs_record(client_state, key_update);
+    rotate_client_write(client_state);
     return wire;
 }
 
@@ -751,6 +756,51 @@ TEST(TlsConnectionTest, KeyUpdateRequestedRoundTrip13) {
 
         // The client's post-rotation write opens with the server's rotated READ
         // keys.
+        const std::vector<std::uint8_t> tail{'f', 'i', 'n', 'a', 'l'};
+        ASSERT_TRUE(client.write(tail).has_value());
+        ASSERT_TRUE(server_feeds.feed(server, chain_bytes(client.take_output())));
+        EXPECT_EQ(tail, read_all(server));
+        EXPECT_FALSE(server.failed());
+    });
+}
+
+TEST(TlsConnectionTest, HandshakeHeaderSplitAcrossRecordsStillProcesses13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        // A KeyUpdate(update_requested) split 2 + 1 + 2 bytes across three
+        // records: between records the reassembly chain holds fewer bytes
+        // than a handshake header — the connection must wait for more, not
+        // latch a fatal InternalError.
+        const std::uint8_t key_update[5] = {static_cast<std::uint8_t>(TlsHandshakeType::KeyUpdate), 0, 0, 1, 1};
+        std::vector<std::uint8_t> wire;
+        append_bytes(wire, craft_hs_record(states.client, {key_update, 2}));
+        append_bytes(wire, craft_hs_record(states.client, {key_update + 2, 1}));
+        append_bytes(wire, craft_hs_record(states.client, {key_update + 3, 2}));
+        rotate_client_write(states.client);
+
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        WireFeeder client_feeds;
+
+        ASSERT_TRUE(server_feeds.feed(server, wire));
+        EXPECT_FALSE(server.failed()); // reassembled across the record splits
+        EXPECT_TRUE(read_all(server).empty()); // a KeyUpdate carries no app data
+
+        // The passive response: [KeyUpdate under the OLD server write keys]
+        // [resp under the ROTATED ones] — proves the split message dispatched.
+        const std::vector<std::uint8_t> resp{'r', 'e', 's', 'p'};
+        ASSERT_TRUE(server.write(resp).has_value());
+        const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
+        EXPECT_EQ(2U, count_records(flight));
+        ASSERT_TRUE(client_feeds.feed(client, flight));
+        EXPECT_FALSE(client.failed());
+        EXPECT_EQ(resp, read_all(client));
+
+        // The client's post-rotation write opens with the server's rotated
+        // READ keys.
         const std::vector<std::uint8_t> tail{'f', 'i', 'n', 'a', 'l'};
         ASSERT_TRUE(client.write(tail).has_value());
         ASSERT_TRUE(server_feeds.feed(server, chain_bytes(client.take_output())));
