@@ -96,6 +96,7 @@ struct WriteAction {
     std::size_t max_bytes = std::numeric_limits<std::size_t>::max();
     IoErr error = IoErr::None;
     bool stall = false;
+    bool defer_completion = false;
 };
 
 class FakeBodyWriter {
@@ -124,7 +125,7 @@ public:
 
         const std::size_t written = std::min(buffer.readable_bytes(), action.max_bytes);
         buffer.consume_and_compact(written);
-        if (buffer.readable_bytes() == 0 && buffer.complete()) {
+        if (buffer.readable_bytes() == 0 && buffer.complete() && !action.defer_completion) {
             buffer.clear_complete();
         }
         co_return written;
@@ -248,6 +249,29 @@ TEST(HttpBodyPipeTest, EndOfInputFlushesBelowLowWater) {
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{std::size_t{10} * 1024}));
     EXPECT_EQ(result->bytes_written, 10U * 1024U);
+}
+
+TEST(HttpBodyPipeTest, EndOfInputDrainsPartialWritesAndDelayedCompletionBeforeReturning) {
+    std::vector<char> operations;
+    FakeBodyReader reader({{.bytes = 10}, {.bytes = 5, .complete = true}}, &operations);
+    FakeBodyWriter writer({{.max_bytes = 4},
+                           {.max_bytes = 2},
+                           {.max_bytes = 4},
+                           {.max_bytes = 2},
+                           {.max_bytes = 2},
+                           {.max_bytes = 1, .defer_completion = true}},
+                          &operations);
+    const auto result = execute_pipe(reader, writer, {.buffer_size = 16, .low_water = 8});
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->bytes_read, 15U);
+    EXPECT_EQ(result->bytes_written, 15U);
+    EXPECT_EQ(result->read_calls, 2U);
+    EXPECT_EQ(result->write_calls, 7U);
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{10, 6, 4, 5, 3, 1, 0}));
+    EXPECT_EQ(operations, (std::vector<char>{'R', 'W', 'R', 'W', 'W', 'W', 'W', 'W', 'W'}));
+    EXPECT_EQ(reader.abort_calls(), 0U);
+    EXPECT_EQ(writer.abort_calls(), 0U);
 }
 
 TEST(HttpBodyPipeTest, ReadErrorAbortsBothEndpointsAndReportsPhase) {
