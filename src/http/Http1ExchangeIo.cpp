@@ -982,12 +982,10 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::send_header(HttpExch
             co_return co_await write_response_header(exchange, header.end_stream, 0, false, timeout);
         }
         case OutgoingHeaderKind::Trailer:
-            if (response_phase_ == ResponsePhase::Init || response_phase_ == ResponsePhase::Finished) {
-                co_return std::unexpected(common::IoErr::Invalid);
-            }
-            if (!response_body_spec_.is_chunked() || !header.end_stream) {
-                co_return std::unexpected(common::IoErr::Invalid);
-            }
+            FIBER_ASSERT(response_phase_ == ResponsePhase::HeaderSent ||
+                         response_phase_ == ResponsePhase::BodyStreaming);
+            FIBER_ASSERT(response_body_spec_.is_chunked());
+            FIBER_ASSERT(!chunk_write_active_);
             auto trailer_result = co_await write_chunked_trailer_block(header.headers, timeout);
             if (!trailer_result) {
                 co_return std::unexpected(trailer_result.error());

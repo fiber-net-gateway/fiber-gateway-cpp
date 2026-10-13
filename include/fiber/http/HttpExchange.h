@@ -130,6 +130,10 @@ public:
     fiber::async::Task<common::IoResult<void>>
     discard_body(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
+    // Send operations must be awaited serially. A trailer requires a successful
+    // final header and all preceding body bytes to have been accepted without
+    // ending the stream. It must set end_stream=true. Violating this ordering
+    // is a programming error checked by assertions; transport errors are returned.
     fiber::async::Task<common::IoResult<void>>
     send_header(const OutgoingHeaderBlockView &header,
                 std::chrono::milliseconds timeout = std::chrono::milliseconds::max());

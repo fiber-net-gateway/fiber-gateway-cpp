@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <future>
@@ -320,8 +321,8 @@ DetachedTask run_expect_continue_server(fiber::event::EventLoop *loop, std::prom
     result_promise->set_value(final_result ? fiber::common::IoErr::None : final_result.error());
 }
 
-DetachedTask run_large_response_header_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
-                                              std::promise<fiber::common::IoErr> *result_promise) {
+DetachedTask run_response_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                 std::promise<fiber::common::IoErr> *result_promise, const std::string &response) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions listen_options{};
     auto bind_result =
@@ -354,12 +355,6 @@ DetachedTask run_large_response_header_server(fiber::event::EventLoop *loop, std
         co_return;
     }
 
-    std::string response = "HTTP/1.1 200 OK\r\n"
-                           "Content-Length: 0\r\n"
-                           "X-Large: " +
-                           std::string(180, 'a') +
-                           "\r\n"
-                           "\r\n";
     auto write_result = co_await write_all(stream, response);
     stream.close();
     result_promise->set_value(write_result ? fiber::common::IoErr::None : write_result.error());
@@ -1822,6 +1817,12 @@ TEST(ClientHttp1ExchangeTest, ReadHeaderSupportsInformationalResponseBeforeReque
 }
 
 TEST(ClientHttp1ExchangeTest, ReadHeaderGrowsResponseHeaderParseBufferWhenNeeded) {
+    std::string response = "HTTP/1.1 200 OK\r\n"
+                           "Content-Length: 0\r\n"
+                           "X-Large: " +
+                           std::string(180, 'a') +
+                           "\r\n"
+                           "\r\n";
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -1830,7 +1831,7 @@ TEST(ClientHttp1ExchangeTest, ReadHeaderGrowsResponseHeaderParseBufferWhenNeeded
     std::promise<fiber::common::IoErr> server_result_promise;
     auto server_result_future = server_result_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return run_large_response_header_server(&group.at(0), &port_promise, &server_result_promise);
+        return run_response_server(&group.at(0), &port_promise, &server_result_promise, response);
     });
 
     const std::uint16_t port = port_future.get();
@@ -1855,6 +1856,134 @@ TEST(ClientHttp1ExchangeTest, ReadHeaderGrowsResponseHeaderParseBufferWhenNeeded
 
     group.stop();
     group.join();
+}
+
+
+struct BoundaryResponseOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    std::string reason;
+    std::string early;
+    std::string large;
+    std::string tail;
+    bool complete = false;
+};
+
+fiber::async::Task<BoundaryResponseOutcome> read_boundary_response(fiber::event::EventLoop &loop, std::uint16_t port,
+                                                                   bool trailers) {
+    BoundaryResponseOutcome out;
+    fiber::http::Http1ClientConnection connection(loop);
+    auto connected = co_await connection.connect({fiber::net::IpAddress::loopback_v4(), port}, 2s);
+    if (!connected) {
+        out.error = connected.error();
+        co_return out;
+    }
+    fiber::mem::BufPool pool;
+    fiber::http::Http1ClientExchangeOptions options;
+    options.response_header_init_size = 256;
+    options.response_header_large_size = 256;
+    fiber::http::ClientHttp1Exchange exchange(connection, pool, options);
+    fiber::http::Http1RequestHead request;
+    request.method = fiber::http::HttpMethod::Get;
+    request.target = "/boundary";
+    auto sent = co_await exchange.send_header(request, true, 2s);
+    if (!sent) {
+        out.error = sent.error();
+        co_return out;
+    }
+    auto head = co_await exchange.read_header(2s);
+    if (!head) {
+        out.error = head.error();
+        co_return out;
+    }
+    if (trailers) {
+        auto discarded = co_await exchange.discard_response_body(2s);
+        if (!discarded) {
+            out.error = discarded.error();
+            co_return out;
+        }
+    }
+    // Reuse freed small parse arenas before inspecting earlier views. Live
+    // header storage must remain pinned; trailer strings must be pool-owned.
+    std::array<fiber::mem::IoBuf, 16> churn;
+    for (auto &buffer: churn) {
+        buffer = fiber::mem::IoBuf::allocate(256);
+        if (buffer) {
+            std::memset(buffer.writable_data(), '!', buffer.writable());
+        }
+    }
+    const auto &fields = trailers ? exchange.response_trailers() : (*head)->headers;
+    out.reason = (*head)->reason;
+    out.early = fields.get("x-early");
+    out.large = fields.get("x-large");
+    out.tail = fields.get("x-tail");
+    out.complete = exchange.response_complete();
+    co_return out;
+}
+
+BoundaryResponseOutcome run_boundary_response(const std::string &response, bool trailers) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    std::promise<std::uint16_t> port;
+    auto port_future = port.get_future();
+    std::promise<fiber::common::IoErr> server_done;
+    auto server_future = server_done.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_response_server(&group.at(0), &port, &server_done, response); });
+    const auto server_port = port_future.get();
+    std::promise<BoundaryResponseOutcome> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        done.set_value(co_await read_boundary_response(group.at(0), server_port, trailers));
+    });
+    auto result = future.get();
+    EXPECT_EQ(server_future.get(), fiber::common::IoErr::None);
+    group.stop();
+    group.join();
+    return result;
+}
+
+TEST(ClientHttp1ExchangeTest, ResponseHeaderMultipleGrowsPreserveReasonAndEarlierFields) {
+    const std::string response = "HTTP/1.1 200 Original reason\r\nContent-Length: 0\r\nX-Early: original\r\n"
+                                 "X-Large: " +
+                                 std::string(600, 'L') + "\r\nX-Tail: tail\r\n\r\n";
+    const auto out = run_boundary_response(response, false);
+    EXPECT_EQ(out.error, fiber::common::IoErr::None);
+    EXPECT_EQ(out.reason, "Original reason");
+    EXPECT_EQ(out.early, "original");
+    EXPECT_EQ(out.large, std::string(600, 'L'));
+    EXPECT_EQ(out.tail, "tail");
+    EXPECT_TRUE(out.complete);
+}
+
+TEST(ClientHttp1ExchangeTest, ResponseHeaderExactlyFullAtLineBoundary) {
+    std::string response = "HTTP/1.1 200 Original reason\r\nContent-Length: 0\r\nX-Early: original\r\n";
+    const std::string padding(256 - response.size() - std::string_view("X-Large: \r\n").size(), 'L');
+    response += "X-Large: " + padding + "\r\n";
+    ASSERT_EQ(response.size(), 256U);
+    response += "X-Tail: tail\r\n\r\n";
+    const auto out = run_boundary_response(response, false);
+    EXPECT_EQ(out.error, fiber::common::IoErr::None);
+    EXPECT_EQ(out.reason, "Original reason");
+    EXPECT_EQ(out.early, "original");
+    EXPECT_EQ(out.large, padding);
+    EXPECT_EQ(out.tail, "tail");
+    EXPECT_TRUE(out.complete);
+}
+
+TEST(ClientHttp1ExchangeTest, ResponseTrailersGrowAtLineBoundaryAndMidLine) {
+    std::string trailers = "X-Early: original\r\n";
+    trailers += "X-Pad: " + std::string(256 - trailers.size() - 9, 'P') + "\r\n";
+    ASSERT_EQ(trailers.size(), 256U);
+    // First grow is exactly between lines; the 600-byte line then forces
+    // another grow while a line is in flight.
+    trailers += "X-Large: " + std::string(600, 'L') + "\r\nX-Tail: tail\r\n\r\n";
+    const auto out = run_boundary_response(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n" + trailers, true);
+    EXPECT_EQ(out.error, fiber::common::IoErr::None);
+    EXPECT_EQ(out.early, "original");
+    EXPECT_EQ(out.large, std::string(600, 'L'));
+    EXPECT_EQ(out.tail, "tail");
+    EXPECT_TRUE(out.complete);
 }
 
 TEST(ClientHttp1ExchangeTest, ReadContentLengthBodyReturnsLastOnFinalChunk) {

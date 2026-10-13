@@ -336,6 +336,96 @@ TEST(Http1ConnectionTest, ChunkedWriteReturnsAfterPayloadProgressAndPreservesCal
     EXPECT_TRUE(metrics.written.ends_with("5\r\nhello\r\n0\r\n\r\n"));
 }
 
+TransportMetrics run_chunked_response_trailer(bool finish_body, bool use_chain) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    TransportMetrics metrics;
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        auto transport = std::make_unique<RecordingHttp1Transport>(
+                group.at(0), metrics, "GET /trailers HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n", 2);
+        fiber::http::HttpHandler handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto header = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .body = fiber::http::HttpBodySpec::Chunked(),
+            });
+            if (!header) {
+                metrics.responses_ok = false;
+                co_return;
+            }
+
+            fiber::mem::IoBufChain chunk;
+            if (use_chain) {
+                auto body = fiber::mem::IoBuf::allocate(5);
+                if (!body) {
+                    metrics.responses_ok = false;
+                    co_return;
+                }
+                std::memcpy(body.writable_data(), "hello", 5);
+                body.commit(5);
+                if (!chunk.append(std::move(body))) {
+                    metrics.responses_ok = false;
+                    co_return;
+                }
+            }
+            const auto *bytes = reinterpret_cast<const std::uint8_t *>("hello");
+            std::size_t sent = 0;
+            do {
+                auto written = use_chain ? co_await exchange.write(chunk)
+                                         : co_await exchange.write(bytes + sent, 5 - sent, false);
+                if (!written || *written == 0) {
+                    metrics.responses_ok = false;
+                    co_return;
+                }
+                sent += *written;
+                metrics.partial_write_results.push_back(*written);
+            } while (finish_body && sent != 5);
+            metrics.body_remaining = 5 - sent;
+            if (use_chain) {
+                EXPECT_LT(metrics.partial_write_results.front(), 5U);
+            }
+
+            fiber::http::HttpHeaders trailers(exchange.pool());
+            trailers.set("digest", "xyz");
+            auto trailer = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Trailer,
+                    .headers = &trailers,
+                    .end_stream = true,
+            });
+            metrics.responses_ok = trailer.has_value() && exchange.response_stats().completed;
+        };
+        fiber::http::Http1Connection connection(std::move(transport), handler, {});
+        co_await connection.run();
+        done.set_value();
+    });
+    EXPECT_EQ(future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+    return metrics;
+}
+
+#if GTEST_HAS_DEATH_TEST
+TEST(Http1ConnectionDeathTest, TrailerDuringPartialChainChunkAsserts) {
+    EXPECT_DEATH((void) run_chunked_response_trailer(false, true), "!chunk_write_active_");
+}
+#endif
+
+TEST(Http1ConnectionTest, TrailerAfterCompletingPartialChunkPreservesWireFormat) {
+    const auto metrics = run_chunked_response_trailer(true, true);
+    EXPECT_TRUE(metrics.responses_ok);
+    EXPECT_EQ(metrics.body_remaining, 0U);
+    EXPECT_TRUE(metrics.written.ends_with("5\r\nhello\r\n0\r\ndigest: xyz\r\n\r\n"));
+}
+
+TEST(Http1ConnectionTest, TrailerAfterByteWritePreservesWireFormat) {
+    const auto metrics = run_chunked_response_trailer(false, false);
+    EXPECT_TRUE(metrics.responses_ok);
+    EXPECT_EQ(metrics.body_remaining, 0U);
+    EXPECT_TRUE(metrics.written.ends_with("5\r\nhello\r\n0\r\ndigest: xyz\r\n\r\n"));
+}
+
 TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -345,9 +435,11 @@ TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
             std::make_shared<fiber::common::IoResult<std::size_t>>(std::unexpected(fiber::common::IoErr::Invalid));
     auto retry_result =
             std::make_shared<fiber::common::IoResult<std::size_t>>(std::unexpected(fiber::common::IoErr::Invalid));
+    fiber::common::IoResult<void> trailer_result = std::unexpected(fiber::common::IoErr::Invalid);
     std::size_t writes_after_header = 0;
     std::size_t writes_after_timeout = 0;
     std::size_t writes_after_retry = 0;
+    std::size_t writes_after_trailer = 0;
     fiber::common::IoErr terminal_error = fiber::common::IoErr::None;
     std::promise<void> done_promise;
     auto done_future = done_promise.get_future();
@@ -386,6 +478,11 @@ TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
             writes_after_timeout = metrics.write_calls;
             *retry_result = co_await exchange.write(chunk, 1ms);
             writes_after_retry = metrics.write_calls;
+            trailer_result = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Trailer,
+                    .end_stream = true,
+            });
+            writes_after_trailer = metrics.write_calls;
             terminal_error = exchange.response_stats().terminal_error;
             co_return;
         };
@@ -404,8 +501,11 @@ TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
     EXPECT_EQ(first_result->error(), fiber::common::IoErr::TimedOut);
     ASSERT_FALSE(retry_result->has_value());
     EXPECT_EQ(retry_result->error(), fiber::common::IoErr::TimedOut);
+    ASSERT_FALSE(trailer_result.has_value());
+    EXPECT_EQ(trailer_result.error(), fiber::common::IoErr::TimedOut);
     EXPECT_EQ(writes_after_timeout, writes_after_header + 2);
     EXPECT_EQ(writes_after_retry, writes_after_timeout);
+    EXPECT_EQ(writes_after_trailer, writes_after_timeout);
     EXPECT_EQ(terminal_error, fiber::common::IoErr::TimedOut);
     EXPECT_EQ(std::count(metrics.events.begin(), metrics.events.end(), TransportEvent::Close), 1);
 }
@@ -658,6 +758,52 @@ TEST(Http1ConnectionTest, HeaderBufferExactlyFullAtLineBoundaryCompletesRequest)
     if (WIFEXITED(status)) {
         EXPECT_EQ(WEXITSTATUS(status), 0);
     }
+}
+
+
+TEST(Http1ConnectionTest, RequestTrailersGrowAtLineBoundaryAndMidLine) {
+    std::string trailers = "X-Early: original\r\n";
+    trailers += "X-Pad: " + std::string(256 - trailers.size() - 9, 'P') + "\r\n";
+    ASSERT_EQ(trailers.size(), 256U);
+    trailers += "X-Large: " + std::string(600, 'L') + "\r\nX-Tail: tail\r\n\r\n";
+    const std::string request = "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                "1\r\na\r\n0\r\n" +
+                                trailers;
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    TransportMetrics metrics;
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        auto transport = std::make_unique<RecordingHttp1Transport>(group.at(0), metrics, request);
+        fiber::http::Http1ServerOptions options;
+        options.header_init_size = 256;
+        options.header_large_size = 256;
+        fiber::http::HttpHandler handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            ++metrics.handler_calls;
+            auto discarded = co_await exchange.discard_body(1s);
+            EXPECT_TRUE(discarded);
+            EXPECT_TRUE(exchange.request_trailers_complete());
+            EXPECT_EQ(exchange.request_trailers().get("x-early"), "original");
+            EXPECT_EQ(exchange.request_trailers().get("x-large"), std::string(600, 'L'));
+            EXPECT_EQ(exchange.request_trailers().get("x-tail"), "tail");
+            auto sent = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 204,
+                    .body = fiber::http::ResponseBodySpec::None(),
+                    .end_stream = true,
+            });
+            EXPECT_TRUE(sent);
+        };
+        fiber::http::Http1Connection connection(std::move(transport), handler, options);
+        co_await connection.run();
+        done.set_value();
+    });
+    const auto status = future.wait_for(3s);
+    group.stop();
+    group.join();
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_EQ(metrics.handler_calls, 1U);
 }
 
 } // namespace
