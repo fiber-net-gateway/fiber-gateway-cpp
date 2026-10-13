@@ -8,6 +8,7 @@
 #include <limits>
 
 #include <fiber/common/json/Utf.h>
+#include <fiber/script/Numeric.h>
 #include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/run/Compares.h>
 #include "script/gc/Wtf8.h"
@@ -50,7 +51,7 @@ bool to_int64(const fiber::script::JsValue &value, std::int64_t &out) noexcept {
             out = fiber::script::js_value_int64(value);
             return true;
         case fiber::script::JsNodeType::Float:
-            out = static_cast<std::int64_t>(fiber::script::js_value_double(value));
+            out = fiber::script::double_to_int64_saturated(fiber::script::js_value_double(value));
             return true;
         case fiber::script::JsNodeType::Boolean:
             out = fiber::script::js_value_bool(value) ? 1 : 0;
@@ -466,6 +467,12 @@ CallResult Binaries::modulo(GcHeap &runtime, ConstValueHandle a, ConstValueHandl
     }
     if (rhs == 0) {
         return set_exception(result, fiber::script::ExceptionKind::RangeError);
+    }
+    if (rhs == -1) {
+        // INT64_MIN % -1 is undefined (traps as SIGFPE via idiv on x86-64); the
+        // remainder is mathematically always 0, matching Java's Long.MIN_VALUE
+        // % -1 == 0.
+        return set_value(result, fiber::script::JsValue::make_integer(0));
     }
     return set_value(result, fiber::script::JsValue::make_integer(lhs % rhs));
 }

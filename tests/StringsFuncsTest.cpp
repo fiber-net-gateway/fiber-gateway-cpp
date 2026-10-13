@@ -223,6 +223,36 @@ TEST(StringsFuncsTest, SubstringEdges) {
     expect_script_string(R"(return strings.substring("abc", 1);)", "bc");
 }
 
+// ---- huge-float count/index coercion (UB-free saturation) ----
+
+// Java's (int)double saturates at the int32 bounds; a bare double->int64 cast
+// is UB for finite magnitudes beyond 2^63 (x86-64 cvttsd2si silently yields
+// INT64_MIN, flipping the sign of a positive count).
+TEST(StringsFuncsTest, RepeatHugeFloatCountSaturatesThenCaps) {
+    {
+        GcHeap heap;
+        auto result = run_script(R"(return strings.repeat("ab", 1e300);)", heap);
+        ASSERT_TRUE(result.is_abort());
+        EXPECT_EQ(result.abort().reason, ScriptAbortReason::OutOfMemory);
+    }
+    {
+        GcHeap heap;
+        auto result = run_script(R"(return strings.repeat("ab", 1e308 + 1e308);)", heap); // +Inf
+        ASSERT_TRUE(result.is_abort());
+        EXPECT_EQ(result.abort().reason, ScriptAbortReason::OutOfMemory);
+    }
+    expect_script_string(R"(return strings.repeat("ab", (1e308 + 1e308) % 2);)", ""); // NaN -> 0
+    expect_script_string(R"(return strings.repeat("ab", 2.9);)", "abab"); // truncate toward zero
+}
+
+TEST(StringsFuncsTest, SubstringHugeFloatIndicesSaturate) {
+    expect_script_string(R"(return strings.substring("hello", 1e300);)", ""); // start >= len
+    expect_script_string(R"(return strings.substring("hello", 0, 1e300);)", "hello"); // end >= len
+    expect_script_string(R"(return strings.substring("hello", -1e300);)", "hello"); // start clamps to 0
+    expect_script_string(R"(return strings.substring("hello", 1, -1e300);)", ""); // end <= start
+    expect_script_string(R"(return strings.substring("hello", 1.9, 4.2);)", "ell"); // truncate toward zero
+}
+
 TEST(StringsFuncsTest, ToStringVariants) {
     expect_script_string(R"(return strings.toString();)", "");
     expect_script_string(R"(return strings.toString(42);)", "42");

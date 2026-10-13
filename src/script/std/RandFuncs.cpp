@@ -6,10 +6,9 @@
 #include <fiber/common/util/Crc32.h>
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
+#include <fiber/script/Numeric.h>
 
-#include <cmath>
 #include <cstdint>
-#include <limits>
 #include <random>
 #include <string>
 
@@ -25,21 +24,8 @@ AbiResult range_error() noexcept { return AbiResult::exception(JsValue::make_exc
 
 // ---- numeric coercion helpers ----
 
-// Java's (long)double saturates at int64 range; a plain static_cast is undefined behavior
-// for out-of-range magnitudes. This mirrors the saturation (and (long)NaN == 0) so the
-// bound extraction stays UB-free and parity-faithful.
-std::int64_t double_to_int64_saturated(double d) noexcept {
-    if (std::isnan(d)) {
-        return 0;
-    }
-    if (d >= static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
-        return std::numeric_limits<std::int64_t>::max();
-    }
-    if (d < static_cast<double>(std::numeric_limits<std::int64_t>::min())) {
-        return std::numeric_limits<std::int64_t>::min();
-    }
-    return static_cast<std::int64_t>(d);
-}
+// double_to_int64_saturated lives in fiber/script/Numeric.h (shared with the
+// arithmetic operators and math.floor).
 
 // ---- per-thread PRNG (mirrors Java's ThreadLocalRandom) ----
 

@@ -4,6 +4,7 @@
 
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
+#include <fiber/script/Numeric.h>
 
 #include <cmath>
 #include <cstdint>
@@ -34,8 +35,11 @@ AbiResult floor_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/
             // Integral input is returned unchanged, as in Java.
             return AbiResult::success(value);
         case JsNodeType::Float:
+            // Saturating cast: NaN/±Inf/out-of-range doubles are UB under a bare
+            // static_cast; Java's (long)double saturates (NaN -> 0), matching
+            // Math.floor's (long) narrowing in the Java original.
             return AbiResult::success(
-                    JsValue::make_integer(static_cast<std::int64_t>(std::floor(js_value_double(value)))));
+                    JsValue::make_integer(double_to_int64_saturated(std::floor(js_value_double(value)))));
         default:
             return type_error();
     }

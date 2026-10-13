@@ -1,5 +1,6 @@
 #include "script/run/Unaries.h"
 
+#include <fiber/script/Numeric.h>
 #include <fiber/script/gc/GcInternal.h>
 
 #include <cmath>
@@ -27,7 +28,7 @@ bool to_int64(const fiber::script::JsValue &value, std::int64_t &out) noexcept {
             out = fiber::script::js_value_int64(value);
             return true;
         case fiber::script::JsNodeType::Float:
-            out = static_cast<std::int64_t>(fiber::script::js_value_double(value));
+            out = fiber::script::double_to_int64_saturated(fiber::script::js_value_double(value));
             return true;
         case fiber::script::JsNodeType::Boolean:
             out = fiber::script::js_value_bool(value) ? 1 : 0;

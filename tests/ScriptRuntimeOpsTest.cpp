@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +15,7 @@
 #include <fiber/script/ScriptResult.h>
 #include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/run/Compares.h>
+#include "ScriptTestHelpers.h"
 #include "script/run/Access.h"
 #include "script/run/Binaries.h"
 #include "script/run/Unaries.h"
@@ -120,6 +124,74 @@ TEST(ScriptRuntimeOpsTest, BinaryModuloFloatIsExactIeeeFmod) {
     EXPECT_DOUBLE_EQ(run_mod(1e-310, 5e-324), std::fmod(1e-310, 5e-324));
     EXPECT_TRUE(std::isnan(run_mod(std::numeric_limits<double>::infinity(), 2.0)));
     EXPECT_DOUBLE_EQ(run_mod(2.0, std::numeric_limits<double>::infinity()), 2.0);
+}
+
+TEST(ScriptRuntimeOpsTest, BinaryModuloInt64MinByMinusOneIsZero) {
+    // INT64_MIN % -1 is UB in C++ (on x86-64 the idiv raises #DE and kills the
+    // process with SIGFPE); the remainder is mathematically 0, matching Java's
+    // Long.MIN_VALUE % -1 == 0. Runs in a forked child so a regression fails
+    // this test instead of taking down the whole binary.
+    const pid_t pid = ::fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+        GcHeap heap;
+        ResultPayload result;
+        auto l = handle(heap, JsValue::make_integer(std::numeric_limits<std::int64_t>::min()));
+        auto r = handle(heap, JsValue::make_integer(-1));
+        auto status = fiber::script::run::Binaries::modulo(heap, l, r, result);
+        if (status != CallResult::Success || js_value_type(result.value) != JsNodeType::Integer ||
+            js_value_int64(result.value) != 0) {
+            ::_exit(1);
+        }
+        ::_exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status)) << "child terminated by signal " << WTERMSIG(status);
+    if (WIFEXITED(status)) {
+        EXPECT_EQ(WEXITSTATUS(status), 0);
+    }
+}
+
+namespace {
+
+// Script-level modulo shapes that hit INT64_MIN % -1, run in a forked child
+// (same SIGFPE rationale as the direct-op test above). Returns 0 when the
+// script completes with Integer 0.
+int modulo_int64_min_script_child(std::string_view source) {
+    fiber::script::GcHeap heap;
+    auto result = fiber::test::run_script(source, heap);
+    if (!result.is_success() || js_value_type(result.value()) != JsNodeType::Integer ||
+        js_value_int64(result.value()) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+void expect_child_completes(std::string_view source) {
+    const pid_t pid = ::fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+        ::_exit(modulo_int64_min_script_child(source));
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status)) << "child terminated by signal " << WTERMSIG(status);
+    if (WIFEXITED(status)) {
+        EXPECT_EQ(WEXITSTATUS(status), 0);
+    }
+}
+
+} // namespace
+
+TEST(ScriptRuntimeOpsTest, ScriptModuloInt64MinByMinusOneIsZero) {
+    expect_child_completes("return (-9223372036854775807 - 1) % -1;");
+}
+
+TEST(ScriptRuntimeOpsTest, ScriptModuloJsonParsedInt64MinByMinusOneIsZero) {
+    // -9223372036854775808 decodes straight to Integer(INT64_MIN) from JSON;
+    // this is the request-data shape a route script could hit remotely.
+    expect_child_completes(R"(var o = JSON.parse("{\"n\": -9223372036854775808}"); return o.n % -1;)");
 }
 
 TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
