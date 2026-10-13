@@ -4785,6 +4785,121 @@ http {
     ::unlink(script_path.c_str());
 }
 
+// A response body beyond options.maxResponseSize surfaces as a catchable script error
+// instead of buffering an unbounded upstream body into host memory.
+TEST(LiteNginxRuntimeTest, HttpRequestRejectsOversizedResponseBody) {
+    const std::string script_path = "/tmp/lite_nginx_http_request_maxsize_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"@backend\";\n"
+                "let r = svc.request({path: \"/x\", maxResponseSize: 16});\n"
+                "resp.sendJson(200, {status: r.status});";
+    }
+
+    std::string canned = "HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n";
+    canned.append(64, 'x');
+    SingleRequestUpstream upstream(canned, nullptr);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = ConfigLoader::load_from_string(config_text, "http_request_maxsize.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    ::unlink(script_path.c_str());
+
+    // The uncaught script exception renders as 500 {"error": ...}.
+    EXPECT_NE(response.find("HTTP/1.1 500 Internal Server Error\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("maxResponseSize"), std::string::npos) << response;
+}
+
+// An upstream dripping informational responses forever gets cut after a bounded
+// run instead of pinning the script coroutine indefinitely.
+TEST(LiteNginxRuntimeTest, HttpRequestRejectsInformationalResponseDrip) {
+    const std::string script_path = "/tmp/lite_nginx_http_request_1xx_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"@backend\";\n"
+                "let r = svc.request({path: \"/x\"});\n"
+                "resp.sendJson(200, {status: r.status});";
+    }
+
+    std::string canned;
+    for (int i = 0; i < 20; ++i) {
+        canned += "HTTP/1.1 103 Early Hints\r\n\r\n";
+    }
+    SingleRequestUpstream upstream(canned, nullptr);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = ConfigLoader::load_from_string(config_text, "http_request_1xx.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    ::unlink(script_path.c_str());
+
+    EXPECT_NE(response.find("HTTP/1.1 500 Internal Server Error\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("too many informational responses"), std::string::npos) << response;
+}
+
 // options.headers.Host wins over the default Host, matching proxy_set_header Host semantics.
 TEST(LiteNginxRuntimeTest, HttpRequestHonoursExplicitHostHeader) {
     const std::string script_path = "/tmp/lite_nginx_http_request_host_test.js";

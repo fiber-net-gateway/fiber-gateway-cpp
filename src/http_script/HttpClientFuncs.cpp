@@ -58,6 +58,12 @@ namespace {
 
 constexpr std::chrono::milliseconds kDefaultTimeout{30000};
 
+// Budgets against a hostile upstream: the buffered response body is capped
+// (options.maxResponseSize overrides the default) and only a bounded run of
+// informational responses is tolerated before a final status must arrive.
+constexpr std::size_t kDefaultMaxResponseBytes = static_cast<std::size_t>(8) * 1024 * 1024;
+constexpr int kMaxInformationalResponses = 16;
+
 // Pre-hashed header names for per-response lookups.
 constexpr std::uint64_t kContentTypeHash = fiber::http::http_header_name_hash("content-type");
 constexpr std::uint64_t kContentLengthHash = fiber::http::http_header_name_hash("content-length");
@@ -128,6 +134,17 @@ std::chrono::milliseconds resolve_timeout(GcHeap &heap, const JsValue &options) 
         }
     }
     return kDefaultTimeout;
+}
+
+std::size_t resolve_max_response_bytes(GcHeap &heap, const JsValue &options) noexcept {
+    JsValue v = get_field(heap, options, "maxResponseSize", 15);
+    if (js_value_type(v) == JsNodeType::Integer) {
+        const auto bytes = fiber::script::js_value_int64(v);
+        if (bytes > 0) {
+            return static_cast<std::size_t>(bytes);
+        }
+    }
+    return kDefaultMaxResponseBytes;
 }
 
 fiber::http::HttpMethod resolve_http_method(std::string_view name, fiber::http::HttpMethod def) noexcept {
@@ -461,10 +478,12 @@ bool gc_put_binary(GcHeap &heap, ValueHandle obj_root, const char *key, std::siz
     return fiber::script::gc_object_set_key(&heap, obj_root, key, key_len, *item);
 }
 
-// Reads the full upstream response body into a contiguous string.
+// Reads the full upstream response body into a contiguous string, bounded by
+// max_bytes: an upstream promising an endless body must not balloon host memory.
 fiber::async::Task<fiber::common::IoResult<void>> read_full_response_body(fiber::http::ClientHttp1Exchange &exchange,
                                                                           std::string &out,
-                                                                          std::chrono::milliseconds timeout) noexcept {
+                                                                          std::chrono::milliseconds timeout,
+                                                                          std::size_t max_bytes) noexcept {
     for (;;) {
         auto read_result = co_await exchange.read_body(kBodyChunkSize, timeout);
         if (!read_result) {
@@ -476,6 +495,11 @@ fiber::async::Task<fiber::common::IoResult<void>> read_full_response_body(fiber:
             if (readable == 0) {
                 chain.drop_empty_front();
                 break;
+            }
+            // out.size() <= max_bytes holds before every append, so the
+            // subtraction cannot underflow.
+            if (readable > max_bytes - out.size()) {
+                co_return std::unexpected(fiber::common::IoErr::MessageTooLarge);
             }
             out.append(reinterpret_cast<const char *>(chunk->readable_data()), readable);
             chain.consume_and_compact(readable);
@@ -557,7 +581,7 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
     }
 
     const fiber::http::Http1ResponseHead *resp_head = nullptr;
-    for (;;) {
+    for (int informational = 0;;) {
         auto read_result = co_await upstream.read_header(timeout);
         if (!read_result) {
             co_return error_exn(*heap, "http.request: read header failed");
@@ -566,13 +590,22 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
             resp_head = *read_result;
             break;
         }
+        // An upstream can keep the exchange alive by dripping a 1xx inside
+        // every timeout window; only a bounded run of them is legal.
+        if (++informational >= kMaxInformationalResponses) {
+            co_return error_exn(*heap, "http.request: too many informational responses");
+        }
     }
 
     const bool include_headers = field_bool(*heap, options, "includeHeaders", 14, false);
+    const std::size_t max_response_bytes = resolve_max_response_bytes(*heap, options);
 
     std::string body_out;
-    auto body_read = co_await read_full_response_body(upstream, body_out, timeout);
+    auto body_read = co_await read_full_response_body(upstream, body_out, timeout, max_response_bytes);
     if (!body_read) {
+        if (body_read.error() == fiber::common::IoErr::MessageTooLarge) {
+            co_return error_exn(*heap, "http.request: response body exceeds maxResponseSize");
+        }
         co_return error_exn(*heap, "http.request: read body failed");
     }
 
