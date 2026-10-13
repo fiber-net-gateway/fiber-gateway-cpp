@@ -9,6 +9,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -406,6 +408,256 @@ TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
     EXPECT_EQ(writes_after_retry, writes_after_timeout);
     EXPECT_EQ(terminal_error, fiber::common::IoErr::TimedOut);
     EXPECT_EQ(std::count(metrics.events.begin(), metrics.events.end(), TransportEvent::Close), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Header parse-buffer growth reproducers. Both shrink header_init_size so the
+// grow boundary sits at 256 bytes and can be hit exactly; the default 8 KiB
+// arena needs an equally large request head.
+
+struct HeaderGrowObservations {
+    TransportMetrics metrics;
+    std::size_t handler_calls = 0;
+    std::string method;
+    std::string version;
+    std::string path;
+    std::string query;
+    std::string unparsed_uri;
+    std::string host;
+    std::string early;
+    std::string big;
+    std::string tail;
+};
+
+// Byte layout of the request below (total 512):
+//   request line 24 | Host line 19 | X-Early line 21 | X-Big line 434 | X-Tail line 12 | final CRLF 2
+// The first read fills the 256-byte arena with the X-Big line still in flight,
+// so the header loop grows the arena mid-line and frees the old storage that
+// the method/version/uri and Host/X-Early views were taken from. The 256
+// remaining bytes arrive as one 256-byte read node — the same IoBuf allocation
+// size as the freed arena, so the recycled storage is overwritten even without
+// a sanitizer. X-Big (the in-flight line, restaged by replace_buf_ptr) and
+// X-Tail (parsed after the grow) stay valid and act as controls.
+TEST(Http1ConnectionTest, HeaderGrowKeepsEarlierHeaderViewsAlive) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    HeaderGrowObservations obs;
+    std::promise<void> done_promise;
+    auto done_future = done_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        std::string requests = "GET /path?x=1 HTTP/1.1\r\n"
+                               "Host: example.test\r\n"
+                               "X-Early: abcdefghij\r\n"
+                               "X-Big: " +
+                               std::string(425, 'Z') +
+                               "\r\n"
+                               "X-Tail: ok\r\n"
+                               "\r\n";
+        auto transport = std::make_unique<RecordingHttp1Transport>(group.at(0), obs.metrics, std::move(requests));
+
+        fiber::http::Http1ServerOptions options;
+        options.header_init_size = 256;
+
+        fiber::http::HttpHandler handler = [&obs](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            ++obs.handler_calls;
+            obs.method = std::string(exchange.method_view());
+            obs.version = std::string(exchange.version_view());
+            obs.path = std::string(exchange.uri().path);
+            obs.query = std::string(exchange.uri().query);
+            obs.unparsed_uri = std::string(exchange.uri().unparsed_uri);
+            obs.host = std::string(exchange.header("host"));
+            obs.early = std::string(exchange.header("x-early"));
+            obs.big = std::string(exchange.header("x-big"));
+            obs.tail = std::string(exchange.header("x-tail"));
+            auto result = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 204,
+                    .body = fiber::http::ResponseBodySpec::None(),
+                    .end_stream = true,
+            });
+            if (!result) {
+                obs.metrics.responses_ok = false;
+            }
+            co_return;
+        };
+
+        fiber::http::Http1Connection connection(std::move(transport), handler, options);
+        co_await connection.run();
+        done_promise.set_value();
+        co_return;
+    });
+
+    ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+
+    ASSERT_EQ(obs.handler_calls, 1U);
+    EXPECT_EQ(obs.method, "GET");
+    EXPECT_EQ(obs.version, "HTTP/1.1");
+    EXPECT_EQ(obs.path, "/path");
+    EXPECT_EQ(obs.query, "x=1");
+    EXPECT_EQ(obs.unparsed_uri, "/path?x=1");
+    EXPECT_EQ(obs.host, "example.test");
+    EXPECT_EQ(obs.early, "abcdefghij");
+    EXPECT_EQ(obs.big, std::string(425, 'Z'));
+    EXPECT_EQ(obs.tail, "ok");
+    EXPECT_TRUE(obs.metrics.responses_ok);
+}
+
+// Byte layout (total 655): request line 21 | Host line 9 | X-Huge line 610 | X-After line 13 | final CRLF 2.
+// With 256-byte arenas the X-Huge line spans two full storages: the first grow
+// pins the storage carrying the request-line and Host views, the second grow
+// passes through a storage with no completed line (no views — freed unpinned),
+// and the line completes in the third storage whose views the HeaderDone pin
+// must keep alive.
+TEST(Http1ConnectionTest, HeaderLineSpanningMultipleGrowsKeepsViewsAlive) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    HeaderGrowObservations obs;
+    std::promise<void> done_promise;
+    auto done_future = done_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        std::string requests = "GET /multi HTTP/1.1\r\n"
+                               "Host: h\r\n"
+                               "X-Huge: " +
+                               std::string(600, 'M') +
+                               "\r\n"
+                               "X-After: ok\r\n"
+                               "\r\n";
+        auto transport = std::make_unique<RecordingHttp1Transport>(group.at(0), obs.metrics, std::move(requests));
+
+        fiber::http::Http1ServerOptions options;
+        options.header_init_size = 256;
+        options.header_large_size = 256;
+
+        fiber::http::HttpHandler handler = [&obs](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            ++obs.handler_calls;
+            obs.method = std::string(exchange.method_view());
+            obs.version = std::string(exchange.version_view());
+            obs.path = std::string(exchange.uri().path);
+            obs.host = std::string(exchange.header("host"));
+            obs.big = std::string(exchange.header("x-huge"));
+            obs.tail = std::string(exchange.header("x-after"));
+            auto result = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 204,
+                    .body = fiber::http::ResponseBodySpec::None(),
+                    .end_stream = true,
+            });
+            if (!result) {
+                obs.metrics.responses_ok = false;
+            }
+            co_return;
+        };
+
+        fiber::http::Http1Connection connection(std::move(transport), handler, options);
+        co_await connection.run();
+        done_promise.set_value();
+        co_return;
+    });
+
+    ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+
+    ASSERT_EQ(obs.handler_calls, 1U);
+    EXPECT_EQ(obs.method, "GET");
+    EXPECT_EQ(obs.version, "HTTP/1.1");
+    EXPECT_EQ(obs.path, "/multi");
+    EXPECT_EQ(obs.host, "h");
+    EXPECT_EQ(obs.big, std::string(600, 'M'));
+    EXPECT_EQ(obs.tail, "ok");
+    EXPECT_TRUE(obs.metrics.responses_ok);
+}
+
+// Byte layout (total 270): request line 17 | Host line 9 | X-F line 230 | X-Tail line 12 | final CRLF 2.
+// The first read ends exactly at the CRLF of the X-F line, so the arena is
+// full with no line in flight; the next grow reaches
+// HeaderLineParser::replace_buf_ptr, whose FIBER_ASSERT(started_) aborts the
+// process. The request runs in a forked child so the abort fails this test
+// instead of killing the whole binary; the expectation is a completed 204.
+int run_exact_boundary_request_child() {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    HeaderGrowObservations obs;
+    std::promise<void> done_promise;
+    auto done_future = done_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        std::string requests = "GET /b HTTP/1.1\r\n"
+                               "Host: h\r\n"
+                               "X-F: " +
+                               std::string(223, 'F') +
+                               "\r\n"
+                               "X-Tail: ok\r\n"
+                               "\r\n";
+        auto transport = std::make_unique<RecordingHttp1Transport>(group.at(0), obs.metrics, std::move(requests));
+
+        fiber::http::Http1ServerOptions options;
+        options.header_init_size = 256;
+
+        fiber::http::HttpHandler handler = [&obs](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            ++obs.handler_calls;
+            obs.method = std::string(exchange.method_view());
+            obs.host = std::string(exchange.header("host"));
+            obs.big = std::string(exchange.header("x-f"));
+            obs.tail = std::string(exchange.header("x-tail"));
+            auto result = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 204,
+                    .body = fiber::http::ResponseBodySpec::None(),
+                    .end_stream = true,
+            });
+            if (!result) {
+                obs.metrics.responses_ok = false;
+            }
+            co_return;
+        };
+
+        fiber::http::Http1Connection connection(std::move(transport), handler, options);
+        co_await connection.run();
+        done_promise.set_value();
+        co_return;
+    });
+
+    const bool done = done_future.wait_for(2s) == std::future_status::ready;
+    group.stop();
+    group.join();
+    if (!done || obs.handler_calls != 1 || !obs.metrics.responses_ok) {
+        return 2;
+    }
+    if (obs.method != "GET") {
+        return 3;
+    }
+    if (obs.host != "h") {
+        return 4;
+    }
+    if (obs.big != std::string(223, 'F')) {
+        return 5;
+    }
+    if (obs.tail != "ok") {
+        return 6;
+    }
+    return 0;
+}
+
+TEST(Http1ConnectionTest, HeaderBufferExactlyFullAtLineBoundaryCompletesRequest) {
+    const pid_t pid = ::fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+        ::_exit(run_exact_boundary_request_child());
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status)) << "child terminated by signal " << WTERMSIG(status);
+    if (WIFEXITED(status)) {
+        EXPECT_EQ(WEXITSTATUS(status), 0);
+    }
 }
 
 } // namespace

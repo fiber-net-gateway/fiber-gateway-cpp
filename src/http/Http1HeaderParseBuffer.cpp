@@ -45,30 +45,36 @@ common::IoResult<void> Http1HeaderParseBuffer::grow() noexcept {
 
     buf_ = std::move(next);
     ++growth_count_;
+    clear_view_state();
     return {};
 }
 
 void Http1HeaderParseBuffer::reset() noexcept {
     buf_ = {};
     growth_count_ = 0;
+    clear_view_state();
+}
+
+common::IoResult<void> Http1HeaderParseBuffer::pin_viewed_storage(mem::IoBufChain &owner) noexcept {
+    if (!has_views_ || pinned_) {
+        return {};
+    }
+    // Whole-storage refcount handle: the view range is irrelevant, the owner
+    // chain only keeps the storage alive for views taken into it.
+    mem::IoBuf pin = buf_;
+    if (!owner.append(std::move(pin))) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    pinned_ = true;
+    return {};
+}
+
+void Http1HeaderParseBuffer::clear_view_state() noexcept {
+    has_views_ = false;
+    pinned_ = false;
 }
 
 bool Http1HeaderParseBuffer::can_grow() const noexcept { return next_capacity() != 0; }
-
-common::IoResult<mem::IoBuf> Http1HeaderParseBuffer::retain_prefix(std::size_t bytes) const noexcept {
-    if (!buf_) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    std::size_t consumed = static_cast<std::size_t>(buf_.readable_data() - buf_.data());
-    if (bytes > consumed) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-
-    mem::IoBuf owner = buf_;
-    owner.reset();
-    owner.commit(bytes);
-    return owner;
-}
 
 common::IoResult<mem::IoBuf> Http1HeaderParseBuffer::retain_suffix() const noexcept {
     if (!buf_) {

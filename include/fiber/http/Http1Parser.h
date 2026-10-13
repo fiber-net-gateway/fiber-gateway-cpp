@@ -165,6 +165,9 @@ public:
     void reset() noexcept;
 
     ParseCode execute(mem::IoBuf *buffer);
+    // Whether a header line is currently in flight (bytes fed, not yet
+    // complete). Grow points with no line in flight must not restage.
+    [[nodiscard]] bool started() const noexcept { return started_; }
     // replace the pointers in HeaderLineState.
     // the content was copied to the new_buf_start pointer because the limit of the old memory capacity.
     ParseCode replace_buf_ptr(mem::IoBuf *old_chain, mem::IoBuf *new_chain) noexcept;

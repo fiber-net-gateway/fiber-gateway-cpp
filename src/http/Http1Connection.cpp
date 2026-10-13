@@ -249,6 +249,8 @@ Http1Connection::parse_request(HttpExchange &exchange, std::chrono::steady_clock
                     co_return ParseCode::InvalidRequest;
                 }
             }
+            // method/version/uri views now point into the current storage.
+            header_buffer.note_view();
             break;
         }
     }
@@ -259,10 +261,17 @@ Http1Connection::parse_request(HttpExchange &exchange, std::chrono::steady_clock
             ParseCode code = hdr_parser.execute(&header_buffer.buf());
             if (code == ParseCode::Again) {
                 if (header_buffer.buf().writable() == 0) {
+                    auto pin_result = header_buffer.pin_viewed_storage(exchange.header_bufs_);
+                    if (!pin_result) {
+                        co_return std::unexpected(pin_result.error());
+                    }
                     if (!header_buffer.can_grow()) {
                         co_return ParseCode::HeaderTooLarge;
                     }
-                    auto grow_result = header_buffer.grow_and_replace(hdr_parser);
+                    // A line may end exactly at the buffer boundary: nothing is
+                    // in flight then, so plain grow() applies (no line to restage).
+                    common::IoResult<void> grow_result =
+                            hdr_parser.started() ? header_buffer.grow_and_replace(hdr_parser) : header_buffer.grow();
                     if (!grow_result) {
                         co_return std::unexpected(grow_result.error());
                     }
@@ -309,6 +318,7 @@ Http1Connection::parse_request(HttpExchange &exchange, std::chrono::steady_clock
                     co_return std::unexpected(common::IoErr::NoMem);
                 }
                 exchange.cache_request_header_field(*field);
+                header_buffer.note_view();
                 if (const auto *handler = header_handler_map().get(std::string_view(lowercase, name_len), hash)) {
                     if (!(*handler)(exchange, *field)) {
                         co_return ParseCode::InvalidHeader;
@@ -317,15 +327,9 @@ Http1Connection::parse_request(HttpExchange &exchange, std::chrono::steady_clock
                 continue;
             }
             if (code == ParseCode::HeaderDone) {
-                const std::size_t header_bytes =
-                        static_cast<std::size_t>(header_buffer.buf().readable_data() - header_buffer.buf().data());
-                auto header_owner_result = header_buffer.retain_prefix(header_bytes);
-                if (!header_owner_result) {
-                    co_return std::unexpected(header_owner_result.error());
-                }
-                mem::IoBuf header_owner = std::move(*header_owner_result);
-                if (!exchange.header_bufs_.append(std::move(header_owner))) {
-                    co_return std::unexpected(common::IoErr::NoMem);
+                auto pin_result = header_buffer.pin_viewed_storage(exchange.header_bufs_);
+                if (!pin_result) {
+                    co_return std::unexpected(pin_result.error());
                 }
                 if (header_buffer.buf().readable() > 0) {
                     auto trailing_result = header_buffer.retain_suffix();

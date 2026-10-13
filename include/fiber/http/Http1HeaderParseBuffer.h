@@ -8,6 +8,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../common/mem/IoBuf.h"
+#include "../common/mem/IoBufChain.h"
 #include "Http1Parser.h"
 
 namespace fiber::http {
@@ -35,16 +36,28 @@ public:
     [[nodiscard]] mem::IoBuf &buf() noexcept { return buf_; }
     [[nodiscard]] const mem::IoBuf &buf() const noexcept { return buf_; }
 
-    [[nodiscard]] common::IoResult<mem::IoBuf> retain_prefix(std::size_t bytes) const noexcept;
+    // View-lifetime tracking. A parsed line's views point exclusively into the
+    // buffer storage where that line completed (replace_buf_ptr restages the
+    // whole in-flight line into each new storage). Callers take a view (header
+    // fields, method/URI/reason views) via note_view(); before a storage is
+    // dropped by grow, pin_viewed_storage() keeps it alive for the exchange —
+    // but only if it carries views, and at most once per storage. Storages
+    // grown through with no completed line carry no views and are freed.
+    void note_view() noexcept { has_views_ = true; }
+    common::IoResult<void> pin_viewed_storage(mem::IoBufChain &owner) noexcept;
+
     [[nodiscard]] common::IoResult<mem::IoBuf> retain_suffix() const noexcept;
 
 private:
     [[nodiscard]] std::size_t next_capacity() const noexcept;
     [[nodiscard]] common::IoResult<mem::IoBuf> allocate_next() const noexcept;
+    void clear_view_state() noexcept;
 
     Http1HeaderParseBufferOptions options_{};
     mem::IoBuf buf_{};
     std::size_t growth_count_ = 0;
+    bool has_views_ = false;
+    bool pinned_ = false;
 };
 
 template<typename Parser>
@@ -67,6 +80,7 @@ common::IoResult<void> Http1HeaderParseBuffer::grow_and_replace(Parser &parser) 
 
     buf_ = std::move(next);
     ++growth_count_;
+    clear_view_state();
     return {};
 }
 
