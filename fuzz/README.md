@@ -95,3 +95,10 @@ shares); everything else is deterministic:
 ```bash
 rm -rf fuzz/corpus/quic_* && ./build-fuzz/fuzz/quic_fuzz_seedgen fuzz/corpus
 ```
+
+The corpus directories are gitignored: tracked seeds stay tracked (the
+regeneration flow above keeps the same file names), while the artifacts
+fuzzing sessions drop into the corpus dirs when it is used as an output stay
+out of `git status`. To land valuable new coverage, distill it against the
+committed seeds (`-merge=1` into a scratch dir) and `git add -f` the small
+resulting set.

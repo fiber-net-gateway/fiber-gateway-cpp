@@ -7,3 +7,5 @@
 /.codex
 /.claude
 /ai-server.env
+/fuzz/corpus
+/work
