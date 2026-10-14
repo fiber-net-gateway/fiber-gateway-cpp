@@ -189,7 +189,13 @@ bool QuicStream::unidirectional() const noexcept {
 }
 
 common::IoResult<std::size_t> QuicStream::try_read(std::size_t max_bytes, mem::IoBufChain &out) noexcept {
-    if (!attached_to_connection_ || !recv_queue_.initialized()) {
+    if (!recv_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (const common::IoErr terminal = recv_queue_.terminal_read_error(); terminal != common::IoErr::None) {
+        return std::unexpected(terminal);
+    }
+    if (!attached_to_connection_) {
         return std::unexpected(common::IoErr::Invalid);
     }
     auto taken = recv_queue_.try_take(max_bytes, out);
@@ -203,7 +209,13 @@ common::IoResult<std::size_t> QuicStream::try_read(std::size_t max_bytes, mem::I
 
 async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_bytes, mem::IoBufChain &out,
                                                             std::chrono::milliseconds timeout) noexcept {
-    if (!attached_to_connection_ || !recv_queue_.initialized()) {
+    if (!recv_queue_.initialized()) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (const common::IoErr terminal = recv_queue_.terminal_read_error(); terminal != common::IoErr::None) {
+        co_return std::unexpected(terminal);
+    }
+    if (!attached_to_connection_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     auto taken = co_await recv_queue_.take(max_bytes, out, timeout);
@@ -216,14 +228,16 @@ async::Task<common::IoResult<std::size_t>> QuicStream::read(std::size_t max_byte
 }
 
 common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool fin) noexcept {
-    if (!attached_to_connection_ || !send_queue_.initialized()) {
+    if (!send_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (const common::IoErr terminal = terminal_write_error(); terminal != common::IoErr::None) {
+        return std::unexpected(terminal);
+    }
+    if (!attached_to_connection_) {
         return std::unexpected(common::IoErr::Invalid);
     }
     const std::size_t bytes = buf.readable();
-    const common::IoErr terminal = terminal_write_error();
-    if (terminal != common::IoErr::None) {
-        return std::unexpected(terminal);
-    }
 
     mem::IoBuf append_buf = buf;
     bool append_fin = fin;
@@ -266,12 +280,14 @@ common::IoResult<std::size_t> QuicStream::try_write(const void *buf, std::size_t
     if (len == 0) {
         return try_write(mem::IoBuf{}, fin);
     }
-    if (!attached_to_connection_ || !send_queue_.initialized()) {
+    if (!send_queue_.initialized()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    const common::IoErr terminal = terminal_write_error();
-    if (terminal != common::IoErr::None) {
+    if (const common::IoErr terminal = terminal_write_error(); terminal != common::IoErr::None) {
         return std::unexpected(terminal);
+    }
+    if (!attached_to_connection_) {
+        return std::unexpected(common::IoErr::Invalid);
     }
 
     const std::size_t available = write_available();
@@ -302,15 +318,17 @@ common::IoResult<std::size_t> QuicStream::try_write(const void *buf, std::size_t
 }
 
 common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noexcept {
-    if (!attached_to_connection_ || !send_queue_.initialized()) {
+    if (!send_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (const common::IoErr terminal = terminal_write_error(); terminal != common::IoErr::None) {
+        return std::unexpected(terminal);
+    }
+    if (!attached_to_connection_) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
     const std::size_t bytes = chain.readable_bytes();
-    const common::IoErr terminal = terminal_write_error();
-    if (terminal != common::IoErr::None) {
-        return std::unexpected(terminal);
-    }
 
     mem::IoBufChain *append_chain = &chain;
     mem::IoBufChain prefix;
@@ -439,11 +457,17 @@ async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBufChain &ch
 }
 
 common::IoResult<void> QuicStream::stop_read(std::uint64_t error_code) noexcept {
-    if (!attached_to_connection_ || !recv_queue_.initialized()) {
+    if (!recv_queue_.initialized()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    if (terminal_error_ != common::IoErr::None) {
+        return std::unexpected(terminal_error_);
     }
     if (recv_queue_.stop_sending()) {
         return {};
+    }
+    if (!attached_to_connection_) {
+        return std::unexpected(common::IoErr::Invalid);
     }
     if (conn_ != nullptr) {
         auto queued = conn_->queue_stop_sending_frame(stream_id_, error_code);
@@ -457,8 +481,11 @@ common::IoResult<void> QuicStream::stop_read(std::uint64_t error_code) noexcept 
 }
 
 common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
-    if (!attached_to_connection_ || !send_queue_.initialized()) {
+    if (!send_queue_.initialized()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    if (terminal_error_ != common::IoErr::None) {
+        return std::unexpected(terminal_error_);
     }
     if (send_queue_.reset_sent()) {
         mark_send_aborted();
@@ -466,6 +493,9 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
     }
     if (send_queue_.fin_acked()) {
         return {};
+    }
+    if (!attached_to_connection_) {
+        return std::unexpected(common::IoErr::Invalid);
     }
     auto final_size = send_queue_.reset(error_code);
     if (!final_size) {
