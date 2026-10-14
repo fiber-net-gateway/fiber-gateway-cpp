@@ -536,12 +536,12 @@ common::IoErr QuicStream::clear_send_aborted_callback(SendAbortedCallback callba
     return common::IoErr::None;
 }
 
-void QuicStream::close(std::uint64_t error_code) noexcept {
+void QuicStream::close(std::uint64_t error_code, common::IoErr terminal) noexcept {
     if (closed_) {
         return;
     }
     closed_ = true;
-    terminal_error_ = common::IoErr::Canceled;
+    terminal_error_ = terminal;
 
     const bool can_send_control = conn_ != nullptr && !conn_->terminal_closing();
 
@@ -549,7 +549,7 @@ void QuicStream::close(std::uint64_t error_code) noexcept {
         (void) conn_->queue_stop_sending_frame(stream_id_, error_code);
     }
 
-    recv_queue_.stop_receiving(error_code);
+    recv_queue_.stop_receiving(error_code, terminal);
     sync_recv_state_from_queue();
 
     if (send_queue_.reset_sent()) {
@@ -564,7 +564,7 @@ void QuicStream::close(std::uint64_t error_code) noexcept {
         }
     }
 
-    notify_write_waiter(common::IoErr::Canceled);
+    notify_write_waiter(terminal);
     if (conn_ != nullptr && !conn_->terminal_closing()) {
         conn_->try_release_stream(*this);
     }
@@ -820,7 +820,7 @@ common::IoErr QuicStream::terminal_write_error() const noexcept {
         return common::IoErr::BrokenPipe;
     }
     if (conn_ != nullptr && conn_->terminal_closing()) {
-        return common::IoErr::Canceled;
+        return quic_close_source_io_error(conn_->close_source());
     }
     return common::IoErr::None;
 }

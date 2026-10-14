@@ -41,7 +41,7 @@ public:
     void init(mem::IoBufNodePool &pool) noexcept;
     void init(mem::IoBufNodePool &pool, Options options) noexcept;
 
-    void stop_receiving(std::uint64_t error_code = 0) noexcept;
+    void stop_receiving(std::uint64_t error_code = 0, common::IoErr terminal = common::IoErr::Canceled) noexcept;
 
     [[nodiscard]] common::IoResult<std::size_t> try_take(std::size_t max_bytes, mem::IoBufChain &out) noexcept;
     [[nodiscard]] async::Task<common::IoResult<std::size_t>>
@@ -91,6 +91,7 @@ private:
     std::uint64_t received_end_offset_ = 0;
     std::uint64_t reset_error_code_ = 0;
     std::uint64_t stop_error_code_ = 0;
+    common::IoErr stop_terminal_ = common::IoErr::Canceled;
     ReadAwaiter *read_waiter_ = nullptr;
     bool has_final_size_ = false;
     bool fin_received_ = false;

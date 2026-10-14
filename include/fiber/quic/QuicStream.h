@@ -157,7 +157,7 @@ public:
     // Observe or defer work; do not destroy or mutate the connection/stream.
     common::IoErr set_send_aborted_callback(SendAbortedCallback callback, void *ctx) noexcept;
     common::IoErr clear_send_aborted_callback(SendAbortedCallback callback, void *ctx) noexcept;
-    void close(std::uint64_t error_code = 0) noexcept;
+    void close(std::uint64_t error_code = 0, common::IoErr terminal = common::IoErr::Canceled) noexcept;
 
     // Compatibility shim for callers that still use the old connection-close
     // notification name.

@@ -87,6 +87,16 @@ fiber::async::DetachedTask close_after_delay(fiber::quic::QuicConnection *conn, 
     conn->close(fiber::quic::QuicErrorCode::NoError);
 }
 
+fiber::async::DetachedTask drain_after_delay(fiber::quic::QuicConnection *conn, std::chrono::milliseconds delay) {
+    co_await fiber::async::sleep(delay);
+    conn->begin_draining(fiber::quic::QuicErrorCode::InternalError);
+}
+
+struct LateIoErrors {
+    fiber::common::IoErr write_err = fiber::common::IoErr::None;
+    fiber::common::IoErr read_err = fiber::common::IoErr::None;
+};
+
 } // namespace
 
 // After a local connection teardown (close + mark_closed detaches every
@@ -277,5 +287,172 @@ TEST(QuicStreamTeardownIoError, StopSendingThenWriteReportsBrokenPipe) {
         auto written = (*stream)->try_write(iobuf_of("x"));
         ASSERT_FALSE(written.has_value());
         EXPECT_EQ(written.error(), fiber::common::IoErr::BrokenPipe);
+    });
+}
+
+// The shared close-source -> IoErr mapping: the single place that decides the
+// teardown label for handshake waiters and stream IO alike.
+TEST(QuicStreamTeardownIoError, CloseSourceIoErrorMapping) {
+    EXPECT_EQ(fiber::quic::quic_close_source_io_error(fiber::quic::QuicCloseSource::None),
+              fiber::common::IoErr::Canceled);
+    EXPECT_EQ(fiber::quic::quic_close_source_io_error(fiber::quic::QuicCloseSource::Local),
+              fiber::common::IoErr::Canceled);
+    EXPECT_EQ(fiber::quic::quic_close_source_io_error(fiber::quic::QuicCloseSource::PeerConnectionClose),
+              fiber::common::IoErr::ConnReset);
+    EXPECT_EQ(fiber::quic::quic_close_source_io_error(fiber::quic::QuicCloseSource::StatelessReset),
+              fiber::common::IoErr::ConnReset);
+    EXPECT_EQ(fiber::quic::quic_close_source_io_error(fiber::quic::QuicCloseSource::IdleTimeout),
+              fiber::common::IoErr::TimedOut);
+}
+
+// A peer CONNECTION_CLOSE (draining) derives ConnReset for both attached and
+// detached late IO — the incident's timing window no longer changes the label.
+TEST(QuicStreamTeardownIoError, PeerCloseTeardownReportsConnReset) {
+    fiber::test::run_in_quic_loop([&](fiber::mem::IoBufNodePool &) {
+        CallbackState state{};
+        fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), server_options(state));
+        auto stream = conn.get_or_create_peer_stream(0);
+        ASSERT_TRUE(stream.has_value());
+        fiber::quic::QuicStream::Lease lease{*stream};
+
+        conn.begin_draining(fiber::quic::QuicErrorCode::InternalError);
+        ASSERT_EQ(conn.state(), fiber::quic::QuicConnectionState::Draining);
+
+        auto written = lease->try_write(iobuf_of("x"));
+        ASSERT_FALSE(written.has_value());
+        EXPECT_EQ(written.error(), fiber::common::IoErr::ConnReset);
+
+        fiber::mem::IoBufChain out;
+        auto read = lease->try_read(64, out);
+        ASSERT_FALSE(read.has_value());
+        EXPECT_EQ(read.error(), fiber::common::IoErr::ConnReset);
+
+        auto stopped = lease->stop_read(0);
+        ASSERT_FALSE(stopped.has_value());
+        EXPECT_EQ(stopped.error(), fiber::common::IoErr::ConnReset);
+
+        auto reset = lease->reset(0);
+        ASSERT_FALSE(reset.has_value());
+        EXPECT_EQ(reset.error(), fiber::common::IoErr::ConnReset);
+
+        // Same label after the full teardown detaches the stream.
+        conn.mark_closed();
+        ASSERT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
+        written = lease->try_write(iobuf_of("x"));
+        ASSERT_FALSE(written.has_value());
+        EXPECT_EQ(written.error(), fiber::common::IoErr::ConnReset);
+        read = lease->try_read(64, out);
+        ASSERT_FALSE(read.has_value());
+        EXPECT_EQ(read.error(), fiber::common::IoErr::ConnReset);
+    });
+}
+
+// A writer parked on the zero window when the peer closes the connection is
+// woken with ConnReset, matching what late writers report.
+TEST(QuicStreamTeardownIoError, ParkedWriterWakesConnResetOnPeerClose) {
+    fiber::test::run_in_quic_loop([&](fiber::mem::IoBufNodePool &) {
+        CallbackState state{};
+        fiber::event::EventLoopGroup group(1);
+        fiber::test::QuicTestEndpoint endpoint(group.at(0));
+        fiber::quic::QuicConnection conn(endpoint.get(), server_options(state));
+        auto stream = conn.get_or_create_peer_stream(0);
+        ASSERT_TRUE(stream.has_value());
+        fiber::quic::QuicStream::Lease lease{*stream};
+
+        std::promise<WriteResult> done;
+        auto future = done.get_future();
+        group.start();
+        fiber::async::spawn(group.at(0),
+                            [stream = std::move(lease), &done]() { return write_one(stream.get(), &done); });
+        fiber::async::spawn(group.at(0), [&conn]() { return drain_after_delay(&conn, std::chrono::milliseconds(20)); });
+
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        WriteResult result = future.get();
+        EXPECT_FALSE(result.ok);
+        EXPECT_EQ(result.error, fiber::common::IoErr::ConnReset);
+        group.join();
+    });
+}
+
+// A reader parked on an empty stream when the peer closes is woken with
+// ConnReset: stop_receiving() forwards the derived terminal to the read
+// waiter instead of a hardcoded Canceled.
+TEST(QuicStreamTeardownIoError, ParkedReaderWakesConnResetOnPeerClose) {
+    fiber::test::run_in_quic_loop([&](fiber::mem::IoBufNodePool &) {
+        CallbackState state{};
+        fiber::event::EventLoopGroup group(1);
+        fiber::test::QuicTestEndpoint endpoint(group.at(0));
+        fiber::quic::QuicConnection conn(endpoint.get(), server_options(state));
+        auto stream = conn.get_or_create_peer_stream(0);
+        ASSERT_TRUE(stream.has_value());
+        fiber::quic::QuicStream::Lease lease{*stream};
+
+        std::promise<ReadResult> done;
+        auto future = done.get_future();
+        group.start();
+        fiber::async::spawn(group.at(0),
+                            [stream = std::move(lease), &done]() { return read_one(stream.get(), &done); });
+        fiber::async::spawn(group.at(0), [&conn]() { return drain_after_delay(&conn, std::chrono::milliseconds(20)); });
+
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        ReadResult result = future.get();
+        EXPECT_FALSE(result.ok);
+        EXPECT_EQ(result.error, fiber::common::IoErr::ConnReset);
+        group.join();
+    });
+}
+
+// Idle timeout tears the connection down silently with TimedOut as the stream
+// terminal: the parked writer and late reads/writes all report it.
+TEST(QuicStreamTeardownIoError, IdleTimeoutTeardownReportsTimedOut) {
+    fiber::test::run_in_quic_loop([&](fiber::mem::IoBufNodePool &) {
+        CallbackState state{};
+        fiber::event::EventLoopGroup group(1);
+        fiber::test::QuicTestEndpoint endpoint(group.at(0));
+        auto options = server_options(state);
+        options.transport.max_idle_timeout = std::chrono::milliseconds(10);
+        fiber::quic::QuicConnection conn(endpoint.get(), options);
+        auto stream = conn.get_or_create_peer_stream(0);
+        ASSERT_TRUE(stream.has_value());
+        fiber::quic::QuicStream *raw = *stream;
+        fiber::quic::QuicStream::Lease writer_lease{raw};
+        fiber::quic::QuicStream::Lease late_lease{raw};
+
+        std::promise<WriteResult> writer_done;
+        auto writer_future = writer_done.get_future();
+        std::promise<LateIoErrors> late_done;
+        auto late_future = late_done.get_future();
+        group.start();
+        // Inline writer without the loop-stopping write_one(): the late-IO
+        // orchestrator below owns stopping the loop once both results are in.
+        fiber::async::spawn(group.at(0),
+                            [stream = std::move(writer_lease), &writer_done]() -> fiber::async::DetachedTask {
+                                auto result = co_await stream->write(iobuf_of("!"));
+                                writer_done.set_value(to_write_result(result));
+                            });
+        fiber::async::spawn(group.at(0), [&, stream = std::move(late_lease)]() -> fiber::async::DetachedTask {
+            conn.arm_idle_timer();
+            co_await fiber::async::sleep(std::chrono::milliseconds(50));
+            LateIoErrors errors{};
+            auto written = stream->try_write(iobuf_of("x"));
+            errors.write_err = written.has_value() ? fiber::common::IoErr::None : written.error();
+            fiber::mem::IoBufChain out;
+            auto read = stream->try_read(64, out);
+            errors.read_err = read.has_value() ? fiber::common::IoErr::None : read.error();
+            late_done.set_value(errors);
+            fiber::event::EventLoop::current().stop();
+        });
+
+        ASSERT_EQ(writer_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        WriteResult writer_result = writer_future.get();
+        EXPECT_FALSE(writer_result.ok);
+        EXPECT_EQ(writer_result.error, fiber::common::IoErr::TimedOut);
+
+        ASSERT_EQ(late_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        LateIoErrors late_errors = late_future.get();
+        EXPECT_EQ(late_errors.write_err, fiber::common::IoErr::TimedOut);
+        EXPECT_EQ(late_errors.read_err, fiber::common::IoErr::TimedOut);
+        EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
+        group.join();
     });
 }
