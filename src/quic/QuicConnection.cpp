@@ -842,8 +842,10 @@ void QuicConnection::clear_pending_frames_all_levels() noexcept {
     }
 }
 
-void QuicConnection::close_all_streams(std::uint64_t error_code) noexcept {
-    streams_.for_each([error_code](QuicStream &stream) noexcept { stream.close(error_code); });
+void QuicConnection::close_all_streams() noexcept {
+    const common::IoErr terminal = quic_close_source_io_error(close_info_.source);
+    streams_.for_each(
+            [this, terminal](QuicStream &stream) noexcept { stream.close(close_info_.error_code, terminal); });
 }
 
 void QuicConnection::clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept {
@@ -1054,7 +1056,7 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
     publish_state(QuicConnectionState::Closing);
 
     enqueue_close_frames_all_levels();
-    close_all_streams(close_info_.error_code);
+    close_all_streams();
 
     if (active_timer_loop() != nullptr) {
         schedule_send();
@@ -1081,7 +1083,7 @@ void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
     close_info_ = info;
     publish_state(QuicConnectionState::Draining);
     clear_pending_frames_all_levels();
-    close_all_streams(close_info_.error_code);
+    close_all_streams();
 
     if (active_timer_loop() != nullptr) {
         arm_close_timer();
@@ -1176,7 +1178,7 @@ void QuicConnection::mark_closed() noexcept {
         cancel_all_timers();
     }
     publish_state(QuicConnectionState::Closed);
-    close_all_streams(close_info_.error_code);
+    close_all_streams();
     streams_.clear();
     dispatch_state_change();
 }
@@ -1657,9 +1659,9 @@ void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
     // the one that queues CC frames. Keep it that way: this caller depends on
     // enter_closed() never putting anything on the wire.
     //
-    // Streams still in flight are torn down like any other close. QuicStream::
-    // close() reports Canceled to readers and writers whatever error code it is
-    // given, and the connection is already Closed by then, so no STOP_SENDING or
+    // Streams still in flight are torn down like any other close, reporting
+    // the per-source terminal (TimedOut here) to parked and late IO alike.
+    // The connection is already Closed by then, so no STOP_SENDING or
     // RESET_STREAM goes out either.
     connection->close_info_ = QuicCloseInfo{
             .source = QuicCloseSource::IdleTimeout,
@@ -3208,9 +3210,9 @@ void QuicConnection::detach_from_endpoint() noexcept {
     }
     FIBER_ASSERT(state_ == QuicConnectionState::Closed);
 
-    handshake_gate_.notify(common::IoErr::Canceled);
-    notify_peer_data_waiters(common::IoErr::Canceled);
-    close_all_streams(close_info_.error_code);
+    handshake_gate_.notify();
+    notify_peer_data_waiters(quic_close_source_io_error(close_info_.source));
+    close_all_streams();
     clear_frames_for_detach();
     streams_.clear();
 

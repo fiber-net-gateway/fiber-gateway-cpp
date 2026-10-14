@@ -169,14 +169,15 @@ common::IoResult<void> QuicStreamRecvQueue::recv_reset(std::uint64_t error_code,
     return {};
 }
 
-void QuicStreamRecvQueue::stop_receiving(std::uint64_t error_code) noexcept {
+void QuicStreamRecvQueue::stop_receiving(std::uint64_t error_code, common::IoErr terminal) noexcept {
     if (stop_sending_) {
         return;
     }
     stop_error_code_ = error_code;
+    stop_terminal_ = terminal;
     stop_sending_ = true;
     reassembler_.discard_buffered();
-    notify_read_waiter(common::IoErr::Canceled);
+    notify_read_waiter(terminal);
 }
 
 common::IoResult<std::size_t> QuicStreamRecvQueue::try_take(std::size_t max_bytes, mem::IoBufChain &out) noexcept {
@@ -276,7 +277,7 @@ bool QuicStreamRecvQueue::can_take_now() const noexcept {
 
 common::IoErr QuicStreamRecvQueue::terminal_read_error() const noexcept {
     if (stop_sending_) {
-        return common::IoErr::Canceled;
+        return stop_terminal_;
     }
     if (reset_received_) {
         return common::IoErr::ConnReset;

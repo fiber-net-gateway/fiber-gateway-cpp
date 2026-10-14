@@ -85,6 +85,25 @@ enum class QuicCloseSource : std::uint8_t {
     IdleTimeout,
 };
 
+// Terminal error for stream/connection IO after a teardown, derived from the
+// close source. Shared by QuicHandshakeGate::wait_result and the per-stream
+// teardown path (close_all_streams), so parked and late IO report the same
+// label: peer went away -> ConnReset, peer stopped responding -> TimedOut,
+// local action -> Canceled.
+[[nodiscard]] inline common::IoErr quic_close_source_io_error(QuicCloseSource source) noexcept {
+    switch (source) {
+        case QuicCloseSource::IdleTimeout:
+            return common::IoErr::TimedOut;
+        case QuicCloseSource::PeerConnectionClose:
+        case QuicCloseSource::StatelessReset:
+            return common::IoErr::ConnReset;
+        case QuicCloseSource::None:
+        case QuicCloseSource::Local:
+            return common::IoErr::Canceled;
+    }
+    return common::IoErr::Canceled;
+}
+
 enum class QuicCloseFrameKind : std::uint8_t {
     Transport,
     Application,
@@ -1023,7 +1042,7 @@ private:
     [[nodiscard]] bool queue_close_frame_for_level(QuicEncryptionLevel level) noexcept;
     void enqueue_close_frames_all_levels() noexcept;
     void clear_pending_frames_all_levels() noexcept;
-    void close_all_streams(std::uint64_t error_code) noexcept;
+    void close_all_streams() noexcept;
     void clear_frames_for_detach() noexcept;
     void clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept;
     // The single writer of state_. Re-evaluates handshake waiters, whose

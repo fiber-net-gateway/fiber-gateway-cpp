@@ -114,17 +114,7 @@ common::IoErr QuicHandshakeGate::wait_result(bool confirmed) const noexcept {
         (state == QuicConnectionState::Established && confirmed)) {
         return common::IoErr::WouldBlock;
     }
-    switch (connection.close_source()) {
-        case QuicCloseSource::IdleTimeout:
-            return common::IoErr::TimedOut;
-        case QuicCloseSource::PeerConnectionClose:
-        case QuicCloseSource::StatelessReset:
-            return common::IoErr::ConnReset;
-        case QuicCloseSource::None:
-        case QuicCloseSource::Local:
-            return common::IoErr::Canceled;
-    }
-    return common::IoErr::Canceled;
+    return quic_close_source_io_error(connection.close_source());
 }
 
 void QuicHandshakeGate::notify(common::IoErr result) noexcept {
