@@ -1,4 +1,5 @@
 add_library(fiber_prometheus STATIC
+    "${CMAKE_CURRENT_LIST_DIR}/src/DynamicSeriesStore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/MetricValue.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/MetricsRegistry.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/TextEncoder.cpp")
@@ -15,17 +16,27 @@ if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
 endif()
 
 if (FIBER_BUILD_PROMETHEUS_BENCHMARK)
+    add_executable(prometheus_dynamic_benchmark "${CMAKE_CURRENT_LIST_DIR}/bench/DynamicBenchmark.cpp")
+    target_link_libraries(prometheus_dynamic_benchmark PRIVATE fiber::prometheus)
+    set_target_properties(prometheus_dynamic_benchmark PROPERTIES FOLDER "components/prometheus")
+    fiber_link_runtime_allocator(prometheus_dynamic_benchmark)
     add_executable(prometheus_record_benchmark
         "${CMAKE_CURRENT_LIST_DIR}/bench/RecordBenchmark.cpp")
     target_link_libraries(prometheus_record_benchmark PRIVATE fiber::prometheus)
     set_target_properties(prometheus_record_benchmark PROPERTIES FOLDER "components/prometheus")
     fiber_link_runtime_allocator(prometheus_record_benchmark)
+    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
+        set_property(TARGET prometheus_record_benchmark prometheus_dynamic_benchmark
+                     PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
 endif()
 
 if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 
     add_executable(fiber_prometheus_tests
+        "${CMAKE_CURRENT_LIST_DIR}/tests/DynamicSeriesTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/DynamicSnapshotTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MetricValueTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MetricsRegistryTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MultiLoopSnapshotTest.cpp"

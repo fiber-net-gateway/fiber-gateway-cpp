@@ -3,13 +3,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include <fiber/async/WaitGroup.h>
+#include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
+#include "DynamicSeriesStore.h"
 #include "fiber/prometheus/MetricFamily.h"
 #include "fiber/prometheus/MetricsShard.h"
 
@@ -22,6 +25,55 @@ namespace detail {
 
 inline constexpr std::size_t kCacheLineSize = 64;
 
+// Runtime arrays never grow and report allocation failure without exceptions.
+template<typename T>
+class RuntimeArray {
+public:
+    RuntimeArray() noexcept = default;
+    RuntimeArray(const RuntimeArray &) = delete;
+    RuntimeArray &operator=(const RuntimeArray &) = delete;
+    ~RuntimeArray() { reset(); }
+    bool allocate(std::size_t size) noexcept {
+        reset();
+        if (size == 0) {
+            return true;
+        }
+        if (size > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            return false;
+        }
+        data_ = static_cast<T *>(dynamic_allocate(size * sizeof(T)));
+        if (!data_) {
+            return false;
+        }
+        size_ = size;
+        for (std::size_t i = 0; i < size_; ++i) {
+            std::construct_at(data_ + i);
+        }
+        return true;
+    }
+    void reset() noexcept {
+        for (std::size_t i = 0; i < size_; ++i) {
+            std::destroy_at(data_ + i);
+        }
+        dynamic_deallocate(data_);
+        data_ = nullptr;
+        size_ = 0;
+    }
+    [[nodiscard]] T *data() noexcept { return data_; }
+    [[nodiscard]] const T *data() const noexcept { return data_; }
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    [[nodiscard]] T *begin() noexcept { return data_; }
+    [[nodiscard]] T *end() noexcept { return size_ == 0 ? data_ : data_ + size_; }
+    [[nodiscard]] const T *begin() const noexcept { return data_; }
+    [[nodiscard]] const T *end() const noexcept { return size_ == 0 ? data_ : data_ + size_; }
+    T &operator[](std::size_t i) noexcept { return data_[i]; }
+    const T &operator[](std::size_t i) const noexcept { return data_[i]; }
+
+private:
+    T *data_ = nullptr;
+    std::size_t size_ = 0;
+};
+
 struct SeriesSchema {
     std::vector<std::string> label_values;
     std::size_t word_offset = 0;
@@ -29,6 +81,8 @@ struct SeriesSchema {
 
 struct FamilySchema {
     MetricType type = MetricType::Counter;
+    SeriesOptions options;
+    std::size_t dynamic_index = 0;
     GaugeReduction reduction = GaugeReduction::Sum;
     HistogramUnit histogram_unit = HistogramUnit::Raw;
     std::string name;
@@ -67,8 +121,11 @@ struct RegistryData {
     RegistryOptions options;
     std::vector<FamilySchema> families;
     std::vector<std::unique_ptr<MetricsShard>> shards;
-    std::vector<std::vector<std::uint64_t>> snapshots;
-    std::vector<std::unique_ptr<SnapshotRequest>> snapshot_requests;
+    RuntimeArray<RuntimeArray<std::uint64_t>> snapshots;
+    RuntimeArray<SnapshotRequest> snapshot_requests;
+    RuntimeArray<DynamicFamily> dynamic_families;
+    std::size_t dynamic_snapshot_bytes = 0;
+    fiber::common::IoErr snapshot_error = fiber::common::IoErr::None;
     fiber::async::WaitGroup snapshot_wait;
     fiber::async::WaitGroup idle_wait;
     std::mutex collect_mutex;

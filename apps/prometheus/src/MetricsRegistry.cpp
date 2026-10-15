@@ -202,27 +202,33 @@ MetricsRegistry::~MetricsRegistry() {
 }
 
 fiber::common::IoResult<FamilyId> MetricsRegistry::register_counter(std::string_view name, std::string_view help,
-                                                                    std::span<const std::string_view> label_names) {
-    return register_family(MetricType::Counter, name, help, label_names, GaugeReduction::Sum, {}, HistogramUnit::Raw);
+                                                                    std::span<const std::string_view> label_names,
+                                                                    SeriesOptions options) {
+    return register_family(MetricType::Counter, name, help, label_names, GaugeReduction::Sum, {}, HistogramUnit::Raw,
+                           options);
 }
 
 fiber::common::IoResult<FamilyId> MetricsRegistry::register_gauge(std::string_view name, std::string_view help,
                                                                   GaugeReduction reduction,
                                                                   std::span<const std::string_view> label_names) {
-    return register_family(MetricType::Gauge, name, help, label_names, reduction, {}, HistogramUnit::Raw);
+    return register_family(MetricType::Gauge, name, help, label_names, reduction, {}, HistogramUnit::Raw, {});
 }
 
 fiber::common::IoResult<FamilyId> MetricsRegistry::register_histogram(std::string_view name, std::string_view help,
                                                                       std::span<const std::uint64_t> upper_bounds,
                                                                       HistogramUnit unit,
-                                                                      std::span<const std::string_view> label_names) {
-    return register_family(MetricType::Histogram, name, help, label_names, GaugeReduction::Sum, upper_bounds, unit);
+                                                                      std::span<const std::string_view> label_names,
+                                                                      SeriesOptions options) {
+    return register_family(MetricType::Histogram, name, help, label_names, GaugeReduction::Sum, upper_bounds, unit,
+                           options);
 }
 
-fiber::common::IoResult<FamilyId>
-MetricsRegistry::register_family(MetricType type, std::string_view name, std::string_view help,
-                                 std::span<const std::string_view> label_names, GaugeReduction reduction,
-                                 std::span<const std::uint64_t> upper_bounds, HistogramUnit unit) {
+fiber::common::IoResult<FamilyId> MetricsRegistry::register_family(MetricType type, std::string_view name,
+                                                                   std::string_view help,
+                                                                   std::span<const std::string_view> label_names,
+                                                                   GaugeReduction reduction,
+                                                                   std::span<const std::uint64_t> upper_bounds,
+                                                                   HistogramUnit unit, SeriesOptions options) {
     if (data_->frozen || !valid_metric_name(name) || escaped_help_size(help) > data_->options.max_help_bytes ||
         (type == MetricType::Counter && !has_suffix(name, "_total")) ||
         (type == MetricType::Gauge && !valid_reduction(reduction)) ||
@@ -237,7 +243,14 @@ MetricsRegistry::register_family(MetricType type, std::string_view name, std::st
         return std::unexpected(IoErr::Invalid);
     }
 
+    if (upper_bounds.size() > std::numeric_limits<std::size_t>::max() - 2 ||
+        !detail::DynamicSeriesStore::valid_layout(options, label_names.size(), data_->options.max_label_value_bytes,
+                                                  type == MetricType::Histogram ? upper_bounds.size() + 2 : 1) ||
+        (options.mode == SeriesMode::Lru && data_->options.max_dynamic_snapshot_bytes == 0)) {
+        return std::unexpected(IoErr::Invalid);
+    }
     detail::FamilySchema candidate;
+    candidate.options = options;
     candidate.type = type;
     candidate.reduction = reduction;
     candidate.histogram_unit = unit;
@@ -268,7 +281,7 @@ fiber::common::IoResult<SeriesId> MetricsRegistry::register_series(FamilyId id,
         return std::unexpected(IoErr::Invalid);
     }
     auto &family = data_->families[id.index_];
-    if (label_values.size() != family.label_names.size() ||
+    if (family.options.mode != SeriesMode::Static || label_values.size() != family.label_names.size() ||
         family.series.size() > std::numeric_limits<std::uint32_t>::max()) {
         return std::unexpected(IoErr::Invalid);
     }
@@ -317,30 +330,72 @@ fiber::common::IoResult<void> MetricsRegistry::freeze() {
         }
     }
 
-    for (auto &shard: data_->shards) {
-        if (!shard->data_->allocate(word_count)) {
-            for (auto &allocated: data_->shards) {
-                allocated->data_->reset();
-            }
-            return std::unexpected(IoErr::NoMem);
+    const auto rollback = [&](IoErr error) -> fiber::common::IoResult<void> {
+        for (auto &shard: data_->shards) {
+            shard->data_->reset();
+        }
+        data_->snapshots.reset();
+        data_->snapshot_requests.reset();
+        data_->dynamic_families.reset();
+        data_->dynamic_snapshot_bytes = 0;
+        return std::unexpected(error);
+    };
+    const auto dynamic_count = static_cast<std::size_t>(
+            std::count_if(data_->families.begin(), data_->families.end(),
+                          [](const detail::FamilySchema &family) { return family.options.mode == SeriesMode::Lru; }));
+    if (!data_->dynamic_families.allocate(dynamic_count) || !data_->snapshots.allocate(data_->shards.size()) ||
+        !data_->snapshot_requests.allocate(data_->shards.size())) {
+        return rollback(IoErr::NoMem);
+    }
+    std::size_t dynamic_index = 0;
+    for (auto &family: data_->families) {
+        if (family.options.mode != SeriesMode::Lru) {
+            continue;
+        }
+        family.dynamic_index = dynamic_index++;
+        auto &dynamic = data_->dynamic_families[family.dynamic_index];
+        auto initialized = dynamic.store.initialize(family, data_->options.max_label_value_bytes);
+        if (!initialized) {
+            return rollback(initialized.error());
+        }
+        auto reserved = dynamic.store.capture(dynamic.snapshot, data_->dynamic_snapshot_bytes,
+                                              data_->options.max_dynamic_snapshot_bytes);
+        if (!reserved) {
+            return rollback(reserved.error());
         }
     }
-    data_->snapshots.clear();
-    data_->snapshots.resize(data_->shards.size());
-    for (auto &snapshot: data_->snapshots) {
-        snapshot.resize(word_count);
-    }
-    data_->snapshot_requests.clear();
-    data_->snapshot_requests.reserve(data_->shards.size());
     for (std::size_t index = 0; index < data_->shards.size(); ++index) {
-        auto request = std::make_unique<detail::SnapshotRequest>();
-        request->registry = this;
-        request->shard_index = index;
-        data_->snapshot_requests.push_back(std::move(request));
+        if (!data_->shards[index]->data_->allocate(word_count) || !data_->snapshots[index].allocate(word_count)) {
+            return rollback(IoErr::NoMem);
+        }
+        auto &request = data_->snapshot_requests[index];
+        request.registry = this;
+        request.shard_index = index;
     }
     data_->word_count = word_count;
     data_->frozen = true;
     return {};
+}
+
+fiber::common::IoResult<DynamicCounter> MetricsRegistry::dynamic_counter(FamilyId id) noexcept {
+    if (!data_->frozen || id.registry_ != this || id.index_ >= data_->families.size()) {
+        return std::unexpected(IoErr::Invalid);
+    }
+    const auto &family = data_->families[id.index_];
+    if (family.type != MetricType::Counter || family.options.mode != SeriesMode::Lru) {
+        return std::unexpected(IoErr::Invalid);
+    }
+    return DynamicCounter(data_->dynamic_families[family.dynamic_index].store);
+}
+fiber::common::IoResult<DynamicHistogram> MetricsRegistry::dynamic_histogram(FamilyId id) noexcept {
+    if (!data_->frozen || id.registry_ != this || id.index_ >= data_->families.size()) {
+        return std::unexpected(IoErr::Invalid);
+    }
+    const auto &family = data_->families[id.index_];
+    if (family.type != MetricType::Histogram || family.options.mode != SeriesMode::Lru) {
+        return std::unexpected(IoErr::Invalid);
+    }
+    return DynamicHistogram(data_->dynamic_families[family.dynamic_index].store);
 }
 
 bool MetricsRegistry::frozen() const noexcept { return data_->frozen; }
@@ -410,9 +465,10 @@ fiber::async::Task<fiber::common::IoResult<MetricsRegistry::CollectToken>> Metri
                 }
             }
 
-            data_->snapshot_wait.add(data_->shards.size());
+            data_->snapshot_wait.add(data_->shards.size() + 1);
             data_->idle_wait.add();
-            data_->pending_snapshots = data_->shards.size();
+            data_->pending_snapshots = data_->shards.size() + 1;
+            data_->snapshot_error = IoErr::None;
             data_->collect_active = true;
             start_snapshot = true;
         }
@@ -422,6 +478,18 @@ fiber::async::Task<fiber::common::IoResult<MetricsRegistry::CollectToken>> Metri
 
     CollectToken token(*this);
     if (start_snapshot) {
+        // This batch owns one completion item even in a Registry without shards.
+        // No collect control lock is held while taking family locks or allocating.
+        for (auto &dynamic: data_->dynamic_families) {
+            auto captured = dynamic.store.capture(dynamic.snapshot, data_->dynamic_snapshot_bytes,
+                                                  data_->options.max_dynamic_snapshot_bytes);
+            if (!captured) {
+                data_->snapshot_error = captured.error();
+                break;
+            }
+        }
+        data_->snapshot_wait.done();
+        snapshot_finished();
         if (local_shard != data_->shards.size()) {
             copy_snapshot(local_shard);
             data_->snapshot_wait.done();
@@ -432,13 +500,16 @@ fiber::async::Task<fiber::common::IoResult<MetricsRegistry::CollectToken>> Metri
             if (&owner == collector) {
                 continue;
             }
-            auto &request = *data_->snapshot_requests[index];
+            auto &request = data_->snapshot_requests[index];
             owner.post<detail::SnapshotRequest, &detail::SnapshotRequest::notify_entry, &MetricsRegistry::run_snapshot>(
                     request);
         }
     }
 
     co_await data_->snapshot_wait.join();
+    if (data_->snapshot_error != IoErr::None) {
+        co_return std::unexpected(data_->snapshot_error);
+    }
     co_return std::move(token);
 }
 
