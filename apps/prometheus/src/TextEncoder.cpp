@@ -204,8 +204,8 @@ IoErr write_label_value(Writer &writer, std::string_view value) noexcept {
     return writer.write(value.substr(start));
 }
 
-template<typename Writer>
-IoErr write_labels(Writer &writer, const FamilySchema &family, const SeriesSchema &series) noexcept {
+template<typename Writer, typename Series>
+IoErr write_labels(Writer &writer, const FamilySchema &family, const Series &series) noexcept {
     if (family.label_names.empty()) {
         return IoErr::None;
     }
@@ -233,8 +233,8 @@ IoErr write_labels(Writer &writer, const FamilySchema &family, const SeriesSchem
     return writer.write("}");
 }
 
-template<typename Writer>
-IoErr write_histogram_labels(Writer &writer, const FamilySchema &family, const SeriesSchema &series,
+template<typename Writer, typename Series>
+IoErr write_histogram_labels(Writer &writer, const FamilySchema &family, const Series &series,
                              const std::uint64_t *upper_bound) noexcept {
     IoErr error = writer.write("{");
     for (std::size_t index = 0; error == IoErr::None && index < family.label_names.size(); ++index) {
@@ -309,18 +309,20 @@ bool valid_snapshot(const RegistryData &data, std::size_t offset, std::size_t wo
         return false;
     }
     return std::all_of(data.snapshots.begin(), data.snapshots.end(),
-                       [&](const std::vector<std::uint64_t> &snapshot) { return snapshot.size() >= data.word_count; });
+                       [&](const auto &snapshot) { return snapshot.size() >= data.word_count; });
 }
 
-template<typename Writer>
-IoErr write_counter(Writer &writer, const RegistryData &data, const FamilySchema &family,
-                    const SeriesSchema &series) noexcept {
-    if (!valid_snapshot(data, series.word_offset, 1)) {
+template<typename Writer, typename Series>
+IoErr write_counter(Writer &writer, const RegistryData &data, const FamilySchema &family, const Series &series,
+                    const std::uint64_t *values = nullptr) noexcept {
+    if (!values && !valid_snapshot(data, series.word_offset, 1)) {
         return IoErr::Invalid;
     }
-    std::uint64_t aggregate = 0;
-    for (const auto &snapshot: data.snapshots) {
-        aggregate += snapshot[series.word_offset];
+    std::uint64_t aggregate = values ? values[0] : 0;
+    if (!values) {
+        for (const auto &snapshot: data.snapshots) {
+            aggregate += snapshot[series.word_offset];
+        }
     }
     IoErr error = writer.write(family.name);
     if (error == IoErr::None) {
@@ -381,24 +383,30 @@ IoErr write_gauge(Writer &writer, const RegistryData &data, const FamilySchema &
     return error;
 }
 
-template<typename Writer>
-IoErr write_histogram(Writer &writer, const RegistryData &data, const FamilySchema &family,
-                      const SeriesSchema &series) noexcept {
+template<typename Writer, typename Series>
+IoErr write_histogram(Writer &writer, const RegistryData &data, const FamilySchema &family, const Series &series,
+                      const std::uint64_t *values = nullptr) noexcept {
     const std::size_t bucket_count = family.upper_bounds.size();
-    if (!valid_snapshot(data, series.word_offset, bucket_count + 2)) {
+    if (!values && !valid_snapshot(data, series.word_offset, bucket_count + 2)) {
         return IoErr::Invalid;
     }
-    std::uint64_t count = 0;
-    std::uint64_t sum = 0;
-    for (const auto &snapshot: data.snapshots) {
-        count += snapshot[series.word_offset + bucket_count];
-        sum += snapshot[series.word_offset + bucket_count + 1];
+    std::uint64_t count = values ? values[bucket_count] : 0;
+    std::uint64_t sum = values ? values[bucket_count + 1] : 0;
+    if (!values) {
+        for (const auto &snapshot: data.snapshots) {
+            count += snapshot[series.word_offset + bucket_count];
+            sum += snapshot[series.word_offset + bucket_count + 1];
+        }
     }
 
     std::uint64_t cumulative = 0;
     for (std::size_t bucket = 0; bucket < bucket_count; ++bucket) {
-        for (const auto &snapshot: data.snapshots) {
-            cumulative += snapshot[series.word_offset + bucket];
+        if (values) {
+            cumulative += values[bucket];
+        } else {
+            for (const auto &snapshot: data.snapshots) {
+                cumulative += snapshot[series.word_offset + bucket];
+            }
         }
         IoErr error = writer.write(family.name);
         if (error == IoErr::None) {
@@ -479,6 +487,31 @@ IoErr write_histogram(Writer &writer, const RegistryData &data, const FamilySche
 template<typename Writer>
 IoErr encode(Writer &writer, const RegistryData &data) noexcept {
     for (const auto &family: data.families) {
+        if (family.options.mode == SeriesMode::Lru) {
+            const auto samples = data.dynamic_families[family.dynamic_index].snapshot.samples();
+            if (samples.empty()) {
+                continue;
+            }
+            IoErr error = write_metadata(writer, family);
+            if (error != IoErr::None) {
+                return error;
+            }
+            for (const auto &sample: samples) {
+                // Adapt only the labels and offset. Values already aggregate all workers.
+                struct SampleView {
+                    std::span<const std::string_view> label_values;
+                    std::size_t word_offset = 0;
+                };
+                const SampleView series{sample.label_values};
+                error = family.type == MetricType::Counter
+                                ? write_counter(writer, data, family, series, sample.values)
+                                : write_histogram(writer, data, family, series, sample.values);
+                if (error != IoErr::None) {
+                    return error;
+                }
+            }
+            continue;
+        }
         if (family.series.empty()) {
             continue;
         }
