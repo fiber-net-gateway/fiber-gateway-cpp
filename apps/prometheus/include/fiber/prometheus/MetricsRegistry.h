@@ -9,6 +9,8 @@
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/common/mem/IoBufChain.h>
+#include "DynamicCounter.h"
+#include "DynamicHistogram.h"
 #include "MetricFamily.h"
 #include "MetricsShard.h"
 
@@ -38,8 +40,9 @@ public:
     MetricsRegistry(MetricsRegistry &&) = delete;
     MetricsRegistry &operator=(MetricsRegistry &&) = delete;
 
-    [[nodiscard]] fiber::common::IoResult<FamilyId>
-    register_counter(std::string_view name, std::string_view help, std::span<const std::string_view> label_names = {});
+    [[nodiscard]] fiber::common::IoResult<FamilyId> register_counter(std::string_view name, std::string_view help,
+                                                                     std::span<const std::string_view> label_names = {},
+                                                                     SeriesOptions options = {});
 
     [[nodiscard]] fiber::common::IoResult<FamilyId> register_gauge(std::string_view name, std::string_view help,
                                                                    GaugeReduction reduction,
@@ -47,13 +50,17 @@ public:
 
     [[nodiscard]] fiber::common::IoResult<FamilyId>
     register_histogram(std::string_view name, std::string_view help, std::span<const std::uint64_t> upper_bounds,
-                       HistogramUnit unit = HistogramUnit::Raw, std::span<const std::string_view> label_names = {});
+                       HistogramUnit unit = HistogramUnit::Raw, std::span<const std::string_view> label_names = {},
+                       SeriesOptions options = {});
 
     [[nodiscard]] fiber::common::IoResult<SeriesId>
     register_series(FamilyId id, std::span<const std::string_view> label_values = {});
 
     [[nodiscard]] fiber::common::IoResult<ShardId> add_shard(fiber::event::EventLoop &owner);
     [[nodiscard]] fiber::common::IoResult<void> freeze();
+
+    [[nodiscard]] fiber::common::IoResult<DynamicCounter> dynamic_counter(FamilyId id) noexcept;
+    [[nodiscard]] fiber::common::IoResult<DynamicHistogram> dynamic_histogram(FamilyId id) noexcept;
 
     [[nodiscard]] bool frozen() const noexcept;
     [[nodiscard]] std::size_t family_count() const noexcept;
@@ -92,7 +99,7 @@ private:
     [[nodiscard]] fiber::common::IoResult<FamilyId>
     register_family(MetricType type, std::string_view name, std::string_view help,
                     std::span<const std::string_view> label_names, GaugeReduction reduction,
-                    std::span<const std::uint64_t> upper_bounds, HistogramUnit unit);
+                    std::span<const std::uint64_t> upper_bounds, HistogramUnit unit, SeriesOptions options);
 
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<CollectToken>> prepare_collect() noexcept;
     void release_collect() noexcept;

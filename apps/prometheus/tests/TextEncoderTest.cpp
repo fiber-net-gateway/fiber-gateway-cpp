@@ -21,6 +21,16 @@ using fiber::prometheus::detail::FamilySchema;
 using fiber::prometheus::detail::RegistryData;
 using fiber::prometheus::detail::SeriesSchema;
 
+void set_snapshots(RegistryData &data, std::initializer_list<std::initializer_list<std::uint64_t>> snapshots) {
+    ASSERT_TRUE(data.snapshots.allocate(snapshots.size()));
+    std::size_t index = 0;
+    for (const auto &values: snapshots) {
+        auto &snapshot = data.snapshots[index++];
+        ASSERT_TRUE(snapshot.allocate(values.size()));
+        std::copy(values.begin(), values.end(), snapshot.data());
+    }
+}
+
 std::string chain_string(const fiber::mem::IoBufChain &chain) {
     std::array<iovec, 64> iov{};
     const int count = chain.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
@@ -56,10 +66,11 @@ TEST(TextEncoderTest, EncodesMetadataEscapesLabelsAndGaugeReductionsInOrder) {
 
     data.families = {counter, minimum, maximum, sum};
     data.word_count = 4;
-    data.snapshots = {{4, std::bit_cast<std::uint64_t>(std::int64_t{-2}),
-                       std::bit_cast<std::uint64_t>(std::int64_t{-2}), std::bit_cast<std::uint64_t>(std::int64_t{-2})},
-                      {6, std::bit_cast<std::uint64_t>(std::int64_t{5}), std::bit_cast<std::uint64_t>(std::int64_t{5}),
-                       std::bit_cast<std::uint64_t>(std::int64_t{5})}};
+    set_snapshots(data,
+                  {{4, std::bit_cast<std::uint64_t>(std::int64_t{-2}), std::bit_cast<std::uint64_t>(std::int64_t{-2}),
+                    std::bit_cast<std::uint64_t>(std::int64_t{-2})},
+                   {6, std::bit_cast<std::uint64_t>(std::int64_t{5}), std::bit_cast<std::uint64_t>(std::int64_t{5}),
+                    std::bit_cast<std::uint64_t>(std::int64_t{5})}});
 
     fiber::mem::IoBuf out = fiber::mem::IoBuf::allocate(4096);
     auto encoded = fiber::prometheus::detail::encode_text_into(data, out, {});
@@ -90,7 +101,7 @@ TEST(TextEncoderTest, EncodesCumulativeHistogramAndExactDurationSeconds) {
 
         data.families = {histogram};
         data.word_count = 4;
-        data.snapshots = {{2, 1, 4, 12}, {1, 2, 5, 20}};
+        set_snapshots(data, {{2, 1, 4, 12}, {1, 2, 5, 20}});
 
 
         auto encoded = fiber::prometheus::detail::encode_text_chain(data, CollectOptions{.chunk_size = 7});
@@ -111,7 +122,7 @@ TEST(TextEncoderTest, FixedBufferFailureDoesNotCommitPartialOutput) {
     RegistryData data({});
     data.families.push_back(family(MetricType::Counter, "requests_total", "Requests", 0));
     data.word_count = 1;
-    data.snapshots = {{1}};
+    set_snapshots(data, {{1}});
 
     fiber::mem::IoBuf out = fiber::mem::IoBuf::allocate(16);
     std::memcpy(out.writable_data(), "old", 3);
@@ -130,7 +141,7 @@ TEST(TextEncoderTest, ChainHonorsOutputLimitAndRejectsZeroChunk) {
         RegistryData data({});
         data.families.push_back(family(MetricType::Counter, "requests_total", "Requests", 0));
         data.word_count = 1;
-        data.snapshots = {{1}};
+        set_snapshots(data, {{1}});
 
 
         auto too_large = fiber::prometheus::detail::encode_text_chain(

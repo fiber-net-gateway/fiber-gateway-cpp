@@ -15,9 +15,26 @@ enum class GaugeReduction : std::uint8_t { Sum, Min, Max };
 
 enum class HistogramUnit : std::uint8_t { Raw, Nanoseconds, Microseconds, Milliseconds, Seconds };
 
+enum class SeriesMode : std::uint8_t { Static, Lru };
+
+struct SeriesOptions {
+    SeriesMode mode = SeriesMode::Static;
+    std::size_t max_series = 0;
+    std::size_t max_storage_bytes = 0;
+};
+
+struct DynamicSeriesDiagnostics {
+    std::size_t active_series = 0;
+    std::size_t capacity = 0;
+    std::size_t storage_bytes = 0;
+    std::uint64_t evictions = 0;
+    std::uint64_t creation_failures = 0;
+};
+
 struct RegistryOptions {
     std::size_t max_help_bytes = std::size_t{64} * 1024;
     std::size_t max_label_value_bytes = std::size_t{4} * 1024;
+    std::size_t max_dynamic_snapshot_bytes = std::size_t{64} * 1024 * 1024;
 };
 
 class FamilyId {

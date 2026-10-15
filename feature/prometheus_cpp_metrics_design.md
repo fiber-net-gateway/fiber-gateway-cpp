@@ -1,5 +1,10 @@
 # Prometheus Metrics 库设计方案
 
+> 本文保留初版静态指标设计。运行期动态 label 值、每 family 容量上限及 LRU 淘汰的扩展方案见
+> [Prometheus 动态标签与 LRU 容量管理设计](prometheus_dynamic_series_lru_design.md)。
+> 本文中的并发 collect 返回 Busy、显式传入 node pool 等早期描述不代表当前 API；
+> 当前实现支持并发调用共享一代快照，`collect_text()` 只接收 `CollectOptions`。
+
 ## 1. 目标与边界
 
 在 `apps/prometheus` 下实现一个面向高性能 C++ 服务的 Prometheus Metrics
