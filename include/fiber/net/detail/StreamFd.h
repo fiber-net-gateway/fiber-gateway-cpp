@@ -39,6 +39,15 @@ public:
     [[nodiscard]] RWFd &rwfd() noexcept;
     [[nodiscard]] bool read_ready() const noexcept { return rwfd_.read_state() == RWFd::State::Ready; }
     [[nodiscard]] bool write_ready() const noexcept { return rwfd_.write_state() == RWFd::State::Ready; }
+    // A read now can only report WouldBlock: the last one proved the receive
+    // queue drained of data, no edge has arrived since, RDHUP is observed (a
+    // FIN queued behind that data would otherwise go unannounced: the next
+    // read is what reports it), and no stream end is recorded (those make the
+    // read wait proceed at once, so the read must run to report them).
+    // Callers may wait_readable instead of issuing it.
+    [[nodiscard]] bool read_would_block() const noexcept {
+        return rwfd_.read_state() == RWFd::State::Blocked && rwfd_.observes_read_hangup() && !peer_closed();
+    }
     // EOF observed on the read side; reads keep returning 0, writes still work.
     [[nodiscard]] bool eof() const noexcept { return eof_; }
     // Peer closed its write side; buffered data still reads out first.
@@ -64,6 +73,9 @@ public:
     // (RDHUP; ERR/HUP arrive with any registration) without subscribing a
     // direction callback.
     fiber::common::IoErr ensure_state_observation() noexcept;
+    // The same plus read interest, in one registration (see RWFd): for a
+    // reader that wants read_would_block() from its first short read on.
+    fiber::common::IoErr ensure_read_observation() noexcept { return rwfd_.ensure_read_observation(); }
 
     // Loop handover, see RWFd. Requires no remaining subscriptions; stream
     // states (EOF/hangup/terminal) survive the handover.

@@ -165,8 +165,11 @@ private:
     // resolve the current loop's node pool, so the frame — the Task — must be
     // destroyed on the connection's loop.
 
-    // Start checks shared by both roles: Already, BadFd, version window.
-    fiber::common::IoErr check_handshake_start(int min_version, int max_version) const noexcept;
+    // Start shared by both roles: the checks (Already, BadFd, version
+    // window), then readability and RDHUP in one registration — the first
+    // read wait needs no MOD, and from the first short read on the reads
+    // StreamFd::read_would_block() rules out are skipped, in both phases.
+    fiber::common::IoErr prepare_handshake(int min_version, int max_version) noexcept;
     // TlsServerConfigSource::select — re-stages the server config per
     // ClientHello through the param's configure callback (ctx: the server
     // handshake's frame-local selection, defined in the .cpp).
@@ -181,8 +184,9 @@ private:
     // alert is on the wire.
     template<class Engine>
     fiber::common::IoErr handshake_step(Engine &engine, fiber::event::IoEvent &event) noexcept;
-    // One handshake-phase wire read into inbound_, then
-    // feed_handshake_records. EOF mid-handshake reports ConnReset.
+    // One handshake-phase wire read into inbound_ (skipped while the socket
+    // is known drained: WouldBlock), then feed_handshake_records. EOF
+    // mid-handshake reports ConnReset.
     template<class Engine>
     fiber::common::IoErr read_handshake_records(Engine &engine, fiber::event::IoEvent &event) noexcept;
     // Feeds the complete records in inbound_ to the engine one record per
@@ -224,9 +228,9 @@ private:
     // `capacity` (>= kInboundMinCapacity) takes the read, with the incomplete
     // record carried to its head. EOF reports ConnReset.
     fiber::common::IoErr read_inbound(std::size_t capacity) noexcept;
-    // One connected-phase wire read into a buffer sized from the caller's
-    // `hint`, then process_inbound(). EOF without close_notify reports
-    // ConnReset.
+    // One connected-phase wire read (skipped while the socket is known
+    // drained: WouldBlock) into a buffer sized from the caller's `hint`, then
+    // process_inbound(). EOF without close_notify reports ConnReset.
     fiber::common::IoErr read_wire(std::size_t hint) noexcept;
     // Frames every complete record in inbound_ and hands them to the
     // connection in batches (open + route happen there), leaving at most one

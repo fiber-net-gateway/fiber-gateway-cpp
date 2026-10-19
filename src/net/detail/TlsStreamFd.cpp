@@ -432,7 +432,7 @@ fiber::common::IoErr TlsStreamFd::clear_terminal_callback(ReadyCallback callback
     return stream_fd_.clear_terminal_callback(callback, ctx);
 }
 
-fiber::common::IoErr TlsStreamFd::check_handshake_start(int min_version, int max_version) const noexcept {
+fiber::common::IoErr TlsStreamFd::prepare_handshake(int min_version, int max_version) noexcept {
     if (handshake_started_) {
         return fiber::common::IoErr::Already;
     }
@@ -442,7 +442,7 @@ fiber::common::IoErr TlsStreamFd::check_handshake_start(int min_version, int max
     if (!version_bounds_ok(min_version, max_version)) {
         return fiber::common::IoErr::Invalid;
     }
-    return fiber::common::IoErr::None;
+    return stream_fd_.ensure_read_observation();
 }
 
 const tls::TlsServerConfig *TlsStreamFd::select_server_config(void *ctx,
@@ -474,7 +474,7 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param, s
     busy_ = true;
     BusyResetGuard busy_reset(&busy_);
 
-    if (const fiber::common::IoErr err = check_handshake_start(param.min_version, param.max_version);
+    if (const fiber::common::IoErr err = prepare_handshake(param.min_version, param.max_version);
         err != fiber::common::IoErr::None) {
         co_return std::unexpected(err);
     }
@@ -525,7 +525,7 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, s
     busy_ = true;
     BusyResetGuard busy_reset(&busy_);
 
-    if (const fiber::common::IoErr err = check_handshake_start(param.min_version, param.max_version);
+    if (const fiber::common::IoErr err = prepare_handshake(param.min_version, param.max_version);
         err != fiber::common::IoErr::None) {
         co_return std::unexpected(err);
     }
@@ -835,7 +835,10 @@ fiber::common::IoErr TlsStreamFd::handshake_step(Engine &engine, fiber::event::I
 
 template<class Engine>
 fiber::common::IoErr TlsStreamFd::read_handshake_records(Engine &engine, fiber::event::IoEvent &event) noexcept {
-    const fiber::common::IoErr err = read_inbound(kHandshakeReadCapacity);
+    // After a short read (the peer's next flight is a round trip away) the
+    // syscall could only report EAGAIN: wait for the edge instead.
+    const fiber::common::IoErr err =
+            stream_fd_.read_would_block() ? fiber::common::IoErr::WouldBlock : read_inbound(kHandshakeReadCapacity);
     if (err == fiber::common::IoErr::WouldBlock) {
         event = fiber::event::IoEvent::Read;
         return err;
@@ -1077,6 +1080,10 @@ fiber::common::IoErr TlsStreamFd::flush_output(fiber::event::IoEvent &event) noe
 }
 
 fiber::common::IoErr TlsStreamFd::read_wire(std::size_t hint) noexcept {
+    if (stream_fd_.read_would_block()) {
+        // The last read was short: no allocation, no EAGAIN syscall.
+        return fiber::common::IoErr::WouldBlock;
+    }
     const fiber::common::IoErr err =
             read_inbound(std::clamp(hint + kInboundSlack, kInboundMinCapacity, kInboundMaxCapacity));
     if (err != fiber::common::IoErr::None) {

@@ -339,6 +339,56 @@ TEST(StreamFdTest, HupWithBufferedDataLetsWaitsDrainRemainingThenEof) {
     loop.run();
 }
 
+TEST(StreamFdTest, ReadWouldBlockOnlyAfterAShortReadWithNoStreamEnd) {
+    // read_would_block() lets callers skip a read that can only report
+    // EAGAIN. It must never hold once a stream end is recorded: the read
+    // wait proceeds at once then, so a caller skipping the read would spin.
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    EtWatchdog watchdog{.loop = loop};
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        watchdog.arm();
+        fiber::net::detail::StreamFd stream(loop, fds[0]);
+        EXPECT_FALSE(stream.read_would_block()); // Unknown: only a read can tell
+        EXPECT_EQ(::send(fds[1], "abcd", 4, 0), 4);
+        char data[100]{};
+        auto first = stream.try_read(data, sizeof(data));
+        EXPECT_TRUE(first && *first == 4);
+        // Drained of data, but without RDHUP in the mask a FIN queued behind
+        // the data would go unannounced: only a read can tell.
+        EXPECT_FALSE(stream.read_would_block());
+        EXPECT_EQ(stream.ensure_read_observation(), fiber::common::IoErr::None);
+        EXPECT_TRUE(stream.read_would_block()); // a pending FIN would be queued as an event now
+        EXPECT_EQ(::send(fds[1], "ef", 2, 0), 2);
+        auto edge = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(edge);
+        EXPECT_FALSE(stream.read_would_block()); // the edge made it Ready
+        auto second = stream.try_read(data, sizeof(data));
+        EXPECT_TRUE(second && *second == 2);
+        EXPECT_TRUE(stream.read_would_block());
+
+        // Data and the half-close land together; the short read that drains
+        // the data parks the readiness at Blocked with the hangup recorded.
+        EXPECT_EQ(::send(fds[1], "gh", 2, 0), 2);
+        EXPECT_EQ(::shutdown(fds[1], SHUT_WR), 0);
+        auto ready = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(ready);
+        auto last = stream.try_read(data, sizeof(data));
+        EXPECT_TRUE(last && *last == 2);
+        EXPECT_TRUE(stream.peer_hangup());
+        EXPECT_FALSE(stream.read_ready());
+        EXPECT_FALSE(stream.read_would_block()); // the EOF read must still run
+        auto eof_read = stream.try_read(data, sizeof(data));
+        EXPECT_TRUE(eof_read && *eof_read == 0);
+        EXPECT_FALSE(stream.read_would_block());
+        stream.close();
+        ::close(fds[1]);
+        watchdog.finish();
+    });
+    loop.run();
+}
+
 TEST(StreamFdTest, ZeroLengthReadDoesNotConsumeReadiness) {
     int fds[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
