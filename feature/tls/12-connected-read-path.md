@@ -417,9 +417,11 @@ cmake --build build && ./build/fiber_tests --gtest_filter='Tls*' && ctest --test
   时按 `size - 剩余` 补读 wire":wire 缓冲上限 64K−16,`size` = 64K 的调用方永远不会有剩余;
   有剩余时 `size` 都小于 20K 下限,算出来的大小会被截到下限;补读还要在 EOF/出错时先交付剩余
   明文、把错误锁存到下一次。
-- **fd 已确认读空时跳过 wire 读**:短读之后 `RWFd` 的读状态是 Blocked,H2 每次排空最后
+- ~~**fd 已确认读空时跳过 wire 读**:短读之后 `RWFd` 的读状态是 Blocked,H2 每次排空最后
   那次 `try_read` 会白白分配一块缓冲 + 一次 EAGAIN 的 syscall。读状态为 Blocked 时可以
-  直接返回 WouldBlock(Unknown 仍然要试读)。TCP 路径同样适用,单独评估。
+  直接返回 WouldBlock(Unknown 仍然要试读)。TCP 路径同样适用,单独评估。~~ TLS 两个阶段已完成,
+  见 feature/tls/15 §3:光看 Blocked 不够,还要求 RDHUP 在关注集里(否则跟在数据后面的 FIN
+  没有边沿通知,跳过的那次读正是报告 EOF 的那次)。TCP 路径仍未做。
 - **carry 时复用缓冲**:`inbound_.unique()` 且容量够时 memmove 到开头复用,省掉一次分配。
   不保留空缓冲(否则每个空闲连接都要钉住 64K)。
 - ~~**写侧 `write_scratch_`**(每连接懒分配 16K):改成每线程 scratch~~ 已完成:改为
