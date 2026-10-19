@@ -2,7 +2,351 @@
 #include <fiber/http/ClientHttp3Exchange.h>
 
 #include <cstddef>
+#include <tuple>
 #include "Http3ConnectionTestSupport.h"
+
+namespace {
+
+enum class StoppedWrite { All, Chain, Raw, AllFin, ChainFin, RawFin, Trailer, Header };
+enum class ResponseTiming { AfterStop, BufferedBeforeStop, CompleteBeforeStop };
+
+template<typename F>
+void check_client_request(F &&check) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    auto options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
+    options.remote_connection_id = connection_id_from({5, 6, 7, 8});
+    ClientFixture fixture(endpoint.get(), options);
+    auto &h3 = fixture.connection();
+    ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await check(h3);
+        done.set_value();
+    });
+    EXPECT_EQ(future.wait_for(5s), std::future_status::ready);
+    fixture.finish();
+    group.stop();
+    group.join();
+}
+
+fiber::http::Http3RequestHead upload_head() {
+    return {.method = fiber::http::HttpMethod::Post, .scheme = "https", .authority = "example.com", .path = "/upload"};
+}
+
+void feed_bad_gateway(fiber::http::Http3ClientConnection &h3, std::uint64_t stream_id) {
+    auto response = headers_frame({{":status", "502"}, {"content-length", "11"}});
+    append_frame(response, data_frame("bad gateway"));
+    feed_stream(h3.quic(), stream_id, response, true);
+}
+
+fiber::async::Task<void> expect_bad_gateway(fiber::http::ClientHttp3Exchange &exchange) {
+    auto head = co_await exchange.read_header(1s);
+    EXPECT_TRUE(head);
+    if (!head || *head == nullptr) {
+        ADD_FAILURE() << "missing response header";
+        co_return;
+    }
+    EXPECT_EQ((*head)->status_code, 502);
+    std::string body;
+    for (;;) {
+        auto chunk = co_await exchange.read_body(4, 1s);
+        EXPECT_TRUE(chunk);
+        if (!chunk) {
+            co_return;
+        }
+        const bool complete = chunk->complete();
+        auto bytes = chain_to_bytes(std::move(*chunk));
+        body.append(bytes.begin(), bytes.end());
+        if (complete) {
+            break;
+        }
+    }
+    EXPECT_EQ(body, "bad gateway");
+    EXPECT_EQ(exchange.outcome(), fiber::http::Http3RequestOutcome::Complete);
+}
+
+fiber::async::Task<fiber::common::IoResult<void>> write_until_stopped(fiber::http::ClientHttp3Exchange &exchange,
+                                                                      StoppedWrite kind, std::size_t size) {
+    fiber::mem::BufPool pool;
+    if (kind == StoppedWrite::Header) {
+        std::string path(size, 'p');
+        path.front() = '/';
+        auto head = upload_head();
+        head.path = path;
+        co_return co_await exchange.send_request_header(head, false, 1s);
+    }
+    if (kind == StoppedWrite::Trailer) {
+        fiber::http::HttpHeaders trailers(pool);
+        const std::string value(size, 't');
+        trailers.set("digest", value);
+        co_return co_await exchange.write_trailer(trailers, 1s);
+    }
+    const bool fin = kind == StoppedWrite::AllFin || kind == StoppedWrite::ChainFin || kind == StoppedWrite::RawFin;
+    const std::string payload(fin ? 0 : size, 'x');
+    const auto *data = reinterpret_cast<const std::uint8_t *>(payload.data());
+    if (kind == StoppedWrite::All || kind == StoppedWrite::AllFin) {
+        auto result = co_await exchange.write_all(data, payload.size(), fin, 1s);
+        co_return result ? fiber::common::IoResult<void>{} : std::unexpected(result.error());
+    }
+    if (kind == StoppedWrite::Raw || kind == StoppedWrite::RawFin) {
+        std::size_t sent = 0;
+        do {
+            auto result = co_await exchange.write(data + sent, payload.size() - sent, fin, 1s);
+            if (!result) {
+                co_return std::unexpected(result.error());
+            }
+            sent += *result;
+        } while (sent != payload.size());
+        co_return fiber::common::IoResult<void>{};
+    }
+    fiber::mem::IoBufChain chain;
+    if (!payload.empty()) {
+        auto buf = fiber::mem::IoBuf::allocate(payload.size());
+        if (!buf) {
+            co_return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+        std::memcpy(buf.writable_data(), payload.data(), payload.size());
+        buf.commit(payload.size());
+        if (!chain.append(std::move(buf))) {
+            co_return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+    }
+    if (fin) {
+        chain.mark_complete();
+    }
+    do {
+        auto result = co_await exchange.write(chain, 1s);
+        if (!result) {
+            co_return std::unexpected(result.error());
+        }
+    } while (chain.readable_bytes() != 0 || chain.complete());
+    co_return fiber::common::IoResult<void>{};
+}
+
+class Http3StoppedUploadTest : public testing::TestWithParam<std::tuple<StoppedWrite, ResponseTiming>> {};
+
+TEST_P(Http3StoppedUploadTest, PreservesResponseAfterWriteFailure) {
+    const auto [kind, timing] = GetParam();
+    check_client_request([&](fiber::http::Http3ClientConnection &h3) -> fiber::async::Task<void> {
+        fiber::mem::BufPool pool;
+        auto exchange = h3.open_exchange(pool);
+        EXPECT_TRUE(co_await exchange.send_request_header(upload_head(), false, 1s));
+        if (timing != ResponseTiming::AfterStop) {
+            feed_bad_gateway(h3, exchange.stream_id());
+        }
+        if (timing == ResponseTiming::CompleteBeforeStop) {
+            co_await expect_bad_gateway(exchange);
+        }
+        EXPECT_TRUE(h3.quic().recv_stop_sending_frame(
+                {.id = exchange.stream_id(),
+                 .error_code = static_cast<std::uint64_t>(fiber::http::Http3ErrorCode::NoError)}));
+        auto written = co_await write_until_stopped(exchange, kind, 1);
+        EXPECT_FALSE(written);
+        if (!written) {
+            EXPECT_EQ(written.error(), fiber::common::IoErr::BrokenPipe);
+        }
+        EXPECT_FALSE(exchange.stream()->stop_sending());
+        if (timing == ResponseTiming::AfterStop) {
+            feed_bad_gateway(h3, exchange.stream_id());
+        }
+        if (timing == ResponseTiming::CompleteBeforeStop) {
+            EXPECT_EQ(exchange.outcome(), fiber::http::Http3RequestOutcome::Complete);
+            auto body = co_await exchange.read_body(4, 1s);
+            EXPECT_TRUE(body && body->complete());
+        } else {
+            EXPECT_EQ(exchange.outcome(), fiber::http::Http3RequestOutcome::PossiblyProcessed);
+            co_await expect_bad_gateway(exchange);
+        }
+    });
+}
+
+INSTANTIATE_TEST_SUITE_P(WriteEntries, Http3StoppedUploadTest,
+                         testing::Combine(testing::Values(StoppedWrite::All, StoppedWrite::Chain, StoppedWrite::Raw,
+                                                          StoppedWrite::AllFin, StoppedWrite::ChainFin,
+                                                          StoppedWrite::RawFin, StoppedWrite::Trailer),
+                                          testing::Values(ResponseTiming::AfterStop, ResponseTiming::BufferedBeforeStop,
+                                                          ResponseTiming::CompleteBeforeStop)));
+
+class Http3BlockedUploadTest : public testing::TestWithParam<StoppedWrite> {};
+
+TEST_P(Http3BlockedUploadTest, StopSendingWakesWriterAndPreservesResponse) {
+    const auto kind = GetParam();
+    check_client_request([&](fiber::http::Http3ClientConnection &h3) -> fiber::async::Task<void> {
+        fiber::mem::BufPool pool;
+        auto exchange = h3.open_exchange(pool);
+        if (kind != StoppedWrite::Header) {
+            EXPECT_TRUE(co_await exchange.send_request_header(upload_head(), false, 1s));
+        }
+        fiber::async::WaitGroup writer;
+        writer.add();
+        bool write_finished = false;
+        fiber::async::spawn(fiber::event::EventLoop::current(), [&]() -> fiber::async::DetachedTask {
+            auto written = co_await write_until_stopped(exchange, kind, 2048);
+            EXPECT_FALSE(written);
+            if (!written) {
+                EXPECT_EQ(written.error(), fiber::common::IoErr::BrokenPipe);
+            }
+            write_finished = true;
+            writer.done();
+        });
+        co_await fiber::async::sleep(10ms);
+        EXPECT_FALSE(write_finished);
+        EXPECT_TRUE(h3.quic().recv_stop_sending_frame(
+                {.id = exchange.stream_id(),
+                 .error_code = static_cast<std::uint64_t>(fiber::http::Http3ErrorCode::NoError)}));
+        co_await writer.join();
+        EXPECT_FALSE(exchange.stream()->stop_sending());
+        // Retries must fail before validating any unfinished DATA frame suffix.
+        auto retry = co_await exchange.write(nullptr, 0, true, 1s);
+        EXPECT_FALSE(retry);
+        if (!retry) {
+            EXPECT_EQ(retry.error(), fiber::common::IoErr::BrokenPipe);
+        }
+        feed_bad_gateway(h3, exchange.stream_id());
+        co_await expect_bad_gateway(exchange);
+    });
+}
+
+INSTANTIATE_TEST_SUITE_P(WriteEntries, Http3BlockedUploadTest,
+                         testing::Values(StoppedWrite::All, StoppedWrite::Chain, StoppedWrite::Raw,
+                                         StoppedWrite::Trailer, StoppedWrite::Header));
+
+enum class StoppedResponseFailure { Reset, Truncated, Timeout, Abort, Goaway, ConnectionClose };
+
+class Http3StoppedResponseTest : public testing::TestWithParam<StoppedResponseFailure> {};
+
+TEST_P(Http3StoppedResponseTest, StillReportsResponseFailure) {
+    const auto failure = GetParam();
+    check_client_request([&](fiber::http::Http3ClientConnection &h3) -> fiber::async::Task<void> {
+        fiber::mem::BufPool pool;
+        auto exchange = h3.open_exchange(pool);
+        EXPECT_TRUE(co_await exchange.send_request_header(upload_head(), false, 1s));
+        EXPECT_TRUE(h3.quic().recv_stop_sending_frame(
+                {.id = exchange.stream_id(),
+                 .error_code = static_cast<std::uint64_t>(fiber::http::Http3ErrorCode::NoError)}));
+        EXPECT_FALSE(co_await write_until_stopped(exchange, StoppedWrite::All, 1));
+        switch (failure) {
+            case StoppedResponseFailure::Reset:
+                EXPECT_TRUE(h3.quic().recv_reset_stream_frame(
+                        {.id = exchange.stream_id(),
+                         .error_code = static_cast<std::uint64_t>(fiber::http::Http3ErrorCode::RequestRejected),
+                         .final_size = 0}));
+                break;
+            case StoppedResponseFailure::Truncated: {
+                auto response = headers_frame({{":status", "502"}, {"content-length", "11"}});
+                append_frame(response, data_frame("bad"));
+                feed_stream(h3.quic(), exchange.stream_id(), response, true);
+                auto head = co_await exchange.read_header(1s);
+                EXPECT_TRUE(head && *head != nullptr);
+                auto body = co_await exchange.read_body(1024, 1s);
+                EXPECT_FALSE(body);
+                EXPECT_NE(exchange.outcome(), fiber::http::Http3RequestOutcome::Complete);
+                co_return;
+            }
+            case StoppedResponseFailure::Timeout:
+                break;
+            case StoppedResponseFailure::Abort:
+                EXPECT_TRUE(exchange.abort());
+                EXPECT_TRUE(exchange.stream()->stop_sending());
+                break;
+            case StoppedResponseFailure::Goaway: {
+                auto control = control_settings_stream();
+                append_control_varint_frame(control, fiber::http::Http3FrameType::Goaway, exchange.stream_id());
+                feed_stream(h3.quic(), 3, control);
+                co_await fiber::async::sleep(10ms);
+                break;
+            }
+            case StoppedResponseFailure::ConnectionClose:
+                fiber::http::Http3ClientConnectionTestAccess::close(h3);
+                break;
+        }
+        auto head = co_await exchange.read_header(10ms);
+        EXPECT_FALSE(head);
+        EXPECT_EQ(exchange.outcome(),
+                  failure == StoppedResponseFailure::Reset || failure == StoppedResponseFailure::Goaway
+                          ? fiber::http::Http3RequestOutcome::Rejected
+                          : fiber::http::Http3RequestOutcome::PossiblyProcessed);
+    });
+}
+
+INSTANTIATE_TEST_SUITE_P(ResponseErrors, Http3StoppedResponseTest,
+                         testing::Values(StoppedResponseFailure::Reset, StoppedResponseFailure::Truncated,
+                                         StoppedResponseFailure::Timeout, StoppedResponseFailure::Abort,
+                                         StoppedResponseFailure::Goaway, StoppedResponseFailure::ConnectionClose));
+
+TEST(Http3ClientConnectionTest, UploadTimeoutStillAbortsResponse) {
+    check_client_request([](fiber::http::Http3ClientConnection &h3) -> fiber::async::Task<void> {
+        fiber::mem::BufPool pool;
+        auto exchange = h3.open_exchange(pool);
+        EXPECT_TRUE(co_await exchange.send_request_header(upload_head(), false, 1s));
+        const std::string payload(2048, 'x');
+        auto written = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(payload.data()),
+                                                   payload.size(), false, 10ms);
+        EXPECT_FALSE(written);
+        if (!written) {
+            EXPECT_EQ(written.error(), fiber::common::IoErr::TimedOut);
+        }
+        EXPECT_TRUE(exchange.stream()->stop_sending());
+        auto head = co_await exchange.read_header(10ms);
+        EXPECT_FALSE(head);
+        if (!head) {
+            EXPECT_EQ(head.error(), fiber::common::IoErr::TimedOut);
+        }
+    });
+}
+
+TEST(Http3ClientConnectionTest, OtherStopSendingCodesPreserveResponse) {
+    check_client_request([](fiber::http::Http3ClientConnection &h3) -> fiber::async::Task<void> {
+        for (const std::uint64_t code: {static_cast<std::uint64_t>(fiber::http::Http3ErrorCode::RequestCancelled),
+                                        static_cast<std::uint64_t>(0xdead)}) {
+            fiber::mem::BufPool pool;
+            auto exchange = h3.open_exchange(pool);
+            EXPECT_TRUE(co_await exchange.send_request_header(upload_head(), false, 1s));
+            EXPECT_TRUE(h3.quic().recv_stop_sending_frame({.id = exchange.stream_id(), .error_code = code}));
+            auto written = co_await exchange.write(nullptr, 0, true, 1s);
+            EXPECT_FALSE(written);
+            if (!written) {
+                EXPECT_EQ(written.error(), fiber::common::IoErr::BrokenPipe);
+            }
+            feed_bad_gateway(h3, exchange.stream_id());
+            co_await expect_bad_gateway(exchange);
+        }
+    });
+}
+
+TEST(Http3ClientConnectionTest, CompletedResponseSurvivesUploadTimeout) {
+    check_client_request([](fiber::http::Http3ClientConnection &h3) -> fiber::async::Task<void> {
+        fiber::mem::BufPool pool;
+        auto exchange = h3.open_exchange(pool);
+        EXPECT_TRUE(co_await exchange.send_request_header(upload_head(), false, 1s));
+        feed_bad_gateway(h3, exchange.stream_id());
+        co_await expect_bad_gateway(exchange);
+        const std::string payload(2048, 'x');
+        auto written = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(payload.data()),
+                                                   payload.size(), false, 10ms);
+        EXPECT_FALSE(written);
+        if (!written) {
+            EXPECT_EQ(written.error(), fiber::common::IoErr::TimedOut);
+        }
+        EXPECT_FALSE(exchange.stream()->stop_sending());
+        EXPECT_TRUE(exchange.stream()->send_aborted());
+        auto retry = co_await exchange.write(nullptr, 0, true, 1s);
+        EXPECT_FALSE(retry);
+        if (!retry) {
+            EXPECT_EQ(retry.error(), fiber::common::IoErr::BrokenPipe);
+        }
+        EXPECT_EQ(exchange.outcome(), fiber::http::Http3RequestOutcome::Complete);
+        auto body = co_await exchange.read_body(4, 1s);
+        EXPECT_TRUE(body && body->complete());
+    });
+}
+
+} // namespace
 
 TEST(Http3ClientConnectionTest, LocalSettingsUseConfiguredFieldSectionLimit) {
     fiber::event::EventLoopGroup group(1);
