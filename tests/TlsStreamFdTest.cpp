@@ -1959,6 +1959,13 @@ std::size_t heap_in_use() {
 #endif
 }
 
+// Holds the loop thread, so bytes arriving meanwhile reach it in one edge.
+DetachedTask hold_loop_thread(std::promise<void> *holding, std::chrono::milliseconds duration) {
+    holding->set_value();
+    std::this_thread::sleep_for(duration);
+    co_return;
+}
+
 // A record trickling in one byte per wire read continues in the wire buffer
 // its header was read into. Each read used to pin a fresh 32 KiB chunk until
 // the record completed: these 512 reads held 16 MiB, before the peer had
@@ -2013,6 +2020,53 @@ TEST(TlsStreamFdTest, TrickledHandshakeRecordStaysInOneWireBuffer) {
         auto close_future = close_promise.get_future();
         fiber::async::spawn(group.at(0), [&]() { return close_tls_stream(server_stream, &close_promise); });
         ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+        group.stop();
+        group.join();
+    });
+}
+
+// The peer half-closes right behind a partial record, both in one edge: the
+// short read that drains the bytes leaves the readiness Blocked, and only
+// the next read reports the EOF. The handshake must fail at once with
+// ConnReset — not skip that read and wait out its timeout for an edge that
+// already came.
+TEST(TlsStreamFdTest, HalfCloseBehindAPartialRecordFailsTheHandshakeAtOnce) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        TempFile cert("cert_half_close", kSelfSignedCertPem);
+        TempFile key("key_half_close", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        fiber::event::EventLoopGroup group(1);
+        group.start();
+        auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
+        std::promise<fiber::common::IoErr> handshake_promise;
+        auto handshake_future = handshake_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return await_handshake_result(server_stream, tls_pair->server_options, &handshake_promise);
+        });
+        std::this_thread::sleep_for(50ms); // the handshake parks in its read wait
+
+        std::promise<void> holding;
+        auto holding_future = holding.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return hold_loop_thread(&holding, 100ms); });
+        ASSERT_EQ(holding_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(::send(fds[1], kStalledRecordHeader.data(), 3, 0), 3);
+        ASSERT_EQ(::shutdown(fds[1], SHUT_WR), 0);
+
+        // Far below the 10 s handshake timeout a skipped EOF read would end in.
+        ASSERT_EQ(handshake_future.wait_for(2s), std::future_status::ready);
+        EXPECT_EQ(handshake_future.get(), fiber::common::IoErr::ConnReset);
+
+        std::promise<void> close_promise;
+        auto close_future = close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_tls_stream(server_stream, &close_promise); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+        ::close(fds[1]);
         group.stop();
         group.join();
     });

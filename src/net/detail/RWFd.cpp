@@ -100,6 +100,15 @@ common::IoErr RWFd::ensure_state_observation() noexcept {
     return ensure_listening(event::IoEvent::ReadHangup);
 }
 
+common::IoErr RWFd::ensure_read_observation() noexcept {
+    if (kind_ != Kind::Stream) {
+        return ensure_listening(event::IoEvent::Read);
+    }
+    return ensure_listening(event::IoEvent::Read | event::IoEvent::ReadHangup);
+}
+
+bool RWFd::observes_read_hangup() const noexcept { return event::any(efd_.watching() & event::IoEvent::ReadHangup); }
+
 RWFd::DetachedCompletions RWFd::detach_for_close() noexcept {
     FIBER_ASSERT(efd_.current_loop().in_loop());
     DetachedCompletions detached;

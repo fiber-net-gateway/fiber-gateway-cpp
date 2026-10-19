@@ -153,6 +153,14 @@ public:
     // any registration). Used by adapter/pool state observation, not by the
     // ordinary read/write subscriptions.
     fiber::common::IoErr ensure_state_observation() noexcept;
+    // ensure_state_observation plus read interest, in one registration: for
+    // an adapter about to read, whose first read wait then needs no MOD.
+    fiber::common::IoErr ensure_read_observation() noexcept;
+    // RDHUP is in the interest mask, so a half-close is always announced: by
+    // the edge that delivered its FIN or by one still queued. Without it a
+    // FIN that arrived with data leaves no trace once a short read drained
+    // the data — only the next read reports the EOF.
+    [[nodiscard]] bool observes_read_hangup() const noexcept;
 
     // Subscriptions are persistent, transition-only (Unknown/Blocked -> Ready)
     // and require the direction not to be Ready: a Ready caller must advance
