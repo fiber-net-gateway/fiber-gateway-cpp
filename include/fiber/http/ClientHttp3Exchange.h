@@ -35,7 +35,9 @@ public:
     // write_all accepts the complete payload before returning. write returns
     // after the first QUIC payload batch and consumes an IoBufChain in place;
     // retry the exact remaining suffix with the same end_stream value. A
-    // timeout or terminal stream error aborts the request and rejects retries.
+    // peer STOP_SENDING rejects further writes with BrokenPipe while leaving
+    // the response readable. Other terminal write errors and timeouts abort
+    // the request and reject retries.
     async::Task<common::IoResult<std::size_t>>
     write_all(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     async::Task<common::IoResult<std::size_t>>

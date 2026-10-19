@@ -274,11 +274,11 @@ async::Task<common::IoResult<void>> ClientHttp3Request::write_frame(mem::IoBufCh
     while (frame.readable_bytes() != 0 || frame.complete()) {
         auto written = co_await stream_.write(frame, remaining_timeout(deadline));
         if (!written) {
-            handle_io_error(written.error());
+            handle_write_error(written.error());
             co_return std::unexpected(written.error());
         }
         if (*written == 0 && (frame.readable_bytes() != 0 || frame.complete())) {
-            handle_io_error(common::IoErr::WouldBlock);
+            handle_write_error(common::IoErr::WouldBlock);
             co_return std::unexpected(common::IoErr::WouldBlock);
         }
     }
@@ -305,6 +305,12 @@ ClientHttp3Request::write_data_frame_header(std::size_t payload_len, std::chrono
 async::Task<common::IoResult<void>>
 ClientHttp3Request::send_request_header(const Http3RequestHead &head, bool end_stream,
                                         std::chrono::milliseconds timeout) noexcept {
+    if (terminal_error_ != common::IoErr::None) {
+        co_return std::unexpected(terminal_error_);
+    }
+    if (stream_.send_aborted()) {
+        co_return std::unexpected(common::IoErr::BrokenPipe);
+    }
     if (conn_ == nullptr || !stream_.stream_id_assigned() || !request_entry_.link.linked()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -424,7 +430,6 @@ ClientHttp3Request::send_request_header(const Http3RequestHead &head, bool end_s
     outcome_ = Http3RequestOutcome::PossiblyProcessed;
     auto written = co_await write_frame(frame, timeout);
     if (!written) {
-        (void) abort(written.error());
         co_return written;
     }
 
@@ -437,6 +442,9 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write_all(mem::Io
                                                                          std::chrono::milliseconds timeout) noexcept {
     if (terminal_error_ != common::IoErr::None) {
         co_return std::unexpected(terminal_error_);
+    }
+    if (stream_.send_aborted()) {
+        co_return std::unexpected(common::IoErr::BrokenPipe);
     }
     if (conn_ == nullptr || !request_headers_sent_) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -484,7 +492,7 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write_all(mem::Io
         }
         auto written = co_await stream_.write(nullptr, 0, true, remaining_timeout(deadline));
         if (!written) {
-            (void) abort(written.error());
+            handle_write_error(written.error());
             co_return std::unexpected(written.error());
         }
         chunk.clear_complete();
@@ -498,7 +506,6 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write_all(mem::Io
     }
     auto written = co_await write_frame(chunk, remaining_timeout(deadline));
     if (!written) {
-        (void) abort(written.error());
         co_return std::unexpected(written.error());
     }
     request_body_sent_ += body_len;
@@ -510,6 +517,9 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(mem::IoBufC
                                                                      std::chrono::milliseconds timeout) noexcept {
     if (terminal_error_ != common::IoErr::None) {
         co_return std::unexpected(terminal_error_);
+    }
+    if (stream_.send_aborted()) {
+        co_return std::unexpected(common::IoErr::BrokenPipe);
     }
     if (conn_ == nullptr || !request_headers_sent_) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -546,7 +556,7 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(mem::IoBufC
             }
             auto written = co_await stream_.write(nullptr, 0, true, remaining_timeout(deadline));
             if (!written) {
-                (void) abort(written.error());
+                handle_write_error(written.error());
                 co_return std::unexpected(written.error());
             }
             chunk.clear_complete();
@@ -555,9 +565,6 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(mem::IoBufC
         }
         auto header = co_await write_data_frame_header(body_len, remaining_timeout(deadline));
         if (!header) {
-            if (terminal_error_ != common::IoErr::None) {
-                (void) abort(header.error());
-            }
             co_return std::unexpected(header.error());
         }
         request_data_frame_active_ = true;
@@ -568,7 +575,7 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(mem::IoBufC
     auto written = co_await stream_.write(chunk, remaining_timeout(deadline));
     if (!written || *written == 0) {
         const common::IoErr error = written ? common::IoErr::WouldBlock : written.error();
-        (void) abort(error);
+        handle_write_error(error);
         co_return std::unexpected(error);
     }
     const std::size_t accepted = *written;
@@ -593,6 +600,9 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(const std::
                                                                      std::chrono::milliseconds timeout) noexcept {
     if (terminal_error_ != common::IoErr::None) {
         co_return std::unexpected(terminal_error_);
+    }
+    if (stream_.send_aborted()) {
+        co_return std::unexpected(common::IoErr::BrokenPipe);
     }
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -629,7 +639,7 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(const std::
             }
             auto written = co_await stream_.write(nullptr, 0, true, remaining_timeout(deadline));
             if (!written) {
-                (void) abort(written.error());
+                handle_write_error(written.error());
                 co_return std::unexpected(written.error());
             }
             request_finished_ = true;
@@ -637,9 +647,6 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(const std::
         }
         auto header = co_await write_data_frame_header(len, remaining_timeout(deadline));
         if (!header) {
-            if (terminal_error_ != common::IoErr::None) {
-                (void) abort(header.error());
-            }
             co_return std::unexpected(header.error());
         }
         request_data_frame_active_ = true;
@@ -650,7 +657,7 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(const std::
     auto written = co_await stream_.write(buf, len, end_stream, remaining_timeout(deadline));
     if (!written || *written == 0) {
         const common::IoErr error = written ? common::IoErr::WouldBlock : written.error();
-        (void) abort(error);
+        handle_write_error(error);
         co_return std::unexpected(error);
     }
     request_data_frame_remaining_ -= *written;
@@ -669,6 +676,9 @@ async::Task<common::IoResult<void>> ClientHttp3Request::write_trailer(const Http
                                                                       std::chrono::milliseconds timeout) noexcept {
     if (terminal_error_ != common::IoErr::None) {
         co_return std::unexpected(terminal_error_);
+    }
+    if (stream_.send_aborted()) {
+        co_return std::unexpected(common::IoErr::BrokenPipe);
     }
     if (conn_ == nullptr || !request_headers_sent_) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -721,7 +731,6 @@ async::Task<common::IoResult<void>> ClientHttp3Request::write_trailer(const Http
     }
     auto written = co_await write_frame(frame, timeout);
     if (!written) {
-        (void) abort(written.error());
         co_return written;
     }
     request_finished_ = true;
@@ -1347,6 +1356,20 @@ common::IoResult<void> ClientHttp3Request::finish_response() noexcept {
     terminal_error_ = common::IoErr::None;
     finish_observation();
     return {};
+}
+
+void ClientHttp3Request::handle_write_error(common::IoErr error) noexcept {
+    // A send reset (including a peer STOP_SENDING) only terminates the upload.
+    // Keep receiving so an early response can still be consumed in full.
+    if (error == common::IoErr::BrokenPipe && stream_.send_aborted()) {
+        return;
+    }
+    if (recv_state_ == RecvState::Complete) {
+        (void) stream_.reset(error_value(Http3ErrorCode::RequestCancelled));
+        return;
+    }
+    handle_io_error(error);
+    (void) abort(error);
 }
 
 void ClientHttp3Request::handle_io_error(common::IoErr error) noexcept {

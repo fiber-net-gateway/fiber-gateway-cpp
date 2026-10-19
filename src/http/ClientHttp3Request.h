@@ -98,6 +98,7 @@ private:
                                               common::IoErr reason = common::IoErr::Invalid) noexcept;
     [[nodiscard]] common::IoResult<void> finish_response() noexcept;
     void finish_observation() noexcept;
+    void handle_write_error(common::IoErr error) noexcept;
     void handle_io_error(common::IoErr error) noexcept;
     void reject_from_goaway(std::uint64_t goaway_id) noexcept;
     void handle_connection_close(Http3ErrorCode error) noexcept;
