@@ -42,7 +42,11 @@
 #include <openssl/ssl.h>
 
 #include <fcntl.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <poll.h>
+#include <sys/ioctl.h>
 #include "LoopTestSupport.h"
 
 namespace {
@@ -1915,6 +1919,102 @@ TEST(TlsStreamFdTest, AppDataBehindClientFinishedIsReadableAfterHandshake) {
 
         const std::vector<std::string> pieces{byte_pattern(3000, 7)};
         check_wire_transfer(*tls_pair, pieces, 4096, WirePath::Gathered, true);
+    });
+}
+
+// =====================================================================
+// handshake-phase wire reads (feature/tls/15)
+// =====================================================================
+
+// The header of a 16 KiB handshake record whose body never completes.
+constexpr std::array<std::uint8_t, 5> kStalledRecordHeader{0x16, 0x03, 0x01, 0x40, 0x00};
+
+// Blocks until nothing is queued on `fd`: the reader took every byte written
+// to the peer end so far.
+bool wait_drained(int fd) {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    for (;;) {
+        int queued = 0;
+        if (::ioctl(fd, FIONREAD, &queued) != 0) {
+            return false;
+        }
+        if (queued == 0) {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(20us);
+    }
+}
+
+// Heap bytes in use as glibc's allocator sees them; 0 elsewhere (the test
+// that relies on it skips then).
+std::size_t heap_in_use() {
+#if defined(__GLIBC__)
+    const struct mallinfo2 info = ::mallinfo2();
+    return info.uordblks + info.hblkhd;
+#else
+    return 0;
+#endif
+}
+
+// A record trickling in one byte per wire read continues in the wire buffer
+// its header was read into. Each read used to pin a fresh 32 KiB chunk until
+// the record completed: these 512 reads held 16 MiB, before the peer had
+// proven anything.
+TEST(TlsStreamFdTest, TrickledHandshakeRecordStaysInOneWireBuffer) {
+    constexpr std::size_t kProbe = std::size_t{256} * 1024;
+    {
+        const std::size_t before = heap_in_use();
+        const fiber::mem::IoBuf probe = fiber::mem::IoBuf::allocate(kProbe);
+        ASSERT_TRUE(probe.valid());
+        if (heap_in_use() < before + kProbe) {
+            GTEST_SKIP() << "the allocator in use is invisible to glibc's mallinfo2";
+        }
+    }
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        TempFile cert("cert_trickle", kSelfSignedCertPem);
+        TempFile key("key_trickle", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        fiber::event::EventLoopGroup group(1);
+        group.start();
+        auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
+        std::promise<fiber::common::IoErr> handshake_promise;
+        auto handshake_future = handshake_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return await_handshake_result(server_stream, tls_pair->server_options, &handshake_promise);
+        });
+
+        ASSERT_EQ(::send(fds[1], kStalledRecordHeader.data(), kStalledRecordHeader.size(), 0),
+                  static_cast<ssize_t>(kStalledRecordHeader.size()));
+        ASSERT_TRUE(wait_drained(fds[0]));
+        const std::size_t baseline = heap_in_use();
+        for (int i = 0; i < 512; ++i) {
+            const std::uint8_t byte = 0;
+            ASSERT_EQ(::send(fds[1], &byte, 1, 0), 1);
+            ASSERT_TRUE(wait_drained(fds[0])); // one wire read per byte
+        }
+        // A chunk pinned per read would add 16 MiB.
+        constexpr std::size_t kGrowthLimit = std::size_t{1024} * 1024;
+        EXPECT_LT(heap_in_use(), baseline + kGrowthLimit);
+
+        ::close(fds[1]); // EOF mid-record
+        ASSERT_EQ(handshake_future.wait_for(2s), std::future_status::ready);
+        EXPECT_EQ(handshake_future.get(), fiber::common::IoErr::ConnReset);
+
+        std::promise<void> close_promise;
+        auto close_future = close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_tls_stream(server_stream, &close_promise); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+        group.stop();
+        group.join();
     });
 }
 
