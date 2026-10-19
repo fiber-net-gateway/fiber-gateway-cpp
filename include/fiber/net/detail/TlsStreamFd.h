@@ -181,12 +181,20 @@ private:
     // alert is on the wire.
     template<class Engine>
     fiber::common::IoErr handshake_step(Engine &engine, fiber::event::IoEvent &event) noexcept;
-    // Reads one wire chunk for the handshake engine (EOF: ConnReset).
-    fiber::common::IoErr read_handshake_chunk(mem::IoBuf &chunk, fiber::event::IoEvent &event) noexcept;
-    // HandshakeDone: builds the connection from the engine's state and adopts
-    // the engine's inbound leftover as inbound_.
-    fiber::common::IoErr install_connection(tls::TlsConnectionRole role, tls::TlsConnectedState &&state,
-                                            mem::IoBufChain &&leftover) noexcept;
+    // One handshake-phase wire read into inbound_, then
+    // feed_handshake_records. EOF mid-handshake reports ConnReset.
+    template<class Engine>
+    fiber::common::IoErr read_handshake_records(Engine &engine, fiber::event::IoEvent &event) noexcept;
+    // Feeds the complete records in inbound_ to the engine one record per
+    // feed, stopping once it is done: what remains — an incomplete record,
+    // and past HandshakeDone the records behind the final flight — stays in
+    // inbound_ for the next read or the connection. A framing violation
+    // hands the rest to the engine's reader (same rules), which fails on it.
+    template<class Engine>
+    fiber::common::IoErr feed_handshake_records(Engine &engine) noexcept;
+    // HandshakeDone: builds the connection from the engine's state and opens
+    // the records already in inbound_.
+    void install_connection(tls::TlsConnectionRole role, tls::TlsConnectedState &&state) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
     // Seals one write batch off the head of `buf` into the connection's
     // output: groups back to back until kWriteBatchBytes of plaintext (a soft
@@ -211,11 +219,14 @@ private:
     // notifies the TLS-level subscriber once nothing is left.
     static void on_stream_writable(void *ctx, fiber::common::IoErr err) noexcept;
     void handle_stream_writable() noexcept;
-    // One connected-phase wire read, then process_inbound(): inbound_'s
-    // incomplete record continues in its own buffer's tailroom while it fits
-    // there; otherwise a fresh buffer sized from the caller's `hint` takes
-    // the read, with the incomplete record carried to its head. EOF without
-    // close_notify reports ConnReset.
+    // One wire read into inbound_: its incomplete record continues in its
+    // own buffer's tailroom while it fits there; otherwise a fresh buffer of
+    // `capacity` (>= kInboundMinCapacity) takes the read, with the incomplete
+    // record carried to its head. EOF reports ConnReset.
+    fiber::common::IoErr read_inbound(std::size_t capacity) noexcept;
+    // One connected-phase wire read into a buffer sized from the caller's
+    // `hint`, then process_inbound(). EOF without close_notify reports
+    // ConnReset.
     fiber::common::IoErr read_wire(std::size_t hint) noexcept;
     // Frames every complete record in inbound_ and hands them to the
     // connection in batches (open + route happen there), leaving at most one
@@ -227,9 +238,12 @@ private:
     // The connected phase: engaged at HandshakeDone (the engine's state moves
     // in), reset by close(). Held by value — no allocation of its own.
     std::optional<tls::TlsConnection> conn_;
-    // Connected-phase wire bytes not framed yet: empty, or ONE incomplete
-    // record — the tail of the last wire read (a view into that read's
-    // buffer) or of the engine's take_inbound_leftover. It never holds a
+    // Wire bytes not framed yet, a view into the last wire read's buffer —
+    // the one inbound buffer of both phases, so a record trickling in over
+    // many reads costs one buffer, not one per read. Handshake: empty or ONE
+    // incomplete record between reads (complete ones go to the engine as
+    // retained slices); at HandshakeDone it may also hold the records behind
+    // the final flight, which install_connection opens. Connected: never a
     // complete record once process_inbound() returns, so the connection only
     // ever sees whole, contiguous records.
     mem::IoBuf inbound_{};
