@@ -5,6 +5,7 @@
 #include <chrono>
 #include <coroutine>
 #include <future>
+#include <netinet/udp.h>
 #include <string_view>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -405,6 +406,17 @@ DetachedTask gso_send_segments(fiber::event::EventLoop *loop, std::promise<GsoOu
     bound = client.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
     if (!bound) {
         done_promise->set_value(GsoOutcome{.err = bound.error()});
+        server.close();
+        co_return;
+    }
+
+    // A pre-4.18 kernel ignores the UDP_SEGMENT cmsg and delivers one unsegmented
+    // datagram instead of failing, so ask the kernel before sending.
+    int gso_size = 0;
+    socklen_t gso_size_len = sizeof(gso_size);
+    if (::getsockopt(client.fd(), SOL_UDP, UDP_SEGMENT, &gso_size, &gso_size_len) != 0) {
+        done_promise->set_value(GsoOutcome{.err = fiber::common::IoErr::None, .supported = false});
+        client.close();
         server.close();
         co_return;
     }
