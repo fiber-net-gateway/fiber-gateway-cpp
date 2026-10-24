@@ -2344,6 +2344,13 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
                 payload_ack_eliciting = true;
                 space.sending_frames.push_back(*frame);
                 ++packet.frame_count;
+                if (!frame->u.stream.has_length) {
+                    // LEN-less STREAM data extends to the end of the packet.
+                    // The send queue only omits LEN when it fills the capacity,
+                    // so packet protection cannot append padding either.
+                    FIBER_ASSERT(payload_len == max_payload);
+                    break;
+                }
                 continue;
             }
 
