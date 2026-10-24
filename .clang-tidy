@@ -1,6 +1,7 @@
 # clang-tidy configuration for fiber-gateway-cpp.
 # Run via ./run_tidy.sh (see that script for build-tree requirements).
-# Tool baseline: clang-tidy 20.x; wildcard check sets are version-dependent.
+# Tool baseline: clang-tidy 20.x; wildcard check sets are version-dependent
+# (run_tidy.sh runs other majors, 19+, with a note).
 # Check-set rationale and baseline counts for every disable live in
 # feature/clang-tidy-rollout.md; do not remove a disable without re-running
 # the baseline documented there.

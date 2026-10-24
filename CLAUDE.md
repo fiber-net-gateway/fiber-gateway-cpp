@@ -28,8 +28,10 @@ ctest --test-dir build
 # Format code (requires clang-format on PATH)
 ./format_code.sh
 
-# Lint changed files with clang-tidy (requires clang-tidy 20.x and a configured
-# build tree for compile_commands.json — plain `cmake -S . -B build` provides it)
+# Lint changed files with clang-tidy (requires a configured build tree for
+# compile_commands.json — plain `cmake -S . -B build` provides it). The script
+# picks the clang-tidy matching the tree's clang (LLVM 19+; baseline is 20.x);
+# CLANG_TIDY=/path/to/clang-tidy overrides
 ./run_tidy.sh
 
 # Lint and auto-fix everything under src/ (reformats automatically afterwards)
