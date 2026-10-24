@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
-#include <cstring>
+#include <cstdint>
 #include <future>
 #include <limits>
 #include <utility>
@@ -31,7 +31,21 @@ struct ReadAction {
     std::size_t bytes = 0;
     bool complete = false;
     IoErr error = IoErr::None;
+    // Deliver the bytes in a max_bytes-sized buffer, as transports receive
+    // them, instead of an exactly sized one.
+    bool sparse = false;
 };
+
+// Body byte at stream offset `offset`: lets a test check order end to end.
+std::uint8_t pattern_byte(std::size_t offset) noexcept { return static_cast<std::uint8_t>(offset % 251); }
+
+std::vector<std::uint8_t> pattern_bytes(std::size_t bytes) {
+    std::vector<std::uint8_t> out(bytes);
+    for (std::size_t i = 0; i < bytes; ++i) {
+        out[i] = pattern_byte(i);
+    }
+    return out;
+}
 
 class FakeBodyReader {
 public:
@@ -56,12 +70,15 @@ public:
 
         IoBufChain chunk;
         if (action.bytes > 0) {
-            IoBuf data = IoBuf::allocate(action.bytes);
+            IoBuf data = IoBuf::allocate(action.sparse ? std::max(max_bytes, action.bytes) : action.bytes);
             if (!data) {
                 co_return std::unexpected(IoErr::NoMem);
             }
-            std::memset(data.writable_data(), 'x', action.bytes);
+            for (std::size_t i = 0; i < action.bytes; ++i) {
+                data.writable_data()[i] = pattern_byte(stream_offset_++);
+            }
             data.commit(action.bytes);
+            delivered_data_.push_back(data.readable_data());
             if (!chunk.append(std::move(data))) {
                 co_return std::unexpected(IoErr::NoMem);
             }
@@ -79,6 +96,7 @@ public:
     }
 
     [[nodiscard]] const std::vector<std::size_t> &max_bytes() const noexcept { return max_bytes_; }
+    [[nodiscard]] const std::vector<const std::uint8_t *> &delivered_data() const noexcept { return delivered_data_; }
     [[nodiscard]] std::size_t abort_calls() const noexcept { return abort_calls_; }
     [[nodiscard]] IoErr abort_reason() const noexcept { return abort_reason_; }
 
@@ -87,6 +105,8 @@ private:
     std::vector<char> *operations_ = nullptr;
     std::vector<std::size_t> max_bytes_;
     std::vector<std::chrono::milliseconds> timeouts_;
+    std::vector<const std::uint8_t *> delivered_data_;
+    std::size_t stream_offset_ = 0;
     std::size_t next_action_ = 0;
     std::size_t abort_calls_ = 0;
     IoErr abort_reason_ = IoErr::None;
@@ -97,6 +117,9 @@ struct WriteAction {
     IoErr error = IoErr::None;
     bool stall = false;
     bool defer_completion = false;
+    // Keep a handle to every consumed buffer, as a zero-copy sink queueing
+    // them would, and leave the drained nodes in the chain.
+    bool retain = false;
 };
 
 class FakeBodyWriter {
@@ -110,7 +133,26 @@ public:
             operations_->push_back('W');
         }
         buffered_before_write_.push_back(buffer.readable_bytes());
+        nodes_before_write_.push_back(buffer.size());
         timeouts_.push_back(timeout);
+        std::size_t storage = 0;
+        const IoBuf *prev = nullptr;
+        for (const fiber::mem::IoBufNode *node = buffer.front_node(); node != nullptr; node = node->next) {
+            if (prev == nullptr || !prev->same_storage(node->buf)) {
+                storage += node->buf.capacity();
+            }
+            prev = &node->buf;
+            if (node->buf.readable() == 0) {
+                continue;
+            }
+            node_data_.push_back(node->buf.readable_data());
+            for (const IoBuf &kept: retained_) {
+                if (kept.same_storage(node->buf)) {
+                    ++shared_with_retained_;
+                }
+            }
+        }
+        storage_before_write_.push_back(storage);
 
         WriteAction action;
         if (next_action_ < actions_.size()) {
@@ -124,7 +166,20 @@ public:
         }
 
         const std::size_t written = std::min(buffer.readable_bytes(), action.max_bytes);
-        buffer.consume_and_compact(written);
+        std::size_t left = written;
+        for (const fiber::mem::IoBufNode *node = buffer.front_node(); node != nullptr && left > 0; node = node->next) {
+            const std::size_t take = std::min(node->buf.readable(), left);
+            written_.insert(written_.end(), node->buf.readable_data(), node->buf.readable_data() + take);
+            left -= take;
+            if (action.retain && take > 0) {
+                retained_.push_back(node->buf);
+            }
+        }
+        if (action.retain) {
+            buffer.consume(written);
+        } else {
+            buffer.consume_and_compact(written);
+        }
         if (buffer.readable_bytes() == 0 && buffer.complete() && !action.defer_completion) {
             buffer.clear_complete();
         }
@@ -151,6 +206,15 @@ public:
     [[nodiscard]] const std::vector<std::size_t> &buffered_before_write() const noexcept {
         return buffered_before_write_;
     }
+    [[nodiscard]] const std::vector<std::size_t> &nodes_before_write() const noexcept { return nodes_before_write_; }
+    // Storage the chain pinned at each write: node capacities, counting a
+    // run of nodes sharing one storage once.
+    [[nodiscard]] const std::vector<std::size_t> &storage_before_write() const noexcept {
+        return storage_before_write_;
+    }
+    [[nodiscard]] const std::vector<const std::uint8_t *> &node_data() const noexcept { return node_data_; }
+    [[nodiscard]] const std::vector<std::uint8_t> &written() const noexcept { return written_; }
+    [[nodiscard]] std::size_t shared_with_retained() const noexcept { return shared_with_retained_; }
     [[nodiscard]] std::size_t abort_calls() const noexcept { return abort_calls_; }
     [[nodiscard]] IoErr abort_reason() const noexcept { return abort_reason_; }
 
@@ -158,6 +222,12 @@ private:
     std::vector<WriteAction> actions_;
     std::vector<char> *operations_ = nullptr;
     std::vector<std::size_t> buffered_before_write_;
+    std::vector<std::size_t> nodes_before_write_;
+    std::vector<std::size_t> storage_before_write_;
+    std::vector<const std::uint8_t *> node_data_;
+    std::vector<std::uint8_t> written_;
+    std::vector<IoBuf> retained_;
+    std::size_t shared_with_retained_ = 0;
     std::vector<std::chrono::milliseconds> timeouts_;
     std::vector<std::chrono::milliseconds> flush_timeouts_;
     std::size_t next_action_ = 0;
@@ -396,6 +466,103 @@ TEST(HttpBodyPipeTest, ZeroLowWaterReportsFlushFailureAsWriteError) {
     EXPECT_EQ(reader.abort_reason(), IoErr::BrokenPipe);
     EXPECT_EQ(writer.abort_calls(), 1U);
     EXPECT_EQ(writer.abort_reason(), IoErr::BrokenPipe);
+}
+
+TEST(HttpBodyPipeTest, CoalescesTrickledReadsInsteadOfPinningEachReadBuffer) {
+    std::vector<ReadAction> actions(300, ReadAction{.bytes = 8, .sparse = true});
+    actions.back().complete = true;
+    FakeBodyReader reader(std::move(actions));
+    FakeBodyWriter writer;
+
+    auto result = execute_pipe(reader, writer, {.buffer_size = 4096, .low_water = 2048});
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{2048, 352}));
+    // 256 reads, each received into its own buffer of up to 4 KiB, share one
+    // coalesce buffer instead of pinning ~770 KiB.
+    EXPECT_EQ(writer.nodes_before_write(), (std::vector<std::size_t>{1, 1}));
+    EXPECT_EQ(writer.storage_before_write(), (std::vector<std::size_t>{4096, 4096}));
+    EXPECT_EQ(writer.written(), pattern_bytes(2400));
+    EXPECT_EQ(result->bytes_read, 2400U);
+    EXPECT_EQ(result->bytes_written, 2400U);
+    EXPECT_EQ(result->read_calls, 300U);
+}
+
+TEST(HttpBodyPipeTest, KeepsDenseReadsZeroCopyBetweenCoalescedOnes) {
+    FakeBodyReader reader({
+            {.bytes = 8, .sparse = true},
+            {.bytes = 1024},
+            {.bytes = 8, .complete = true, .sparse = true},
+    });
+    FakeBodyWriter writer;
+
+    auto result = execute_pipe(reader, writer, {.buffer_size = 4096, .low_water = 2048});
+
+    ASSERT_TRUE(result.has_value());
+    // The second sparse read must not join the first one's coalesce buffer
+    // ahead of the dense read: it opens its own.
+    EXPECT_EQ(writer.nodes_before_write(), (std::vector<std::size_t>{3}));
+    ASSERT_EQ(writer.node_data().size(), 3U);
+    ASSERT_EQ(reader.delivered_data().size(), 3U);
+    EXPECT_NE(writer.node_data()[0], reader.delivered_data()[0]);
+    EXPECT_EQ(writer.node_data()[1], reader.delivered_data()[1]);
+    EXPECT_NE(writer.node_data()[2], reader.delivered_data()[2]);
+    EXPECT_EQ(writer.written(), pattern_bytes(1040));
+}
+
+TEST(HttpBodyPipeTest, CoalescesSmallExactlySizedReadsBetweenSparseOnes) {
+    std::vector<ReadAction> actions(16, ReadAction{.bytes = 8});
+    for (std::size_t i = 0; i < actions.size(); i += 2) {
+        actions[i].sparse = true;
+    }
+    actions.back().complete = true;
+    FakeBodyReader reader(std::move(actions));
+    FakeBodyWriter writer;
+
+    auto result = execute_pipe(reader, writer, {.buffer_size = 4096, .low_water = 128});
+
+    ASSERT_TRUE(result.has_value());
+    // A kept 8-byte node would end each run, opening a 4 KiB coalesce buffer
+    // per sparse read.
+    EXPECT_EQ(writer.nodes_before_write(), (std::vector<std::size_t>{1}));
+    EXPECT_EQ(writer.storage_before_write(), (std::vector<std::size_t>{4096}));
+    EXPECT_EQ(writer.written(), pattern_bytes(128));
+}
+
+TEST(HttpBodyPipeTest, NeverCoalescesIntoStorageTheSinkStillHolds) {
+    FakeBodyReader reader({
+            {.bytes = 8, .sparse = true},
+            {.bytes = 8, .sparse = true},
+            {.bytes = 8, .sparse = true},
+            {.bytes = 8, .complete = true, .sparse = true},
+    });
+    FakeBodyWriter writer({{.retain = true}, {.retain = true}});
+
+    auto result = execute_pipe(reader, writer, {.buffer_size = 4096, .low_water = 16});
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{16, 16}));
+    // The drained coalesce buffer stays in the chain with free room, but the
+    // sink's handle makes it shared: the later reads open a fresh buffer.
+    EXPECT_EQ(writer.nodes_before_write(), (std::vector<std::size_t>{1, 2}));
+    EXPECT_EQ(writer.shared_with_retained(), 0U);
+    EXPECT_EQ(writer.written(), pattern_bytes(32));
+}
+
+TEST(HttpBodyPipeTest, ZeroLowWaterForwardsSparseReadsUncopied) {
+    FakeBodyReader reader({
+            {.bytes = 8, .sparse = true},
+            {.bytes = 8, .complete = true, .sparse = true},
+    });
+    FakeBodyWriter writer;
+    HttpBodyPipeOptions options;
+    options.low_water = kUnbufferedBodyPipeLowWater;
+
+    auto result = execute_pipe(reader, writer, options);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(writer.node_data(), reader.delivered_data());
+    EXPECT_EQ(writer.written(), pattern_bytes(16));
 }
 
 TEST(HttpBodyPipeTest, RejectsInvalidBufferBoundsBeforeStartingIo) {
