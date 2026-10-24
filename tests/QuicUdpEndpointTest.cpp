@@ -8,6 +8,7 @@
 #include <expected>
 #include <future>
 #include <new>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
@@ -1423,11 +1424,12 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
             .sending_empty = space.sending_frames.empty(),
             .in_flight = server.congestion().in_flight,
             .shares_storage = sent != nullptr && pending != nullptr && sent->data.same_storage(pending->data),
-            .payload_matches = sent != nullptr && pending != nullptr &&
-                               sent->data.readable() + pending->data.readable() == crypto_data.size() &&
-                               std::memcmp(sent->data.readable_data(), crypto_data.data(), sent->data.readable()) == 0 &&
-                               std::memcmp(pending->data.readable_data(), crypto_data.data() + sent->data.readable(),
-                                           pending->data.readable()) == 0,
+            .payload_matches =
+                    sent != nullptr && pending != nullptr &&
+                    sent->data.readable() + pending->data.readable() == crypto_data.size() &&
+                    std::memcmp(sent->data.readable_data(), crypto_data.data(), sent->data.readable()) == 0 &&
+                    std::memcmp(pending->data.readable_data(), crypto_data.data() + sent->data.readable(),
+                                pending->data.readable()) == 0,
     });
     client.close();
 }
@@ -1660,6 +1662,147 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
     std::memcpy(summary.data.data(), parsed->frame.data.data, parsed->frame.data.len);
     done_promise->set_value(summary);
     client.close();
+}
+
+fiber::async::Task<fiber::common::IoResult<fiber::quic::QuicPacketDecodeResult>>
+receive_application_packet(fiber::net::UdpSocket &client, fiber::quic::QuicConnection &peer) {
+    std::array<std::uint8_t, 1400> bytes{};
+    auto received = co_await client.recv_from(bytes.data(), bytes.size(), std::chrono::milliseconds{500});
+    if (!received) {
+        co_return std::unexpected(received.error());
+    }
+    co_return fiber::quic::quic_decode_packet(peer, bytes.data(), received->size, 0);
+}
+
+template<typename F>
+void run_application_stream_packet_test(F &&body) {
+    fiber::test::run_in_quic_loop_task([&](fiber::event::EventLoop &loop) -> fiber::async::Task<void> {
+        fiber::net::UdpSocket client(loop);
+        auto bound = client.bind(loopback(0), {});
+        EXPECT_TRUE(bound.has_value());
+        if (!bound) {
+            co_return;
+        }
+        fiber::test::QuicTestEndpoint host(loop);
+        fiber::quic::QuicConnection::Options options{};
+        options.role = fiber::quic::QuicConnectionRole::Server;
+        options.local_addr = host.get().local_addr();
+        options.remote_addr = client.local_addr();
+        options.ops.create_stream = make_test_stream;
+        fiber::quic::QuicConnection server(host.get(), options);
+        fiber::quic::QuicConnection::Options peer_options{};
+        peer_options.role = fiber::quic::QuicConnectionRole::Client;
+        fiber::quic::QuicConnection peer(host.get(), peer_options);
+        auto setup = [&]() {
+            ASSERT_NE(server.active_path(), nullptr);
+            server.active_path()->validated = true;
+            std::array<std::uint8_t, 32> secret{};
+            constexpr auto suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
+            constexpr auto level = fiber::quic::QuicEncryptionLevel::Application;
+            ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), level, true, suite, secret.data(),
+                                                                secret.size()));
+            ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(peer.crypto(), level, false, suite, secret.data(),
+                                                                secret.size()));
+            ASSERT_TRUE(server.recv_max_data_frame({.max_data = 65536}));
+            for (std::uint64_t id: {0ULL, 4ULL}) {
+                ASSERT_TRUE(server.get_or_create_peer_stream(id));
+                ASSERT_TRUE(server.recv_max_stream_data_frame({.id = id, .limit = 65536}));
+            }
+        };
+        setup();
+        if (!testing::Test::HasFatalFailure()) {
+            co_await body(host.get(), server, peer, client);
+        }
+    });
+}
+
+void expect_stream_frame(fiber::quic::QuicReadCursor &payload, std::uint64_t stream_id, std::uint64_t offset,
+                         std::string_view data, bool fin) {
+    auto parsed = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, payload);
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_EQ(parsed->frame.type, fiber::quic::QuicFrameType::Stream);
+    EXPECT_EQ(parsed->frame.u.stream.stream_id, stream_id);
+    EXPECT_EQ(parsed->frame.u.stream.offset, offset);
+    EXPECT_EQ(parsed->frame.u.stream.length, data.size());
+    EXPECT_EQ(parsed->frame.u.stream.fin, fin);
+    EXPECT_TRUE(parsed->frame.u.stream.has_length);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(parsed->frame.data.data), parsed->frame.data.len), data);
+}
+
+enum class FinPacketScenario : std::uint8_t { Empty, Ping, OtherStream, Retransmit };
+
+void test_fin_packet(FinPacketScenario scenario) {
+    run_application_stream_packet_test([&](fiber::quic::QuicUdpEndpoint &endpoint, fiber::quic::QuicConnection &server,
+                                           fiber::quic::QuicConnection &peer,
+                                           fiber::net::UdpSocket &client) -> fiber::async::Task<void> {
+        auto &stream = *server.find_stream(0);
+        const std::string_view data = scenario == FinPacketScenario::Empty ? "" : "stream";
+        if (!data.empty()) {
+            EXPECT_TRUE(stream.try_write(iobuf_of(data)));
+            endpoint.schedule_send(server);
+            auto packet = co_await receive_application_packet(client, peer);
+            EXPECT_TRUE(packet.has_value());
+            if (!packet) {
+                co_return;
+            }
+            fiber::quic::QuicReadCursor payload(packet->payload.readable_data(), packet->payload.readable());
+            expect_stream_frame(payload, 0, 0, data, false);
+            EXPECT_TRUE(payload.empty());
+        }
+
+        EXPECT_TRUE(stream.try_write(fiber::mem::IoBuf{}, true));
+        const bool ping = scenario == FinPacketScenario::Ping || scenario == FinPacketScenario::Retransmit;
+        if (ping) {
+            auto &space = server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+            auto *frame = space.alloc_frame();
+            EXPECT_NE(frame, nullptr);
+            if (frame == nullptr) {
+                co_return;
+            }
+            frame->type = fiber::quic::QuicFrameType::Ping;
+            space.pending_frames.push_back(*frame);
+        } else if (scenario == FinPacketScenario::OtherStream) {
+            EXPECT_TRUE(server.find_stream(4)->try_write(iobuf_of("other"), true));
+        }
+        endpoint.schedule_send(server);
+        auto packet = co_await receive_application_packet(client, peer);
+        EXPECT_TRUE(packet.has_value());
+        if (!packet) {
+            co_return;
+        }
+        fiber::quic::QuicReadCursor payload(packet->payload.readable_data(), packet->payload.readable());
+        expect_stream_frame(payload, 0, data.size(), "", true);
+        if (ping) {
+            auto next = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, payload);
+            EXPECT_TRUE(next.has_value());
+            if (next) {
+                EXPECT_EQ(next->frame.type, fiber::quic::QuicFrameType::Ping);
+            }
+        } else if (scenario == FinPacketScenario::OtherStream) {
+            expect_stream_frame(payload, 4, 0, "other", true);
+        } else {
+            // With a one-byte PN, the old two-byte FIN needed one padding byte.
+            // The explicit zero length now occupies that byte instead.
+            EXPECT_EQ(packet->header.pn_len, 1U);
+            EXPECT_EQ(packet->payload.readable(), 3U);
+        }
+        EXPECT_TRUE(payload.empty());
+
+        if (scenario == FinPacketScenario::Retransmit) {
+            // A late ACK can cause spurious loss: the peer has already seen
+            // the first FIN, and the retransmission must declare the same end.
+            EXPECT_TRUE(server.on_stream_send_failed(0, data.size(), 0, true));
+            endpoint.schedule_send(server);
+            auto retry = co_await receive_application_packet(client, peer);
+            EXPECT_TRUE(retry.has_value());
+            if (!retry) {
+                co_return;
+            }
+            fiber::quic::QuicReadCursor retry_payload(retry->payload.readable_data(), retry->payload.readable());
+            expect_stream_frame(retry_payload, 0, data.size(), "", true);
+            EXPECT_TRUE(retry_payload.empty());
+        }
+    });
 }
 
 DetachedTask
@@ -3492,6 +3635,71 @@ TEST(QuicUdpEndpointTest, EncodesApplicationStreamFrameFromSendQueue) {
     close_endpoint_on_loop(group, endpoint);
     group.stop();
     group.join();
+}
+
+TEST(QuicUdpEndpointTest, FinOnlyDoesNotConsumeFollowingPing) { test_fin_packet(FinPacketScenario::Ping); }
+
+TEST(QuicUdpEndpointTest, FinOnlyDoesNotConsumeFollowingStream) { test_fin_packet(FinPacketScenario::OtherStream); }
+
+TEST(QuicUdpEndpointTest, EmptyFinPreservesFinalSizeInMinimumProtectedPayload) {
+    test_fin_packet(FinPacketScenario::Empty);
+}
+
+TEST(QuicUdpEndpointTest, FinRetransmissionPreservesFinalSizeAcrossDifferentPacketContents) {
+    test_fin_packet(FinPacketScenario::Retransmit);
+}
+
+TEST(QuicUdpEndpointTest, LengthlessStreamFillsPacketAndLeavesFollowingFrameForNextPacket) {
+    run_application_stream_packet_test([](fiber::quic::QuicUdpEndpoint &endpoint, fiber::quic::QuicConnection &server,
+                                          fiber::quic::QuicConnection &peer,
+                                          fiber::net::UdpSocket &client) -> fiber::async::Task<void> {
+        // This body needs two packets at the default path MTU. The first
+        // STREAM must fill its packet; PING must remain a separate frame.
+        const std::string body(1400, 'x');
+        EXPECT_TRUE(server.find_stream(0)->try_write(iobuf_of(body), true));
+        auto &space = server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
+        auto *ping = space.alloc_frame();
+        EXPECT_NE(ping, nullptr);
+        if (ping == nullptr) {
+            co_return;
+        }
+        ping->type = fiber::quic::QuicFrameType::Ping;
+        space.pending_frames.push_back(*ping);
+        endpoint.schedule_send(server);
+        std::size_t offset = 0;
+        for (std::size_t i = 0; i < 2; ++i) {
+            auto packet = co_await receive_application_packet(client, peer);
+            EXPECT_TRUE(packet.has_value());
+            if (!packet) {
+                co_return;
+            }
+            auto check_packet = [&]() {
+                fiber::quic::QuicReadCursor payload(packet->payload.readable_data(), packet->payload.readable());
+                if (i == 1) {
+                    auto first = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, payload);
+                    ASSERT_TRUE(first.has_value());
+                    EXPECT_EQ(first->frame.type, fiber::quic::QuicFrameType::Ping);
+                }
+                auto parsed = fiber::quic::quic_parse_frame(fiber::quic::QuicEncryptionLevel::Application, payload);
+                ASSERT_TRUE(parsed.has_value());
+                ASSERT_EQ(parsed->frame.type, fiber::quic::QuicFrameType::Stream);
+                EXPECT_EQ(parsed->frame.u.stream.stream_id, 0U);
+                EXPECT_EQ(parsed->frame.u.stream.offset, offset);
+                EXPECT_EQ(parsed->frame.u.stream.fin, i == 1);
+                EXPECT_EQ(parsed->frame.u.stream.has_length, i == 1);
+                EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(parsed->frame.data.data),
+                                           parsed->frame.data.len),
+                          std::string_view(body).substr(offset, parsed->frame.data.len));
+                offset += parsed->frame.data.len;
+                EXPECT_TRUE(payload.empty());
+                if (i == 0) {
+                    EXPECT_EQ(packet->header.packet_len, server.active_path()->mtu);
+                }
+            };
+            check_packet();
+        }
+        EXPECT_EQ(offset, body.size());
+    });
 }
 
 TEST(QuicUdpEndpointTest, EncodesHttp3ControlStreamPrefaceFromScheduler) {

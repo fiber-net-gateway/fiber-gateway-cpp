@@ -183,7 +183,7 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
         }
 
         const std::uint64_t offset = final_size_;
-        std::size_t base_hdr = 1 + quic_varint_len(stream_id);
+        std::size_t base_hdr = 1 + quic_varint_len(stream_id) + quic_varint_len(0);
         if (offset > 0) {
             base_hdr += quic_varint_len(offset);
         }
@@ -196,7 +196,9 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
         if (offset > 0) {
             type_byte |= kStreamFrameOff;
         }
-        type_byte |= kStreamFrameFin;
+        // An omitted LEN consumes the rest of the packet, including any
+        // following frames or padding. FIN-only must explicitly carry LEN=0.
+        type_byte |= kStreamFrameFin | kStreamFrameLen;
         auto r = wc.write_u8(type_byte);
         if (!r) {
             return std::unexpected(r.error());
@@ -212,10 +214,15 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
             }
         }
 
+        r = quic_write_varint(wc, 0);
+        if (!r) {
+            return std::unexpected(r.error());
+        }
+
         result.offset = static_cast<std::size_t>(offset);
         result.data_len = 0;
         result.encoded_len = wc.offset();
-        result.has_length = false;
+        result.has_length = true;
         result.fin = true;
         result.encoded = true;
         fin_inflight_ = true;

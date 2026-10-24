@@ -426,6 +426,47 @@ TEST(QuicStreamSendQueueFrameTest, AppendCompleteEmptyChainProducesFinOnlyFrame)
         ASSERT_TRUE(encoded->encoded);
         EXPECT_EQ(encoded->data_len, 0U);
         EXPECT_TRUE(encoded->fin);
+        EXPECT_TRUE(encoded->has_length);
+        const auto frame = parse_stream_frame(out.data(), encoded->encoded_len);
+        EXPECT_TRUE(frame.u.stream.has_length);
+        EXPECT_EQ(frame.u.stream.length, 0U);
+    });
+}
+
+TEST(QuicStreamSendQueueFrameTest, FinOnlyRequiresCapacityForExplicitZeroLength) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        for (const std::uint64_t stream_id: {0ULL, 64ULL}) {
+            for (const std::size_t body_size: {0U, 64U}) {
+                fiber::quic::QuicStreamSendQueue buffer(pool);
+                std::array<std::uint8_t, 128> out{};
+                if (body_size != 0) {
+                    ASSERT_TRUE(buffer.try_append(iobuf_of(std::string(body_size, 'x'))));
+                    auto body = QueueAccess::encode_stream_frame(buffer, stream_id, out.data(), out.size());
+                    ASSERT_TRUE(body.has_value());
+                    ASSERT_TRUE(body->encoded);
+                    ASSERT_EQ(body->data_len, body_size);
+                }
+                ASSERT_TRUE(buffer.try_append(fiber::mem::IoBuf{}, true));
+                const std::size_t capacity = 1 + fiber::quic::quic_varint_len(stream_id) + 1 +
+                                             (body_size == 0 ? 0 : fiber::quic::quic_varint_len(body_size));
+                auto short_frame = QueueAccess::encode_stream_frame(buffer, stream_id, out.data(), capacity - 1);
+                ASSERT_TRUE(short_frame.has_value());
+                EXPECT_FALSE(short_frame->encoded);
+                EXPECT_EQ(buffer.final_size(), body_size);
+                EXPECT_EQ(buffer.inflight_bytes(), body_size);
+                EXPECT_FALSE(buffer.fin_acked());
+
+                auto encoded = QueueAccess::encode_stream_frame(buffer, stream_id, out.data(), capacity);
+                ASSERT_TRUE(encoded.has_value());
+                ASSERT_TRUE(encoded->encoded);
+                EXPECT_EQ(encoded->encoded_len, capacity);
+                const auto frame = parse_stream_frame(out.data(), encoded->encoded_len);
+                EXPECT_TRUE(frame.u.stream.has_length);
+                EXPECT_TRUE(frame.u.stream.fin);
+                EXPECT_EQ(frame.u.stream.offset, body_size);
+                EXPECT_EQ(frame.u.stream.length, 0U);
+            }
+        }
     });
 }
 
@@ -446,6 +487,7 @@ TEST(QuicStreamSendQueueFrameTest, FinOnlyFrameCanFailAndRetry) {
 
         fiber::quic::QuicInputFrame frame = parse_stream_frame(out.data(), encoded->encoded_len);
         EXPECT_TRUE(frame.u.stream.fin);
+        EXPECT_TRUE(frame.u.stream.has_length);
         EXPECT_EQ(frame.u.stream.length, 0U);
 
         ASSERT_TRUE(QueueAccess::mark_failed(buffer, encoded->offset, encoded->data_len, encoded->fin).has_value());
@@ -453,6 +495,10 @@ TEST(QuicStreamSendQueueFrameTest, FinOnlyFrameCanFailAndRetry) {
         ASSERT_TRUE(retried.has_value());
         ASSERT_TRUE(retried->encoded);
         EXPECT_TRUE(retried->fin);
+        const auto retry_frame = parse_stream_frame(out.data(), retried->encoded_len);
+        EXPECT_TRUE(retry_frame.u.stream.has_length);
+        EXPECT_EQ(retry_frame.u.stream.offset + retry_frame.u.stream.length,
+                  frame.u.stream.offset + frame.u.stream.length);
 
         ASSERT_TRUE(QueueAccess::mark_acked(buffer, retried->offset, retried->data_len, retried->fin).has_value());
         EXPECT_TRUE(buffer.has_final_size());
