@@ -13,7 +13,16 @@ set -euo pipefail
 # via TUs. Without a complete dependency graph, selecting any header checks
 # all project TUs in the selected database, including indirect consumers.
 
+# CLANG_TIDY in the environment (a command or a path) skips detection.
+REQUESTED_TIDY="${CLANG_TIDY:-}"
 CLANG_TIDY=""
+TIDY_MAJOR=""
+TIDY_VERSION=""
+# ExcludeHeaderFilterRegex in .clang-tidy needs LLVM 19.
+TIDY_MIN_MAJOR=19
+# The major the check set was baselined on; wildcard check sets change across
+# majors, so others may report checks the baseline never ran.
+TIDY_BASELINE_MAJOR=20
 RUNNER=""
 APPLY=""
 CHECK_ALL=0
@@ -68,8 +77,12 @@ Options:
   -p DIR     Build directory containing compile_commands.json (default: build).
   -j N       Parallel jobs (default: min(nproc, 12)).
 
-Requires clang-tidy 20.x (the validated check-set baseline) and a Clang build tree
-(SelectToolchain.cmake picks clang automatically).
+clang-tidy is picked from the environment: $CLANG_TIDY if set; else the one
+matching the compile db's clang major (clang-tidy-N on PATH, then beside the
+compiler); else clang-tidy-20 (the validated check-set baseline); else the
+newest clang-tidy-N on PATH, then clang-tidy. LLVM 19+ is required.
+run-clang-tidy and clang-apply-replacements follow the chosen version.
+Requires a Clang build tree (SelectToolchain.cmake picks clang automatically).
 
 Exit codes: 0 = clean, 1 = findings remain, 2 = environment/config error.
 EOF
@@ -106,45 +119,154 @@ while getopts ":afp:j:h" opt; do
 done
 shift $((OPTIND - 1))
 
-if command -v clang-tidy-20 >/dev/null 2>&1; then
-    CLANG_TIDY="clang-tidy-20"
-fi
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+ORIG_DIR="$(pwd)"
+cd "${REPO_ROOT}"
 
-if [[ -z "${CLANG_TIDY}" ]]; then
-    if command -v clang-tidy >/dev/null 2>&1; then
-        CLANG_TIDY="clang-tidy"
-    else
-        echo "run_tidy.sh: no clang-tidy binary found on PATH (need 20.x)" >&2
+# Locate the compile database. A relative -p is resolved against the caller's
+# cwd first, then the repo root. Tool detection only takes a hint from it; it
+# is required once there are translation units to check.
+DB=""
+if [[ "${BUILD_DIR}" == /* ]]; then
+    db_candidates=("${BUILD_DIR}")
+else
+    db_candidates=("${ORIG_DIR}/${BUILD_DIR}" "${REPO_ROOT}/${BUILD_DIR}")
+fi
+for candidate in "${db_candidates[@]}"; do
+    if [[ -f "${candidate}/compile_commands.json" ]]; then
+        DB="$(realpath "${candidate}/compile_commands.json")"
+        break
+    fi
+done
+
+db_compiler=""
+if [[ -n "${DB}" ]]; then
+    db_compiler="$( (grep -m1 -o '"command": *\[\? *"[^"]*"' "${DB}" || true) | head -1 | sed 's/.*"\([^"]*\)"$/\1/' | awk '{print $1}')"
+fi
+db_compiler_base="$(basename "${db_compiler:-unknown}")"
+db_major=""
+case "${db_compiler_base}" in
+    g++*|gcc*|*-g++*|*-gcc*|unknown)
+        ;;
+    *)
+        # The compiler's own report covers unversioned names (c++ or clang++
+        # resolving to some clang); the name's suffix covers a clang-N that
+        # no longer runs.
+        db_major="$( ("${db_compiler}" --version 2>/dev/null || true) | grep -oE 'clang version [0-9]+' | head -1 | grep -oE '[0-9]+$' || true)"
+        if [[ -z "${db_major}" && "${db_compiler_base}" == *clang* && "${db_compiler_base}" =~ -([0-9]+)$ ]]; then
+            db_major="${BASH_REMATCH[1]}"
+        fi
+        ;;
+esac
+
+declare -A rejected_tidy=()
+
+# Accepts clang-tidy candidate $1 (a command or a path) when it reports LLVM
+# TIDY_MIN_MAJOR or later and, given $2, exactly major $2.
+try_tidy() {
+    local path version major
+    path="$(command -v "$1" 2>/dev/null || true)"
+    if [[ -z "${path}" || ! -f "${path}" || ! -x "${path}" ]]; then
+        return 1
+    fi
+    version="$( ("${path}" --version 2>/dev/null || true) | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
+    major="${version%%.*}"
+    if [[ -z "${major}" ]] || (( major < TIDY_MIN_MAJOR )); then
+        rejected_tidy["${path}"]="${version:-unknown version}"
+        return 1
+    fi
+    if [[ -n "${2:-}" && "${major}" != "$2" ]]; then
+        return 1
+    fi
+    CLANG_TIDY="${path}"
+    TIDY_VERSION="${version}"
+    TIDY_MAJOR="${major}"
+}
+
+# Majors N of every clang-tidy-N on PATH, newest first.
+installed_tidy_majors() {
+    local dir file
+    local -a dirs
+    IFS=: read -r -a dirs <<< "${PATH}"
+    for dir in "${dirs[@]}"; do
+        for file in "${dir:-.}"/clang-tidy-[0-9]*; do
+            if [[ "${file##*/}" =~ ^clang-tidy-([0-9]+)$ ]]; then
+                printf '%s\n' "${BASH_REMATCH[1]}"
+            fi
+        done
+    done | sort -n -r -u
+}
+
+if [[ -n "${REQUESTED_TIDY}" ]]; then
+    if [[ "${REQUESTED_TIDY}" == */* && "${REQUESTED_TIDY}" != /* ]]; then
+        REQUESTED_TIDY="${ORIG_DIR}/${REQUESTED_TIDY}" # given relative to the caller, not the repo root
+    fi
+    if ! try_tidy "${REQUESTED_TIDY}"; then
+        echo "run_tidy.sh: CLANG_TIDY=${REQUESTED_TIDY} is not a usable clang-tidy (need LLVM ${TIDY_MIN_MAJOR}+)" >&2
         exit 2
+    fi
+else
+    # The db's clang is best parsed by the clang-tidy of the same release: its
+    # frontend matches the flags and the libc++ headers the tree was
+    # configured with. An LLVM tree off PATH keeps it beside the compiler.
+    if [[ -n "${db_major}" ]]; then
+        tidy_candidates=("clang-tidy-${db_major}")
+        db_compiler_path="$(command -v "${db_compiler}" 2>/dev/null || true)"
+        if [[ "${db_compiler_path}" == /* ]]; then
+            db_compiler_dir="$(dirname "${db_compiler_path}")"
+            tidy_candidates+=("${db_compiler_dir}/clang-tidy-${db_major}" "${db_compiler_dir}/clang-tidy"
+                              "$(dirname "$(realpath "${db_compiler_path}")")/clang-tidy")
+        fi
+        for candidate in "${tidy_candidates[@]}"; do
+            if try_tidy "${candidate}" "${db_major}"; then
+                break
+            fi
+        done
+    fi
+    if [[ -z "${CLANG_TIDY}" ]]; then
+        try_tidy "clang-tidy-${TIDY_BASELINE_MAJOR}" || true
+    fi
+    if [[ -z "${CLANG_TIDY}" ]]; then
+        while IFS= read -r major; do
+            if try_tidy "clang-tidy-${major}"; then
+                break
+            fi
+        done < <(installed_tidy_majors)
+    fi
+    if [[ -z "${CLANG_TIDY}" ]]; then
+        try_tidy clang-tidy || true
     fi
 fi
 
-# Pin the lint baseline independently of the compiler floor. In particular,
-# ExcludeHeaderFilterRegex is not understood by clang-tidy 17/18, and wildcard
-# check sets change across major versions.
-TIDY_MAJOR="$( ("${CLANG_TIDY}" --version 2>/dev/null || true) | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f1 || true)"
-if [[ -z "${TIDY_MAJOR}" ]] || (( TIDY_MAJOR != 20 )); then
-    echo "run_tidy.sh: ${CLANG_TIDY} must be version 20.x for the validated .clang-tidy configuration" >&2
+if [[ -z "${CLANG_TIDY}" ]]; then
+    echo "run_tidy.sh: no usable clang-tidy found (need LLVM ${TIDY_MIN_MAJOR}+; set CLANG_TIDY to pick one)" >&2
+    for path in "${!rejected_tidy[@]}"; do
+        echo "run_tidy.sh:   rejected ${path}: version ${rejected_tidy[${path}]}" >&2
+    done
     exit 2
 fi
 
-if command -v run-clang-tidy-20 >/dev/null 2>&1; then
-    RUNNER="run-clang-tidy-20"
-fi
+# Companion tools must come from the chosen clang-tidy's release: the
+# versioned name, or the unversioned one beside it (e.g. /usr/lib/llvm-N/bin).
+TIDY_DIR="$(dirname "$(realpath "${CLANG_TIDY}")")"
+find_companion() {
+    if command -v "$1-${TIDY_MAJOR}" >/dev/null 2>&1; then
+        command -v "$1-${TIDY_MAJOR}"
+    elif [[ -f "${TIDY_DIR}/$1" && -x "${TIDY_DIR}/$1" ]]; then
+        printf '%s\n' "${TIDY_DIR}/$1"
+    fi
+}
+
+RUNNER="$(find_companion run-clang-tidy)"
 # Preferred: run-clang-tidy dedups conflicting fixes to the same header across
 # TUs (src shares headers heavily). Without it, -f falls back to sequential
 # per-file fixing, which is safe but cannot merge header fixes.
 if (( FORMAT_AND_FIX == 1 )); then
-    if command -v clang-apply-replacements-20 >/dev/null 2>&1; then
-        APPLY="clang-apply-replacements-20"
-    else
+    APPLY="$(find_companion clang-apply-replacements)"
+    if [[ -z "${APPLY}" ]]; then
         RUNNER=""
     fi
 fi
-
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-ORIG_DIR="$(pwd)"
-cd "${REPO_ROOT}"
 
 declare -A seen=()
 files=()
@@ -245,20 +367,6 @@ if (( ${#files[@]} == 0 )); then
     exit 0
 fi
 
-# Locate the compile database. A relative -p is resolved against the caller's
-# cwd first, then the repo root.
-DB=""
-if [[ "${BUILD_DIR}" == /* ]]; then
-    db_candidates=("${BUILD_DIR}")
-else
-    db_candidates=("${ORIG_DIR}/${BUILD_DIR}" "${REPO_ROOT}/${BUILD_DIR}")
-fi
-for candidate in "${db_candidates[@]}"; do
-    if [[ -f "${candidate}/compile_commands.json" ]]; then
-        DB="$(realpath "${candidate}/compile_commands.json")"
-        break
-    fi
-done
 if [[ -z "${DB}" ]]; then
     echo "run_tidy.sh: no compile_commands.json under '${BUILD_DIR}' — configure a build tree first (cmake -S . -B ${BUILD_DIR})" >&2
     exit 2
@@ -267,8 +375,6 @@ BUILD_DIR_ABS="$(dirname "${DB}")"
 
 # Guard: a GCC-configured db can carry driver flags clang-tidy cannot parse;
 # SelectToolchain.cmake prefers Clang, so reconfiguring fixes it.
-db_compiler="$( (grep -m1 -o '"command": *\[\? *"[^"]*"' "${DB}" || true) | head -1 | sed 's/.*"\([^"]*\)"$/\1/' | awk '{print $1}')"
-db_compiler_base="$(basename "${db_compiler:-unknown}")"
 case "${db_compiler_base}" in
     g++*|gcc*|*-g++*|*-gcc*)
         echo "run_tidy.sh: compile db in ${BUILD_DIR_ABS} was configured with ${db_compiler_base};" \
@@ -276,7 +382,6 @@ case "${db_compiler_base}" in
         exit 2
         ;;
 esac
-db_major="$(printf '%s' "${db_compiler_base}" | grep -oE '[0-9]+' | tail -1 || true)"
 if [[ -n "${db_major}" && "${db_major}" != "${TIDY_MAJOR}" ]]; then
     echo "run_tidy.sh: warning: db compiler ${db_compiler_base} (major ${db_major}) differs from ${CLANG_TIDY} (major ${TIDY_MAJOR}); mismatched versions may misparse" >&2
 fi
@@ -306,7 +411,10 @@ if (( ${#present[@]} == 0 )); then
 fi
 files=("${present[@]}")
 
-printf 'run_tidy.sh: using %s\n' "$("${CLANG_TIDY}" --version | head -1)"
+printf 'run_tidy.sh: using %s (LLVM %s)\n' "${CLANG_TIDY}" "${TIDY_VERSION}"
+if (( TIDY_MAJOR != TIDY_BASELINE_MAJOR )); then
+    echo "run_tidy.sh: note: the check set was baselined on clang-tidy ${TIDY_BASELINE_MAJOR}.x; checks new in ${TIDY_MAJOR} may report findings it never had" >&2
+fi
 printf 'run_tidy.sh: checking %d translation unit(s) at -j%s (db: %s)\n' "${#files[@]}" "${JOBS}" "${BUILD_DIR_ABS}"
 
 LOG="${BUILD_DIR_ABS}/tidy.log"

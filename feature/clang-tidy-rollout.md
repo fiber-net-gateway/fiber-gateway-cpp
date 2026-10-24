@@ -17,9 +17,14 @@ fuzz 仍需使用独立构建树的编译数据库。
   `HeaderFilterRegex: (^|/)(src|include)/` 限定项目头文件,
   `ExcludeHeaderFilterRegex` 排除 temp/_deps、系统头(/usr)、构建树生成头。
 - `run_tidy.sh`(镜像 `format_code.sh` 惯例):
-  - 固定 **clang-tidy 20.x** 基线,优先 clang-tidy-20,其次验证裸 clang-tidy
-    的主版本;其他主版本拒跑。编译器最低版本不等于分析工具最低版本;
-    `ExcludeHeaderFilterRegex` 直到 LLVM 19 才可用,通配检查集也会随版本变化;
+  - 检查集基线为 **clang-tidy 20.x**。工具按环境选择(2026-10-24 起,此前
+    只认 20.x):`CLANG_TIDY` 环境变量 > 与编译数据库中 clang 同主版本的
+    clang-tidy(PATH 上的 clang-tidy-N,其次编译器同目录,覆盖不在 PATH 的
+    LLVM 树)> clang-tidy-20 > PATH 上最新的 clang-tidy-N > 裸 clang-tidy。
+    同版本优先是因为 tidy 前端要解析该 clang 配置出的旗标与 libc++ 头。
+    编译器最低版本不等于分析工具最低版本:`ExcludeHeaderFilterRegex` 直到
+    LLVM 19 才可用,低于 19 拒跑;非 20 主版本照常运行并提示,通配检查集随
+    版本变化,新增检查可能报出基线没有的告警(见 §12);
   - 默认只查改动 TU;一旦选中头文件,保守检查当前编译数据库中的全部项目
     TU,覆盖直接/间接包含。包括未跟踪/删除的头文件、显式头文件和目录内的
     头文件;待引入完整依赖图后才能安全收窄。所有候选 TU 统一为绝对路径;
@@ -27,7 +32,8 @@ fuzz 仍需使用独立构建树的编译数据库。
   - compile-db 成员预过滤(新文件/陈旧 GLOB 给可见提示);
   - db 编译器为 g++ 时退出 2(SelectToolchain 自动选 clang,重配即好);
   - `-p` 支持绝对路径;相对路径先按调用目录、再按仓库根目录查找;
-  - 优先 run-clang-tidy-20(-fix 时配套 clang-apply-replacements-20,
+  - 优先与所选 clang-tidy 同版本的 run-clang-tidy(带 -N 后缀,或与 tidy
+    同目录的无后缀版;-fix 时配套同版本 clang-apply-replacements,
     跨 TU 同头文件修复去重);缺则 xargs 回退,
     回退的 -f 逐文件串行(不做并发 -fix,避免同头文件并发写丢失);
   - 排除 `**/generated/**`(其目录级 `Checks: '-*'` 会让 tidy 硬错);
@@ -277,10 +283,96 @@ memcpy 原始二进制区域)。tests/ 的 misc-unused-parameters 15 处一律
 ## 11. 检查入口回归验证
 
 `python3 tests/RunTidyTest.py` 使用隔离 Git 仓库和记录调用的 clang-tidy 桩,
-验证选中文件集合、编译数据库路径与版本门禁,不要求本机安装 clang-tidy。
+验证选中文件集合、编译数据库路径与版本选择(同版本优先、编译器同目录、
+基线/最新回退、`CLANG_TIDY` 覆盖、低于 19 拒跑、runner 版本配套),
+不要求本机安装 clang-tidy。
 安装 Python3 时也通过 CTest 的 `fiber_run_tidy_check` 运行。
-桩测试不能替代真实 clang-tidy 扫描;真实扫描仍使用上述 20.x 工具链。
+桩测试不能替代真实 clang-tidy 扫描;零告警基线仍以 20.x 为准。
 
 HPACK 续字节回归使用饱和的表大小前缀 `0x3f`,确保进入整数续字节路径;
 同时覆盖跨 decode 调用的拒绝和第四字节终止的合法边界。原 `0x81` 输入
 会在随后遇到索引 0 时提前失败,无法验证移位越界修复。
+
+## 12. 非基线主版本现状(2026-10-24,clang-tidy 22.1.6)
+
+工具链已升到 clang-22(build/ 树:clang++-22 + libc++ 22),本机只有
+clang-tidy-22;`run_tidy.sh` 按环境选中它并提示非基线。对 build/ 全部 535 个
+项目 TU 全量扫描(-j12,17m43s):0 前端错误;464 个 TU 有告警,其中 424 个
+仅因包含 `include/fiber/common/Assert.h`(`#if defined(...)` 被
+readability-use-concise-preprocessor-directives 命中)。按 `文件:行:检查`
+去重 **428 条**,128 个文件:src 118 / tests 116 / apps 78 / example 56 /
+include 40;另 20 条主位置在 libc++ `__new/global_new_delete.h`,实为测试里
+替换全局 `operator new` 的形参名与 libc++ 声明不同。20.x 基线的 0 条是
+20.1.8 在 clang-20 树上测得的(§1);这 428 条大多是版本差异(新增检查或
+既有检查匹配面变化),但有 16 条在当前树上用 20.1.0 也能复现,属于环境
+差异(§12.1):
+
+| 检查 | 去重计数 |
+|---|---|
+| modernize-use-scoped-lock | 78 |
+| readability-inconsistent-ifelse-braces | 67 |
+| readability-math-missing-parentheses | 61 |
+| bugprone-throwing-static-initialization | 39 |
+| readability-redundant-typename | 38 |
+| readability-use-concise-preprocessor-directives | 36 |
+| readability-container-contains | 31 |
+| bugprone-invalid-enum-default-initialization | 24 |
+| modernize-use-designated-initializers | 22 |
+| readability-inconsistent-declaration-parameter-name | 20 |
+| readability-uppercase-literal-suffix | 7 |
+| bugprone-unchecked-optional-access | 6 |
+| bugprone-unchecked-string-to-number-conversion | 5 |
+| clang-analyzer-core.NullPointerArithm、bugprone-random-generator-seed | 各 3 |
+| clang-diagnostic-unused-result、clang-analyzer-cplusplus.NewDelete、bugprone-command-processor | 各 2 |
+| modernize-avoid-c-style-cast、clang-analyzer-security.ArrayBound、clang-analyzer-optin.core.EnumCastOutOfRange | 各 1 |
+
+未处置:清零、按 §2 分诊加禁用、或把基线迁到 22,另案决定。在此之前用 22
+跑 `run_tidy.sh` 几乎总是返回 1(多数来自 Assert.h)。`CLANG_TIDY=` 指向
+20.x 也不保证在当前树上零告警:20.1.0 实测 23 条(§12.1)。
+
+### 12.1 20/22 互兼容性实测(2026-10-24)
+
+问题:按 22 的建议改代码,会不会在 20 上告警;反过来也一样。
+
+方法:本机无 20.x 包,clang-tidy 20.1.0 取自 PyPI 的 `clang-tidy` wheel
+(与 §1 基线的 20.1.8 小版本不同)。在 PR 分支的临时 worktree 上用 22 对全部
+项目 TU 跑 `-fix`(去重 428 条,改动 97 个文件),再用 20.1.0 分别扫修复后的
+树和未改的原树。两边都用当前 build/ 的编译数据库(clang++-22 + libc++ 22),
+都排除 third_party。
+
+结论:两个方向都没有冲突。
+
+- **22 修复后用 20 复扫**:0 前端错误。修复后的树 12 条,与原树 23 条中的
+  12 条逐条相同(`BinaryHeap.h` 7 条 core.NullDereference、`IntrusiveList.h`
+  2 条 cplusplus.NewDelete、`LiteNginxRuntimeTest.cpp` 2 条 unused-result、
+  `DynamicSeriesTest.cpp` 1 条 optin.core.EnumCastOutOfRange),没有新增;
+  另 11 条(uppercase-literal-suffix 7、designated-initializers 3、
+  math-missing-parentheses 1)被 22 的修复一并消掉。
+- **检查集**:按本仓库 `.clang-tidy`,20 启用 281 个检查,22 启用 301 个。
+  22 新增 29 个;只在 20 里的 9 个是 analyzer 内部建模 checker
+  (`*Modeling`、`StackAddrEscapeBase`、`NullabilityBase`)和 `valist.*`
+  (22 里对应 `security.VAList`),没有与 22 要求相反的规则。唯一的先后衔接:
+  20 的 modernize-use-using 产出的 `using X = typename T::Y;` 会被 22 的
+  readability-redundant-typename 命中,删掉 `typename` 后 20 也不报。
+- **禁用写法**:22 独有的检查名写进 `NOLINT(...)`、`Checks` 里的 `-<check>`、
+  `CheckOptions` 的键,20 普通运行时都静默忽略;只有 `--verify-config` 报
+  `unknown check` / `unknown check option`,`run_tidy.sh` 不传这个参数。
+  给 22 加禁用不会破坏 20。
+- **修复是否引出新告警**:22 复扫被改的 81 个 TU,没有修复引出的新告警。
+  残留的是没有自动修复的检查,以及 `tests/LogSystemTest.cpp` 中修复区间重叠、
+  被 clang-apply-replacements 跳过的 22 条 ifelse-braces 和 1 条
+  container-contains。
+- **GCC**:受影响的 97 个 TU 用 g++-14 `-fsyntax-only`(libstdc++)修复前后
+  都通过;删 `typename`(成员声明、requires 形参列表等位置)没有问题。
+- **环境差异**:原树 23 条里有 16 条 22 也报(BinaryHeap 7 条以外的全部),
+  所以 §12 的 428 条不全是 tidy 主版本差异。是 libc++ 22 / clang-22 编译参数,
+  还是 20.1.0 与 20.1.8 的小版本差异造成的,这次没有区分。BinaryHeap 7 条
+  只有 20 报、22 的 analyzer 不报,是唯一一类"20 报 22 不报",属 analyzer 误报。
+- **`#elifdef`**:readability-use-concise-preprocessor-directives 在 C++23 下
+  把 `#elif defined(X)` 改成 `#elifdef X`(C++20 下只改 `#if`),而 g++-14
+  `-std=c++20` 对 `#elifdef` 直接报错。项目代码目前没有 `#elif defined`
+  (只在 vendored zlib 里,不在检查范围内);若公开头文件要支持 C++20 使用方,
+  这一条需要禁用或 NOLINT。
+
+据此,把基线迁到 22 可行:在 22 下清零(修复或按 §2 加禁用),20 不会因此
+出现新告警。
