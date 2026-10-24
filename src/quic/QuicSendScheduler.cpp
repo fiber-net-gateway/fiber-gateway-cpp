@@ -3,6 +3,10 @@
 #include <array>
 #include <expected>
 #include <limits>
+#if FIBER_HAVE_UDP_SEGMENT
+#include <netinet/udp.h>
+#include <sys/socket.h>
+#endif
 
 #include <fiber/common/Assert.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
@@ -136,6 +140,20 @@ struct QuicSendMessageBatch {
     return error == common::IoErr::NotSupported || error == common::IoErr::Invalid;
 }
 
+// FIBER_HAVE_UDP_SEGMENT only proves the build headers know the constant. A pre-4.18 kernel skips the unknown
+// SOL_UDP cmsg and sends the whole GSO buffer as one oversized datagram without an error to fall back on, so ask
+// the running kernel: it answers UDP_SEGMENT getsockopt from 4.18 on and fails with ENOPROTOOPT before.
+[[nodiscard]] bool kernel_supports_udp_gso(int fd) noexcept {
+#if FIBER_HAVE_UDP_SEGMENT
+    int value = 0;
+    socklen_t len = sizeof(value);
+    return ::getsockopt(fd, SOL_UDP, UDP_SEGMENT, &value, &len) == 0;
+#else
+    (void) fd;
+    return false;
+#endif
+}
+
 } // namespace
 
 QuicSendScheduler::QuicSendScheduler(QuicUdpEndpoint &endpoint) noexcept : endpoint_(endpoint), loop_(endpoint.loop_) {}
@@ -156,7 +174,7 @@ common::IoResult<void> QuicSendScheduler::init(net::UdpSocket &socket, const Opt
     options_ = options;
     stop_reason_ = common::IoErr::None;
     closing_ = false;
-    gso_enabled_ = FIBER_HAVE_UDP_SEGMENT && options.enable_gso;
+    gso_enabled_ = options.enable_gso && kernel_supports_udp_gso(socket.fd());
     initialized_ = true;
     return {};
 }
