@@ -1242,9 +1242,6 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
                 co_return std::unexpected(common::IoErr::Invalid);
             }
             final_body_spec = header.body;
-            if (final_body_spec.is_chunked()) {
-                co_return std::unexpected(common::IoErr::NotSupported);
-            }
             if (final_body_spec.is_raw() &&
                 (header.end_stream || !response_opens_tunnel(exchange, header.status_code))) {
                 co_return std::unexpected(common::IoErr::Invalid);

@@ -284,7 +284,7 @@ TEST(Http1ConnectionTest, ChunkedWriteReturnsAfterPayloadProgressAndPreservesCal
             auto header = co_await exchange.send_header({
                     .kind = fiber::http::OutgoingHeaderKind::Final,
                     .status_code = 200,
-                    .body = fiber::http::HttpBodySpec::Chunked(),
+                    .body = fiber::http::HttpBodySpec::Stream(),
                     .end_stream = false,
             });
             if (!header) {
@@ -349,7 +349,7 @@ TransportMetrics run_chunked_response_trailer(bool finish_body, bool use_chain) 
             auto header = co_await exchange.send_header({
                     .kind = fiber::http::OutgoingHeaderKind::Final,
                     .status_code = 200,
-                    .body = fiber::http::HttpBodySpec::Chunked(),
+                    .body = fiber::http::HttpBodySpec::Stream(),
             });
             if (!header) {
                 metrics.responses_ok = false;
@@ -453,7 +453,7 @@ TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
             auto header = co_await exchange.send_header({
                     .kind = fiber::http::OutgoingHeaderKind::Final,
                     .status_code = 200,
-                    .body = fiber::http::HttpBodySpec::Chunked(),
+                    .body = fiber::http::HttpBodySpec::Stream(),
                     .end_stream = false,
             });
             if (!header) {

@@ -1065,7 +1065,7 @@ TEST(Http1ServerTest, ChunkedPost) {
 
     fiber::async::spawn(group.at(0), [&]() {
         auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-            if (!exchange.request_body_spec().is_chunked()) {
+            if (!exchange.request_body_spec().is_stream()) {
                 co_await send_final_header(exchange, 500, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
                                            fiber::http::ResponseConnectionMode::Close, true);
                 co_return;
@@ -1528,7 +1528,7 @@ TEST(Http1ServerTest, ChunkedResponseCanSendTrailers) {
             fiber::http::HttpHeaders headers(exchange.pool());
             headers.set("Trailer", "digest, x-md5");
             auto header_result = co_await send_final_header(exchange, 200, &headers,
-                                                            fiber::http::ResponseBodySpec::Chunked(), {}, false);
+                                                            fiber::http::ResponseBodySpec::Stream(), {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -1569,6 +1569,71 @@ TEST(Http1ServerTest, ChunkedResponseCanSendTrailers) {
     EXPECT_NE(response.find("\r\n5\r\nhello\r\n0\r\n"), std::string::npos);
     EXPECT_NE(response.find("digest: sha-256=xyz\r\n"), std::string::npos);
     EXPECT_NE(response.find("x-md5: abc123\r\n"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+TEST(Http1ServerTest, Http10StreamResponseIsCloseDelimitedAndDropsTrailers) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    auto trailer_promise = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
+    auto trailer_future = trailer_promise->get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [trailer_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            fiber::common::IoResult<void> result = co_await send_final_header(exchange, 200);
+            if (result) {
+                auto body_result = co_await exchange.write_all(reinterpret_cast<const uint8_t *>("hello"), 5, false);
+                if (body_result) {
+                    fiber::http::HttpHeaders trailers(exchange.pool());
+                    trailers.set("x-md5", "abc123");
+                    result = co_await send_trailer_header(exchange, &trailers);
+                } else {
+                    result = std::unexpected(body_result.error());
+                }
+            }
+            trailer_promise->set_value(result);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+
+    int client = connect_client(port);
+    ASSERT_GE(client, 0);
+
+    const char *request = "GET /stream HTTP/1.0\r\n"
+                          "Host: localhost\r\n"
+                          "Connection: keep-alive\r\n"
+                          "\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    std::array<char, 1> probe{};
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) test-side probe; MSG_DONTWAIT never blocks
+    const ssize_t eof = ::recv(client, probe.data(), probe.size(), MSG_DONTWAIT);
+    ::close(client);
+
+    ASSERT_EQ(trailer_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto trailer_result = trailer_future.get();
+    EXPECT_TRUE(trailer_result.has_value()) << static_cast<int>(trailer_result.error());
+    EXPECT_EQ(eof, 0) << "the server must close the connection to delimit the content";
+    EXPECT_NE(response.find("HTTP/1.0 200 "), std::string::npos) << response;
+    EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response;
+    EXPECT_NE(response.find("Connection: close\r\n"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\nhello")) << response;
 
     fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
     group.join();

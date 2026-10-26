@@ -235,10 +235,10 @@ inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExch
         end_stream = true;
         return fiber::http::HttpBodySpec::None();
     }
-    // The current proxy upstream is HTTP/1, so any inbound body without a known
-    // length is forwarded with HTTP/1 chunked transfer coding.
+    // Any inbound body without a known length is forwarded as a stream; the HTTP/1
+    // upstream frames it with chunked transfer coding.
     end_stream = false;
-    return fiber::http::HttpBodySpec::Chunked();
+    return fiber::http::HttpBodySpec::Stream();
 }
 
 // A Content-Length upstream finishes as soon as its declared byte count has been
