@@ -675,6 +675,8 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         if (!prepare_websocket_handshake(websocket)) {
             co_return error_exn(*heap, "http.proxyPass: prepare websocket handshake failed");
         }
+    } else if (exchange.request_body_spec().is_raw()) {
+        co_return error_exn(*heap, "http.proxyPass: CONNECT tunnels are only proxied with websocket=true");
     }
 
     auto target_opt = resolve_target(userdata);

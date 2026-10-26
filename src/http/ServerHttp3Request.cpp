@@ -457,14 +457,31 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::validate_field(std::string_
 }
 
 common::IoErr ServerHttp3Request::HeaderBlockParser::finalize_pseudo_headers() noexcept {
-    constexpr std::uint8_t kRequired = MethodSeen | PathSeen | SchemeSeen;
-    if ((pseudo_seen_ & kRequired) != kRequired) {
+    if ((pseudo_seen_ & MethodSeen) == 0) {
+        return fail(Http3ErrorCode::MessageError);
+    }
+    const bool connect = request_.exchange_.method_ == HttpMethod::Connect;
+    const bool extended_connect = (pseudo_seen_ & ProtocolSeen) != 0;
+    // RFC 9220 section 3: :protocol only extends CONNECT, and then keeps :scheme and :path.
+    if (extended_connect && !connect) {
         return fail(Http3ErrorCode::MessageError);
     }
 
-    common::IoErr err = http_process_uri(path_, uri_state_, request_.exchange_.uri_, &request_.exchange_.pool());
-    if (err != common::IoErr::None) {
-        return fail(Http3ErrorCode::MessageError, err);
+    common::IoErr err = common::IoErr::None;
+    if (connect && !extended_connect) {
+        // RFC 9114 section 4.4: a classic CONNECT names only the :authority to tunnel to.
+        if ((pseudo_seen_ & (PathSeen | SchemeSeen)) != 0 || (pseudo_seen_ & AuthoritySeen) == 0) {
+            return fail(Http3ErrorCode::MessageError);
+        }
+    } else {
+        // RFC 9114 section 4.3.1: every other request carries :method, :scheme and :path.
+        if ((pseudo_seen_ & (PathSeen | SchemeSeen)) != (PathSeen | SchemeSeen)) {
+            return fail(Http3ErrorCode::MessageError);
+        }
+        err = http_process_uri(path_, uri_state_, request_.exchange_.uri_, &request_.exchange_.pool());
+        if (err != common::IoErr::None) {
+            return fail(Http3ErrorCode::MessageError, err);
+        }
     }
 
     const HttpHeaders::HeaderField *host = request_.exchange_.host_header();
@@ -486,6 +503,10 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::finalize_pseudo_headers() n
         return fail(Http3ErrorCode::MessageError);
     }
 
+    if (connect) {
+        // RFC 9110 section 9.3.6: a CONNECT request has no content; its stream carries tunnel bytes.
+        request_.exchange_.request_body_spec_ = HttpBodySpec::Raw();
+    }
     request_.exchange_.version_ = HttpVersion::HTTP_3_0;
     return common::IoErr::None;
 }
@@ -1027,6 +1048,10 @@ common::IoErr ServerHttp3Request::begin_body_frame(const Http3FrameHeader &heade
     }
 
     if (header.type == static_cast<std::uint64_t>(Http3FrameType::Headers)) {
+        // RFC 9114 section 4.4: a CONNECT stream carries only DATA after its HEADERS, never trailers.
+        if (exchange_.request_body_spec_.is_raw()) {
+            return fail_request(Http3ErrorCode::FrameUnexpected);
+        }
         if (exchange_.request_trailers_complete_) {
             return fail_request(Http3ErrorCode::MessageError);
         }

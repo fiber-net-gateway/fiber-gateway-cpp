@@ -516,8 +516,11 @@ ProxyHandler::handle(fiber::http::HttpExchange &exchange, fiber::http::HttpRespo
                      const runtime::LocationRuntime &location,
                      const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
                      fiber::http_script::HttpScriptServices *services, logging::RequestLogContext &log_context) const {
-    if (!exchange.protocol().empty() && (exchange.method() != fiber::http::HttpMethod::Connect ||
-                                         !fiber::http::http_header_name_equals_ci(exchange.protocol(), "websocket"))) {
+    // Only the WebSocket extended CONNECT is proxied; a classic CONNECT or another :protocol asks for a tunnel this
+    // proxy does not provide.
+    const bool connect = exchange.method() == fiber::http::HttpMethod::Connect;
+    const bool websocket_connect = connect && fiber::http::http_header_name_equals_ci(exchange.protocol(), "websocket");
+    if ((connect || !exchange.protocol().empty()) && !websocket_connect) {
         co_await send_plain_response(exchange, response, 501, kNotImplementedBody, listener);
         co_return;
     }

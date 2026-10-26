@@ -64,8 +64,22 @@ public:
     common::IoResult<void> abort(HttpExchange &exchange, common::IoErr reason) noexcept override;
 
 private:
+    enum PseudoHeaderSeen : std::uint8_t {
+        MethodSeen = 1U << 0U,
+        PathSeen = 1U << 1U,
+        SchemeSeen = 1U << 2U,
+        AuthoritySeen = 1U << 3U,
+        ProtocolSeen = 1U << 4U,
+    };
+
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value,
                                                   bool value_stable) noexcept;
+
+    struct PseudoHeaderRule {
+        std::uint8_t seen_bit = 0;
+        PseudoHeaderHandler handler = nullptr;
+    };
+
     struct SendResponseHeaderOp;
     using HeaderSendAwaiter = detail::Http2SendAwaiter<SendResponseHeaderOp>;
     using BodyWriteAllAwaiter = detail::Http2SendAwaiter<detail::Http2DataSendAllOp>;
@@ -73,7 +87,7 @@ private:
 
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
-    static const HeaderMap<PseudoHeaderHandler> &pseudo_header_handler_map() noexcept;
+    static const HeaderMap<PseudoHeaderRule> &pseudo_header_map() noexcept;
     ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpHandler &handler,
                        std::shared_ptr<const HttpHandler> handler_owner = {}) noexcept;
     static common::IoErr on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept;
@@ -107,6 +121,7 @@ private:
                                                           std::string_view &out) noexcept;
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,
                                              bool name_stable, bool value_stable) noexcept;
+    [[nodiscard]] common::IoErr finalize_pseudo_headers() noexcept;
     [[nodiscard]] common::IoErr apply_regular_header_policy(std::string_view name, std::uint64_t name_hash,
                                                             std::string_view value) noexcept;
     [[nodiscard]] common::IoErr commit_regular_header(std::string_view name, std::uint64_t name_hash,
@@ -133,7 +148,7 @@ private:
     bool handler_done_ = false;
     bool discard_request_body_ = false;
     bool response_channel_closed_ = false;
-    bool protocol_seen_ = false;
+    std::uint8_t pseudo_seen_ = 0;
     bool response_raw_ = false;
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
     std::string_view pending_name_;
