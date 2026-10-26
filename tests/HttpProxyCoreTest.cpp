@@ -36,7 +36,7 @@ TEST(HttpProxyCoreTest, ZeroContentLengthForwardsCompletionMarker) {
 }
 
 TEST(HttpProxyCoreTest, ChunkedForwardsEmptyCompletionMarker) {
-    fiber::http::proxy_core::RequestBodyForwardState state(fiber::http::HttpBodySpec::Chunked());
+    fiber::http::proxy_core::RequestBodyForwardState state(fiber::http::HttpBodySpec::Stream());
 
     EXPECT_TRUE(state.accepts(0));
     EXPECT_TRUE(state.should_write(0));

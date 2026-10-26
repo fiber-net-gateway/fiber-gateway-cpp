@@ -50,7 +50,7 @@ public:
     [[nodiscard]] bool request_body_complete() const noexcept { return body_parser_.done(); }
     [[nodiscard]] bool response_complete() const noexcept { return response_phase_ == ResponsePhase::Finished; }
     [[nodiscard]] bool raw_stream_active() const noexcept {
-        return response_phase_ != ResponsePhase::Init && response_body_spec_.is_stream();
+        return response_phase_ != ResponsePhase::Init && response_body_spec_.is_raw();
     }
     [[nodiscard]] bool should_keep_alive(const HttpExchange &exchange) const noexcept;
 
@@ -101,6 +101,7 @@ private:
     std::string_view response_reason_;
     const HttpHeaders *response_headers_ = nullptr;
     HttpBodySpec response_body_spec_{};
+    bool response_chunked_ = false;
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
     size_t response_content_length_ = 0;
     size_t chunk_payload_remaining_ = 0;

@@ -675,6 +675,8 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         if (!prepare_websocket_handshake(websocket)) {
             co_return error_exn(*heap, "http.proxyPass: prepare websocket handshake failed");
         }
+    } else if (exchange.request_body_spec().is_raw()) {
+        co_return error_exn(*heap, "http.proxyPass: CONNECT tunnels are only proxied with websocket=true");
     }
 
     auto target_opt = resolve_target(userdata);
@@ -817,7 +819,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
                 .status_code = websocket.extended_connect() ? 200 : 101,
                 .reason = websocket.extended_connect() ? std::string_view{} : resp_head->reason,
                 .headers = &resp_headers,
-                .body = fiber::http::HttpBodySpec::Stream(),
+                .body = fiber::http::HttpBodySpec::Raw(),
                 .connection_mode = fiber::http::ResponseConnectionMode::Auto,
                 .end_stream = false,
         });
