@@ -4566,6 +4566,83 @@ TEST(Http2ConnectionTest, ServerRejectsExtendedConnectProtocolWhenDisabled) {
     });
 }
 
+TEST(Http2ConnectionTest, ServerRawResponseRequiresConnectTunnelAndRejectsTrailers) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        struct RawResponseResults {
+            fiber::common::IoResult<void> end_stream;
+            fiber::common::IoResult<void> non_2xx;
+            fiber::common::IoResult<void> tunnel;
+            fiber::common::IoResult<void> trailer;
+        };
+
+        std::string request = std::string(kClientConnectionPreface);
+        request += make_frame(0, 0x4, 0x0, 0, {});
+        request += build_headers_frame_bytes(1, {
+                                                        {":method", "CONNECT"},
+                                                        {":scheme", "https"},
+                                                        {":path", "/chat"},
+                                                        {":authority", "example.com"},
+                                                        {":protocol", "websocket"},
+                                                });
+
+        auto results_promise = std::make_shared<std::promise<RawResponseResults>>();
+        auto results_future = results_promise->get_future();
+        fiber::http::HttpHandler handler =
+                [results_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            RawResponseResults results;
+            results.end_stream = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .body = fiber::http::HttpBodySpec::Raw(),
+                    .end_stream = true,
+            });
+            results.non_2xx = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 403,
+                    .body = fiber::http::HttpBodySpec::Raw(),
+                    .end_stream = false,
+            });
+            results.tunnel = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .body = fiber::http::HttpBodySpec::Raw(),
+                    .end_stream = false,
+            });
+            results.trailer = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Trailer,
+                    .end_stream = true,
+            });
+            results_promise->set_value(std::move(results));
+            co_return;
+        };
+
+        fiber::http::Http2Connection::Options options;
+        options.enable_connect_protocol = true;
+        ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler), options);
+
+        ASSERT_EQ(results_future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+        RawResponseResults results = results_future.get();
+        ASSERT_FALSE(results.end_stream.has_value());
+        EXPECT_EQ(results.end_stream.error(), fiber::common::IoErr::Invalid);
+        ASSERT_FALSE(results.non_2xx.has_value());
+        EXPECT_EQ(results.non_2xx.error(), fiber::common::IoErr::Invalid);
+        EXPECT_TRUE(results.tunnel.has_value()) << static_cast<int>(results.tunnel.error());
+        ASSERT_FALSE(results.trailer.has_value());
+        EXPECT_EQ(results.trailer.error(), fiber::common::IoErr::Invalid);
+
+        std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+        const auto stream_headers = std::count_if(frames.begin(), frames.end(), [](const EncodedFrame &frame) {
+            return frame.type == 0x1 && frame.stream_id == 1;
+        });
+        EXPECT_EQ(stream_headers, 1) << describe_frames(frames);
+        auto headers = std::find_if(frames.begin(), frames.end(), [](const EncodedFrame &frame) {
+            return frame.type == 0x1 && frame.stream_id == 1;
+        });
+        ASSERT_NE(headers, frames.end()) << describe_frames(frames);
+        EXPECT_EQ(headers->flags & 0x1, 0) << describe_frames(frames);
+    });
+}
+
 TEST(Http2ConnectionTest, ServerBorrowsHpackStaticStorage) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         struct StorageSnapshot {

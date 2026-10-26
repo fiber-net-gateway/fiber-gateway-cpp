@@ -147,6 +147,11 @@ bool response_must_not_have_body(const HttpExchange &exchange, int status_code) 
            status_code == 304;
 }
 
+// RFC 9114 section 4.4: only a 2xx answering CONNECT turns the stream into a tunnel.
+bool response_opens_tunnel(const HttpExchange &exchange, int status_code) noexcept {
+    return exchange.method() == HttpMethod::Connect && status_code >= 200 && status_code < 300;
+}
+
 } // namespace
 
 enum class ServerHttp3Request::HeaderBlockTarget : std::uint8_t {
@@ -1240,6 +1245,10 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
             if (final_body_spec.is_chunked()) {
                 co_return std::unexpected(common::IoErr::NotSupported);
             }
+            if (final_body_spec.is_raw() &&
+                (header.end_stream || !response_opens_tunnel(exchange, header.status_code))) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
             if (response_must_not_have_body(exchange, header.status_code)) {
                 if (!header.end_stream || final_body_spec.is_stream() ||
                     (final_body_spec.is_content_length() && final_body_spec.content_length() != 0)) {
@@ -1263,6 +1272,10 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
         case OutgoingHeaderKind::Trailer:
             FIBER_ASSERT(response_headers_sent_);
             FIBER_ASSERT(!response_data_frame_active_);
+            // RFC 9114 section 4.4: once CONNECT completes, only DATA frames may be sent on the stream.
+            if (response_body_spec_.is_raw()) {
+                co_return std::unexpected(common::IoErr::Invalid);
+            }
             if (response_body_spec_.is_content_length() && response_body_sent_ != response_content_length_) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }

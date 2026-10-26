@@ -230,6 +230,11 @@ bool response_must_not_have_body(const HttpExchange &exchange, int status_code) 
            status_code == 304;
 }
 
+// RFC 9110 sections 7.8 and 9.3.6: only a 101, or a 2xx answering CONNECT, turns the connection into a tunnel.
+bool response_opens_tunnel(const HttpExchange &exchange, int status_code) noexcept {
+    return status_code == 101 || (exchange.method() == HttpMethod::Connect && status_code >= 200 && status_code < 300);
+}
+
 } // namespace
 
 Http1ExchangeIo::Http1ExchangeIo(Http1Connection &connection, const HttpExchange &exchange) : connection_(&connection) {
@@ -648,8 +653,14 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
         return common::IoErr::Invalid;
     }
     HttpBodySpec body_spec = header.body;
-    const bool raw_stream = body_spec.is_stream();
-    if ((header.status_code < 200 && !(header.status_code == 101 && raw_stream)) || header.status_code > 999) {
+    if (body_spec.is_stream()) {
+        return common::IoErr::NotSupported;
+    }
+    const bool raw_stream = body_spec.is_raw();
+    if (raw_stream && !response_opens_tunnel(exchange, header.status_code)) {
+        return common::IoErr::Invalid;
+    }
+    if ((header.status_code < 200 && !raw_stream) || header.status_code > 999) {
         return common::IoErr::Invalid;
     }
     if (raw_stream && header.end_stream) {
@@ -762,7 +773,7 @@ common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange
             body_spec.is_chunked() && (response_headers_ == nullptr ||
                                        !response_headers_->contains("transfer-encoding", kTransferEncodingNameHash));
     bool write_connection_close =
-            !body_spec.is_stream() && close_conn &&
+            !body_spec.is_raw() && close_conn &&
             (response_headers_ == nullptr || !response_headers_->contains("connection", kConnectionNameHash));
 
     std::size_t header_len = 0;
@@ -1047,7 +1058,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_all(HttpExch
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    if (response_body_spec_.is_stream()) {
+    if (response_body_spec_.is_raw()) {
         if (len > 0) {
             auto res = co_await transport_write_all(&connection_->transport(), chunk, timeout);
             if (!res) {
@@ -1189,7 +1200,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_all(HttpExch
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    if (response_body_spec_.is_stream()) {
+    if (response_body_spec_.is_raw()) {
         if (len > 0) {
             auto res = co_await transport_write_all(&connection_->transport(), buf, len, timeout);
             if (!res) {
@@ -1573,7 +1584,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange
 }
 
 bool Http1ExchangeIo::should_keep_alive(const HttpExchange & /*unused*/) const noexcept {
-    return response_phase_ == ResponsePhase::Finished && !response_body_spec_.is_stream() && !close_after_response_;
+    return response_phase_ == ResponsePhase::Finished && !response_body_spec_.is_raw() && !close_after_response_;
 }
 
 common::IoResult<void> Http1ExchangeIo::abort(HttpExchange &exchange, common::IoErr /*reason*/) noexcept {

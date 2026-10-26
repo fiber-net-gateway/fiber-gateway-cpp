@@ -309,6 +309,7 @@ common::IoResult<std::size_t> estimate_header_bytes(const Http1RequestHead &head
             total += kChunkedHeader.size();
             break;
         case HttpBodySpec::Kind::Stream:
+        case HttpBodySpec::Kind::Raw:
             return std::unexpected(common::IoErr::NotSupported);
     }
 
@@ -355,6 +356,7 @@ common::IoResult<void> encode_request_header(mem::IoBuf &buf, const Http1Request
             append_bytes(ptr, kChunkedHeader);
             break;
         case HttpBodySpec::Kind::Stream:
+        case HttpBodySpec::Kind::Raw:
             return std::unexpected(common::IoErr::NotSupported);
     }
 
@@ -961,6 +963,7 @@ ClientHttp1Exchange::write_all(mem::IoBufChain chunk, std::chrono::milliseconds 
             co_return 0;
         }
         case HttpBodySpec::Kind::Stream:
+        case HttpBodySpec::Kind::Raw:
             co_return std::unexpected(common::IoErr::NotSupported);
     }
     co_return std::unexpected(common::IoErr::Invalid);
@@ -1099,6 +1102,7 @@ ClientHttp1Exchange::write_all(const std::uint8_t *buf, std::size_t len, bool en
             co_return len;
         }
         case HttpBodySpec::Kind::Stream:
+        case HttpBodySpec::Kind::Raw:
             co_return std::unexpected(common::IoErr::NotSupported);
     }
     co_return std::unexpected(common::IoErr::Invalid);
@@ -1200,6 +1204,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
         case HttpBodySpec::Kind::Chunked:
             break;
         case HttpBodySpec::Kind::Stream:
+        case HttpBodySpec::Kind::Raw:
             co_return std::unexpected(common::IoErr::NotSupported);
     }
 
@@ -1394,6 +1399,7 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
         case HttpBodySpec::Kind::Chunked:
             break;
         case HttpBodySpec::Kind::Stream:
+        case HttpBodySpec::Kind::Raw:
             co_return std::unexpected(common::IoErr::NotSupported);
     }
 

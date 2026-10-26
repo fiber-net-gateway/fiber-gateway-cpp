@@ -134,6 +134,7 @@ private:
     bool discard_request_body_ = false;
     bool response_channel_closed_ = false;
     bool protocol_seen_ = false;
+    bool response_raw_ = false;
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
