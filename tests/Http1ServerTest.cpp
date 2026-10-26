@@ -929,7 +929,7 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesContentLengthForLarg
     delete server;
 }
 
-TEST(Http1ServerTest, StreamResponseSwitchesToRawBidirectionalIo) {
+TEST(Http1ServerTest, RawResponseSwitchesToRawBidirectionalIo) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -948,7 +948,7 @@ TEST(Http1ServerTest, StreamResponseSwitchesToRawBidirectionalIo) {
             headers.set("Upgrade", "websocket");
             headers.set("Connection", "Upgrade");
             auto header_result = co_await send_final_header(exchange, 101, &headers,
-                                                            fiber::http::ResponseBodySpec::Stream(), {}, false);
+                                                            fiber::http::ResponseBodySpec::Raw(), {}, false);
             if (!header_result) {
                 co_return;
             }
@@ -996,6 +996,58 @@ TEST(Http1ServerTest, StreamResponseSwitchesToRawBidirectionalIo) {
     EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response;
     EXPECT_EQ(response.find("Connection: close"), std::string::npos) << response;
     EXPECT_NE(response.find("\r\n\r\nserver:client-data"), std::string::npos) << response;
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+TEST(Http1ServerTest, RawResponseRequiresTunnelStatus) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    auto raw_promise = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
+    auto raw_future = raw_promise->get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [raw_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto raw_result =
+                    co_await send_final_header(exchange, 200, nullptr, fiber::http::ResponseBodySpec::Raw(), {}, false);
+            raw_promise->set_value(raw_result);
+            auto header_result = co_await send_final_header(exchange, 200, nullptr,
+                                                            fiber::http::ResponseBodySpec::ContentLength(2), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>("ok"), 2, true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+
+    int client = connect_client(port);
+    ASSERT_GE(client, 0);
+    const char *request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    ASSERT_EQ(raw_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto raw_result = raw_future.get();
+    ASSERT_FALSE(raw_result.has_value());
+    EXPECT_EQ(raw_result.error(), fiber::common::IoErr::Invalid);
+    EXPECT_NE(response.find("HTTP/1.1 200 "), std::string::npos) << response;
+    EXPECT_NE(response.find("\r\n\r\nok"), std::string::npos) << response;
 
     fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
     group.join();
