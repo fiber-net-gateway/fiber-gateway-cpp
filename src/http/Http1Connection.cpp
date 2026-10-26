@@ -106,7 +106,7 @@ bool Http1Connection::handle_content_length(HttpExchange &exchange, const HttpHe
     if (exchange.request_body_spec_.is_content_length() && exchange.request_body_spec_.content_length() != length) {
         return false;
     }
-    if (!exchange.request_body_spec_.is_chunked()) {
+    if (!exchange.request_body_spec_.is_stream()) {
         exchange.request_body_spec_ = HttpBodySpec::ContentLength(length);
     }
     return true;
@@ -121,7 +121,7 @@ bool Http1Connection::handle_transfer_encoding(HttpExchange &exchange, const Htt
         }
     });
     if (chunked) {
-        exchange.request_body_spec_ = HttpBodySpec::Chunked();
+        exchange.request_body_spec_ = HttpBodySpec::Stream();
     }
     return true;
 }

@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 
+#include "../common/Assert.h"
 #include "../common/IoError.h"
 #include "HeaderMap.h"
 #include "HttpBodySpec.h"
@@ -224,9 +225,11 @@ inline std::string_view map_upstream_error_body(fiber::common::IoErr err) noexce
 
 // Returns the normalized inbound request body semantics for forwarding.
 // end_stream=true when there is no body to forward (so send_header can close the request).
+// CONNECT tunnel bytes are not request content: callers relay or reject them before forwarding a body.
 inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExchange &exchange,
                                                      bool &end_stream) noexcept {
     const fiber::http::HttpBodySpec body = exchange.request_body_spec();
+    FIBER_ASSERT(!body.is_raw());
     if (body.is_content_length()) {
         end_stream = body.content_length() == 0;
         return fiber::http::HttpBodySpec::ContentLength(body.content_length());
@@ -235,10 +238,10 @@ inline fiber::http::HttpBodySpec detect_request_body(const fiber::http::HttpExch
         end_stream = true;
         return fiber::http::HttpBodySpec::None();
     }
-    // The current proxy upstream is HTTP/1, so any inbound body without a known
-    // length is forwarded with HTTP/1 chunked transfer coding.
+    // Any inbound body without a known length is forwarded as a stream; the HTTP/1
+    // upstream frames it with chunked transfer coding.
     end_stream = false;
-    return fiber::http::HttpBodySpec::Chunked();
+    return fiber::http::HttpBodySpec::Stream();
 }
 
 // A Content-Length upstream finishes as soon as its declared byte count has been

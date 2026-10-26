@@ -54,6 +54,11 @@ HttpMethod parse_method(std::string_view method) noexcept {
 
 bool is_pseudo_header(std::string_view name) noexcept { return !name.empty() && name.front() == ':'; }
 
+// RFC 9113 section 8.5: only a 2xx answering CONNECT turns the stream into a tunnel.
+bool response_opens_tunnel(const HttpExchange &exchange, int status_code) noexcept {
+    return exchange.method() == HttpMethod::Connect && status_code >= 200 && status_code < 300;
+}
+
 } // namespace
 
 struct ServerHttp2Request::SendResponseHeaderOp {
@@ -95,14 +100,18 @@ const Http2HpackDecoder::Ops &ServerHttp2Request::decoder_ops() noexcept {
     return kOps;
 }
 
-const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::pseudo_header_handler_map() noexcept {
-    static HeaderMap<PseudoHeaderHandler> handlers = []() {
-        HeaderMap<PseudoHeaderHandler>::Builder builder(5);
-        builder.insert(":method", &ServerHttp2Request::handle_method);
-        builder.insert(":path", &ServerHttp2Request::handle_path);
-        builder.insert(":scheme", &ServerHttp2Request::handle_scheme);
-        builder.insert(":authority", &ServerHttp2Request::handle_authority);
-        builder.insert(":protocol", &ServerHttp2Request::handle_protocol);
+const HeaderMap<ServerHttp2Request::PseudoHeaderRule> &ServerHttp2Request::pseudo_header_map() noexcept {
+    static HeaderMap<PseudoHeaderRule> handlers = []() {
+        HeaderMap<PseudoHeaderRule>::Builder builder(5);
+        builder.insert(":method",
+                       PseudoHeaderRule{.seen_bit = MethodSeen, .handler = &ServerHttp2Request::handle_method});
+        builder.insert(":path", PseudoHeaderRule{.seen_bit = PathSeen, .handler = &ServerHttp2Request::handle_path});
+        builder.insert(":scheme",
+                       PseudoHeaderRule{.seen_bit = SchemeSeen, .handler = &ServerHttp2Request::handle_scheme});
+        builder.insert(":authority",
+                       PseudoHeaderRule{.seen_bit = AuthoritySeen, .handler = &ServerHttp2Request::handle_authority});
+        builder.insert(":protocol",
+                       PseudoHeaderRule{.seen_bit = ProtocolSeen, .handler = &ServerHttp2Request::handle_protocol});
         return std::move(builder).build();
     }();
     return handlers;
@@ -149,6 +158,10 @@ common::IoErr ServerHttp2Request::on_header_block_start(void *owner, Http2HpackD
     request->pending_name_stable_ = false;
     request->saw_regular_header_in_block_ = false;
     if (request->request_head_received_) {
+        // RFC 9113 section 8.5: a CONNECT stream carries only DATA after its HEADERS, never trailers.
+        if (request->exchange_.request_body_spec_.is_raw()) {
+            return common::IoErr::Invalid;
+        }
         request->reading_trailers_ = true;
     }
     sink.ctx = request;
@@ -159,6 +172,10 @@ common::IoErr ServerHttp2Request::on_header_block_start(void *owner, Http2HpackD
 common::IoErr ServerHttp2Request::on_header_block_complete(void *owner, bool end_stream) noexcept {
     auto *request = static_cast<ServerHttp2Request *>(owner);
     if (!request->request_head_received_) {
+        common::IoErr err = request->finalize_pseudo_headers();
+        if (err != common::IoErr::None) {
+            return err;
+        }
         request->request_head_received_ = true;
         if (end_stream && request->exchange_.request_body_spec_.is_stream()) {
             request->exchange_.request_body_spec_ = HttpBodySpec::None();
@@ -370,6 +387,10 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpE
     if (stream_.local_end_stream()) {
         co_return std::unexpected(common::IoErr::Already);
     }
+    if (header.kind == OutgoingHeaderKind::Trailer && response_raw_) {
+        // RFC 9113 section 8.5: a connected stream carries only DATA and stream management frames.
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
     if (header.kind != OutgoingHeaderKind::Trailer) {
         const bool informational = header.kind == OutgoingHeaderKind::Informational;
         if (header.status_code < 100 || header.status_code > 999) {
@@ -381,12 +402,17 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpE
         if (!informational && header.status_code >= 100 && header.status_code < 200) {
             co_return std::unexpected(common::IoErr::Invalid);
         }
-        if (!informational && header.body.is_chunked()) {
-            co_return std::unexpected(common::IoErr::NotSupported);
+        if (!informational && header.body.is_raw() &&
+            (header.end_stream || !response_opens_tunnel(exchange, header.status_code))) {
+            co_return std::unexpected(common::IoErr::Invalid);
         }
     }
 
-    co_return co_await HeaderSendAwaiter(stream_, timeout, header);
+    auto result = co_await HeaderSendAwaiter(stream_, timeout, header);
+    if (result && header.kind == OutgoingHeaderKind::Final) {
+        response_raw_ = header.body.is_raw();
+    }
+    co_return result;
 }
 
 fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_all(HttpExchange &exchange,
@@ -678,15 +704,42 @@ common::IoErr ServerHttp2Request::commit_field(std::string_view name, std::uint6
             return common::IoErr::Invalid;
         }
 
-        const auto *handler = pseudo_header_handler_map().get(name);
-        if (!handler) {
+        const auto *rule = pseudo_header_map().get(name);
+        if (!rule || (pseudo_seen_ & rule->seen_bit) != 0) {
             return common::IoErr::Invalid;
         }
-        return (*handler)(*this, value, value_stable);
+        pseudo_seen_ |= rule->seen_bit;
+        return (*rule->handler)(*this, value, value_stable);
     }
 
     saw_regular_header_in_block_ = true;
     return commit_regular_header(name, name_hash, value, name_stable, value_stable);
+}
+
+common::IoErr ServerHttp2Request::finalize_pseudo_headers() noexcept {
+    if ((pseudo_seen_ & MethodSeen) == 0) {
+        return common::IoErr::Invalid;
+    }
+    const bool connect = exchange_.method_ == HttpMethod::Connect;
+    const bool extended_connect = (pseudo_seen_ & ProtocolSeen) != 0;
+    // RFC 8441 section 4: :protocol only extends CONNECT, and then keeps :scheme and :path.
+    if (extended_connect && !connect) {
+        return common::IoErr::Invalid;
+    }
+    if (connect && !extended_connect) {
+        // RFC 9113 section 8.5: a classic CONNECT names only the :authority to tunnel to.
+        if ((pseudo_seen_ & (SchemeSeen | PathSeen)) != 0 || (pseudo_seen_ & AuthoritySeen) == 0) {
+            return common::IoErr::Invalid;
+        }
+    } else if ((pseudo_seen_ & (SchemeSeen | PathSeen)) != (SchemeSeen | PathSeen)) {
+        // RFC 9113 section 8.3.1: every other request carries :method, :scheme and :path.
+        return common::IoErr::Invalid;
+    }
+    if (connect) {
+        // RFC 9110 section 9.3.6: a CONNECT request has no content; its stream carries tunnel bytes.
+        exchange_.request_body_spec_ = HttpBodySpec::Raw();
+    }
+    return common::IoErr::None;
 }
 
 common::IoErr ServerHttp2Request::commit_regular_header(std::string_view name, std::uint64_t name_hash,
@@ -794,14 +847,13 @@ common::IoErr ServerHttp2Request::handle_authority(ServerHttp2Request &request, 
 
 common::IoErr ServerHttp2Request::handle_protocol(ServerHttp2Request &request, std::string_view value,
                                                   bool value_stable) noexcept {
-    if (request.protocol_seen_ || request.conn_ == nullptr || !request.conn_->local_enable_connect_protocol()) {
+    if (request.conn_ == nullptr || !request.conn_->local_enable_connect_protocol()) {
         return common::IoErr::Invalid;
     }
     std::string_view protocol = value_stable ? value : request.copy_to_pool(value);
     if (protocol.data() == nullptr && !protocol.empty()) {
         return common::IoErr::NoMem;
     }
-    request.protocol_seen_ = true;
     request.exchange_.protocol_view_ = protocol;
     request.exchange_.version_ = HttpVersion::HTTP_2_0;
     return common::IoErr::None;

@@ -672,7 +672,7 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t por
         head.method = fiber::http::HttpMethod::Post;
         head.target = "/upload";
         head.headers = &headers;
-        head.body = fiber::http::HttpBodySpec::Chunked();
+        head.body = fiber::http::HttpBodySpec::Stream();
 
         auto header_result = co_await exchange.send_header(head, false);
         if (!header_result) {
@@ -727,7 +727,7 @@ DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::u
         head.method = fiber::http::HttpMethod::Post;
         head.target = "/upload";
         head.headers = &headers;
-        head.body = fiber::http::HttpBodySpec::Chunked();
+        head.body = fiber::http::HttpBodySpec::Stream();
 
         auto header_result = co_await exchange.send_header(head, false);
         if (!header_result) {
@@ -782,7 +782,7 @@ DetachedTask run_partial_chunked_client(fiber::event::EventLoop *loop, std::uint
         head.method = fiber::http::HttpMethod::Post;
         head.target = "/partial";
         head.headers = &headers;
-        head.body = fiber::http::HttpBodySpec::Chunked();
+        head.body = fiber::http::HttpBodySpec::Stream();
 
         auto header_result = co_await exchange.send_header(head, false);
         if (!header_result) {
@@ -864,7 +864,7 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
         head.method = fiber::http::HttpMethod::Post;
         head.target = "/empty";
         head.headers = &headers;
-        head.body = fiber::http::HttpBodySpec::Chunked();
+        head.body = fiber::http::HttpBodySpec::Stream();
 
         auto header_result = co_await exchange.send_header(head, true);
         if (!header_result) {

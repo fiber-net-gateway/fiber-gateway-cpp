@@ -406,7 +406,7 @@ TEST(GzipResponseWriterTest, EmptyChunkedBodyProducesEmptyMember) {
             HttpResponseWriter w = gzip.writer();
             HttpHeaders headers(exchange.pool());
             headers.add("Content-Type", "text/html");
-            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
             EXPECT_TRUE(head.has_value());
             const auto written = co_await w.write_all(nullptr, 0, true);
             EXPECT_TRUE(written.has_value());
@@ -438,7 +438,7 @@ TEST(GzipResponseWriterTest, SyncFlushIsDecodableBeforeEnd) {
             HttpResponseWriter w = gzip.writer();
             HttpHeaders headers(exchange.pool());
             headers.add("Content-Type", "text/html");
-            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
             EXPECT_TRUE(head.has_value());
             const auto written = co_await w.write_all(bytes_of(first), first.size(), false);
             EXPECT_TRUE(written.has_value());
@@ -482,7 +482,7 @@ TEST(GzipResponseWriterTest, FlushBeforeAnyInputEmitsNothing) {
             HttpResponseWriter w = gzip.writer();
             HttpHeaders headers(exchange.pool());
             headers.add("Content-Type", "text/html");
-            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
             EXPECT_TRUE(head.has_value());
             const auto flushed = co_await w.flush();
             EXPECT_TRUE(flushed.has_value());
@@ -515,7 +515,7 @@ TEST(GzipResponseWriterTest, LargeSingleWriteCompressesCorrectly) {
             HttpResponseWriter w = gzip.writer();
             HttpHeaders headers(exchange.pool());
             headers.add("Content-Type", "text/html");
-            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
             EXPECT_TRUE(head.has_value());
             const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
             EXPECT_TRUE(written.has_value());
@@ -545,7 +545,7 @@ TEST(GzipResponseWriterTest, ChainWriteCompletesBody) {
             HttpResponseWriter w = gzip.writer();
             HttpHeaders headers(exchange.pool());
             headers.add("Content-Type", "text/html");
-            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
             EXPECT_TRUE(head.has_value());
 
             IoBufChain chain;
@@ -693,7 +693,7 @@ TEST(GzipResponseWriterTest, TrailerHeaderFinishesActiveBody) {
             HttpResponseWriter w = gzip.writer();
             HttpHeaders headers(exchange.pool());
             headers.add("Content-Type", "text/html");
-            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
             EXPECT_TRUE(head.has_value());
             const auto written = co_await w.write_all(bytes_of(body), body.size(), false);
             EXPECT_TRUE(written.has_value());
@@ -732,7 +732,7 @@ TEST(GzipResponseWriterDeathTest, TrailerWithoutEndStreamAssertsBeforeFinishingB
                      auto writer = gzip.writer();
                      HttpHeaders headers(exchange.pool());
                      headers.add("Content-Type", "text/html");
-                     auto header = co_await writer.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+                     auto header = co_await writer.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
                      EXPECT_TRUE(header.has_value());
                      const std::string body = html_payload(4000);
                      auto written = co_await writer.write_all(bytes_of(body), body.size(), false);
@@ -1023,7 +1023,7 @@ TEST(GzipResponseWriterTest, DownstreamWriteFailureFailsTheStream) {
             HttpResponseWriter w = gzip.writer();
             HttpHeaders headers(exchange.pool());
             headers.add("Content-Type", "text/html");
-            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
             EXPECT_TRUE(head.has_value());
             const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
             EXPECT_FALSE(written.has_value());
@@ -1049,7 +1049,7 @@ TEST(GzipResponseWriterTest, AbortPropagatesAndPoisonsLaterOps) {
             HttpResponseWriter w = gzip.writer();
             HttpHeaders headers(exchange.pool());
             headers.add("Content-Type", "text/html");
-            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Stream()));
             EXPECT_TRUE(head.has_value());
             const std::string partial = "partial";
             const auto written = co_await w.write_all(bytes_of(partial), partial.size(), false);
@@ -1097,7 +1097,7 @@ TEST(GzipResponseWriterTest, OperationsAfterFinishAreRejected) {
             EXPECT_EQ(again.error(), IoErr::Already);
             HttpHeaders repeat(exchange.pool());
             repeat.add("Content-Type", "text/html");
-            const auto second_head = co_await w.send_header(final_header(&repeat, 200, HttpBodySpec::Chunked()));
+            const auto second_head = co_await w.send_header(final_header(&repeat, 200, HttpBodySpec::Stream()));
             EXPECT_FALSE(second_head.has_value());
             EXPECT_EQ(second_head.error(), IoErr::Already);
             stats = gzip.stats();

@@ -230,11 +230,22 @@ bool response_must_not_have_body(const HttpExchange &exchange, int status_code) 
            status_code == 304;
 }
 
+// RFC 9110 sections 7.8 and 9.3.6: only a 101, or a 2xx answering CONNECT, turns the connection into a tunnel.
+bool response_opens_tunnel(const HttpExchange &exchange, int status_code) noexcept {
+    return status_code == 101 || (exchange.method() == HttpMethod::Connect && status_code >= 200 && status_code < 300);
+}
+
+// RFC 9112 section 6.1: Transfer-Encoding only answers an HTTP/1.1 request; towards HTTP/1.0 the connection close
+// delimits Stream content instead.
+bool response_stream_chunked(const HttpExchange &exchange, HttpBodySpec body_spec) noexcept {
+    return body_spec.is_stream() && exchange.version() != HttpVersion::HTTP_1_0;
+}
+
 } // namespace
 
 Http1ExchangeIo::Http1ExchangeIo(Http1Connection &connection, const HttpExchange &exchange) : connection_(&connection) {
     const HttpBodySpec body_spec = exchange.request_body_spec_;
-    if (body_spec.is_chunked()) {
+    if (body_spec.is_stream()) {
         body_parser_.set_chunked();
         return;
     }
@@ -648,8 +659,11 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
         return common::IoErr::Invalid;
     }
     HttpBodySpec body_spec = header.body;
-    const bool raw_stream = body_spec.is_stream();
-    if ((header.status_code < 200 && !(header.status_code == 101 && raw_stream)) || header.status_code > 999) {
+    const bool raw_stream = body_spec.is_raw();
+    if (raw_stream && !response_opens_tunnel(exchange, header.status_code)) {
+        return common::IoErr::Invalid;
+    }
+    if ((header.status_code < 200 && !raw_stream) || header.status_code > 999) {
         return common::IoErr::Invalid;
     }
     if (raw_stream && header.end_stream) {
@@ -660,7 +674,7 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
         return common::IoErr::Invalid;
     }
     if (must_not_have_body) {
-        if (body_spec.is_chunked()) {
+        if (body_spec.is_stream()) {
             return common::IoErr::Invalid;
         }
         if (body_spec.is_content_length() && body_spec.content_length() != 0) {
@@ -671,7 +685,7 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
         if (body_spec.is_content_length() && body_spec.content_length() != 0) {
             return common::IoErr::Invalid;
         }
-        if (body_spec.is_chunked()) {
+        if (body_spec.is_stream()) {
             body_spec = HttpBodySpec::Auto();
         }
     }
@@ -701,12 +715,12 @@ common::IoResult<void> Http1ExchangeIo::normalize_response_plan(bool body_end, s
         if (body_end) {
             body_spec = HttpBodySpec::ContentLength(first_body_len);
         } else {
-            body_spec = HttpBodySpec::Chunked();
+            body_spec = HttpBodySpec::Stream();
         }
     }
 
     if (body_spec.is_auto()) {
-        body_spec = body_end ? HttpBodySpec::ContentLength(first_body_len) : HttpBodySpec::Chunked();
+        body_spec = body_end ? HttpBodySpec::ContentLength(first_body_len) : HttpBodySpec::Stream();
     }
 
     if (body_end) {
@@ -750,6 +764,10 @@ common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange
     }
 
     close_conn = compute_close_conn(exchange);
+    const bool chunked = response_stream_chunked(exchange, body_spec);
+    if (body_spec.is_stream() && !chunked) {
+        close_conn = true;
+    }
 
     std::string_view reason = response_reason_.empty() ? default_reason_phrase(response_status_code_)
                                                        : std::string_view(response_reason_);
@@ -759,10 +777,10 @@ common::IoResult<mem::IoBuf> Http1ExchangeIo::build_response_header(HttpExchange
             body_spec.is_content_length() &&
             (response_headers_ == nullptr || !response_headers_->contains("content-length", kContentLengthNameHash));
     bool write_transfer_encoding =
-            body_spec.is_chunked() && (response_headers_ == nullptr ||
-                                       !response_headers_->contains("transfer-encoding", kTransferEncodingNameHash));
+            chunked && (response_headers_ == nullptr ||
+                        !response_headers_->contains("transfer-encoding", kTransferEncodingNameHash));
     bool write_connection_close =
-            !body_spec.is_stream() && close_conn &&
+            !body_spec.is_raw() && close_conn &&
             (response_headers_ == nullptr || !response_headers_->contains("connection", kConnectionNameHash));
 
     std::size_t header_len = 0;
@@ -930,6 +948,7 @@ Http1ExchangeIo::write_response_header(HttpExchange &exchange, bool body_end, st
         co_return std::unexpected(result.error());
     }
     response_body_spec_ = body_spec;
+    response_chunked_ = response_stream_chunked(exchange, body_spec);
     response_content_length_ = body_spec.is_content_length() ? body_spec.content_length() : 0;
     response_phase_ = ResponsePhase::HeaderSent;
     close_after_response_ = close_conn;
@@ -984,8 +1003,14 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::send_header(HttpExch
         case OutgoingHeaderKind::Trailer:
             FIBER_ASSERT(response_phase_ == ResponsePhase::HeaderSent ||
                          response_phase_ == ResponsePhase::BodyStreaming);
-            FIBER_ASSERT(response_body_spec_.is_chunked());
+            FIBER_ASSERT(response_body_spec_.is_stream());
             FIBER_ASSERT(!chunk_write_active_);
+            if (!response_chunked_) {
+                // RFC 9112 section 7.1.2: without the chunked coding the trailer fields may be discarded; the
+                // connection close ends the content.
+                response_phase_ = ResponsePhase::Finished;
+                co_return common::IoResult<void>{};
+            }
             auto trailer_result = co_await write_chunked_trailer_block(header.headers, timeout);
             if (!trailer_result) {
                 co_return std::unexpected(trailer_result.error());
@@ -1047,7 +1072,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_all(HttpExch
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    if (response_body_spec_.is_stream()) {
+    if (response_body_spec_.is_raw()) {
         if (len > 0) {
             auto res = co_await transport_write_all(&connection_->transport(), chunk, timeout);
             if (!res) {
@@ -1064,7 +1089,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_all(HttpExch
         co_return len;
     }
 
-    if (response_body_spec_.is_chunked()) {
+    if (response_chunked_) {
         if (len > 0) {
             // Build [prefix][body][suffix] as one chain and issue a single writev.
             // Prefix: hex(len) + CRLF. Suffix: trailing CRLF, folded into the final
@@ -1189,7 +1214,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_all(HttpExch
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    if (response_body_spec_.is_stream()) {
+    if (response_body_spec_.is_raw()) {
         if (len > 0) {
             auto res = co_await transport_write_all(&connection_->transport(), buf, len, timeout);
             if (!res) {
@@ -1206,7 +1231,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_all(HttpExch
         co_return len;
     }
 
-    if (response_body_spec_.is_chunked()) {
+    if (response_chunked_) {
         if (len > 0) {
             std::array<char, 32> size_buf{};
             auto [ptr, ec] = std::to_chars(size_buf.data(), size_buf.data() + size_buf.size(), len, 16);
@@ -1307,7 +1332,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange
         }
     }
 
-    if (!response_body_spec_.is_chunked()) {
+    if (!response_chunked_) {
         if (len == 0) {
             if (end) {
                 chunk.clear_complete();
@@ -1478,7 +1503,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange
         }
     }
 
-    if (!response_body_spec_.is_chunked()) {
+    if (!response_chunked_) {
         if (len == 0) {
             if (end) {
                 response_phase_ = ResponsePhase::Finished;
@@ -1573,7 +1598,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange
 }
 
 bool Http1ExchangeIo::should_keep_alive(const HttpExchange & /*unused*/) const noexcept {
-    return response_phase_ == ResponsePhase::Finished && !response_body_spec_.is_stream() && !close_after_response_;
+    return response_phase_ == ResponsePhase::Finished && !response_body_spec_.is_raw() && !close_after_response_;
 }
 
 common::IoResult<void> Http1ExchangeIo::abort(HttpExchange &exchange, common::IoErr /*reason*/) noexcept {

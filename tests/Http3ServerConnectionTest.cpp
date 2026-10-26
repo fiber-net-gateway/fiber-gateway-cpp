@@ -288,6 +288,130 @@ TEST(Http3ServerConnectionTest, ServerCanSendFinalResponseHeader) {
 }
 
 namespace {
+void run_http3_request_with_handler(const HeaderList &headers, fiber::http::HttpHandler handler) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ServerRequestContext ctx;
+    ctx.options.settings.enable_connect_protocol = true;
+    auto done_promise = std::make_shared<std::promise<void>>();
+    auto done_future = done_promise->get_future();
+    ctx.handler = [handler = std::move(handler),
+                   done_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        co_await handler(exchange);
+        done_promise->set_value();
+    };
+
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
+    auto &h3 = fixture.connection();
+    auto &quic = h3.quic();
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    EXPECT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_request_stream_then_wait(&quic, &request, &feed_done);
+    });
+
+    EXPECT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(done_future.wait_for(2s), std::future_status::ready);
+
+    fixture.finish();
+    group.stop();
+    group.join();
+}
+} // namespace
+
+TEST(Http3ServerConnectionTest, ServerRawResponseRequiresConnectTunnelAndRejectsTrailers) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        struct RawResponseResults {
+            fiber::common::IoResult<void> end_stream;
+            fiber::common::IoResult<void> non_2xx;
+            fiber::common::IoResult<void> tunnel;
+            fiber::common::IoResult<void> trailer;
+        };
+
+        auto results_promise = std::make_shared<std::promise<RawResponseResults>>();
+        auto results_future = results_promise->get_future();
+        HeaderList headers{
+                {":method", "CONNECT"}, {":scheme", "https"},       {":authority", "example.com"},
+                {":path", "/chat"},     {":protocol", "websocket"},
+        };
+        run_http3_request_with_handler(
+                headers, [results_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                    RawResponseResults results;
+                    results.end_stream = co_await exchange.send_header({
+                            .kind = fiber::http::OutgoingHeaderKind::Final,
+                            .status_code = 200,
+                            .body = fiber::http::HttpBodySpec::Raw(),
+                            .end_stream = true,
+                    });
+                    results.non_2xx = co_await exchange.send_header({
+                            .kind = fiber::http::OutgoingHeaderKind::Final,
+                            .status_code = 403,
+                            .body = fiber::http::HttpBodySpec::Raw(),
+                            .end_stream = false,
+                    });
+                    results.tunnel = co_await exchange.send_header({
+                            .kind = fiber::http::OutgoingHeaderKind::Final,
+                            .status_code = 200,
+                            .body = fiber::http::HttpBodySpec::Raw(),
+                            .end_stream = false,
+                    });
+                    // Trailers assert that the final header went out, so only probe them on a live tunnel.
+                    if (results.tunnel) {
+                        results.trailer = co_await exchange.send_header({
+                                .kind = fiber::http::OutgoingHeaderKind::Trailer,
+                                .end_stream = true,
+                        });
+                    }
+                    results_promise->set_value(std::move(results));
+                });
+
+        ASSERT_EQ(results_future.wait_for(0s), std::future_status::ready);
+        RawResponseResults results = results_future.get();
+        ASSERT_FALSE(results.end_stream.has_value());
+        EXPECT_EQ(results.end_stream.error(), fiber::common::IoErr::Invalid);
+        ASSERT_FALSE(results.non_2xx.has_value());
+        EXPECT_EQ(results.non_2xx.error(), fiber::common::IoErr::Invalid);
+        EXPECT_TRUE(results.tunnel.has_value()) << static_cast<int>(results.tunnel.error());
+        ASSERT_FALSE(results.trailer.has_value());
+        EXPECT_EQ(results.trailer.error(), fiber::common::IoErr::Invalid);
+    });
+}
+
+TEST(Http3ServerConnectionTest, ServerRawResponseRejectsNonConnectRequest) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto result_promise = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
+        auto result_future = result_promise->get_future();
+        HeaderList headers{
+                {":method", "GET"},
+                {":scheme", "https"},
+                {":authority", "example.com"},
+                {":path", "/"},
+        };
+        run_http3_request_with_handler(
+                headers, [result_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                    result_promise->set_value(co_await exchange.send_header({
+                            .kind = fiber::http::OutgoingHeaderKind::Final,
+                            .status_code = 200,
+                            .body = fiber::http::HttpBodySpec::Raw(),
+                            .end_stream = false,
+                    }));
+                });
+
+        ASSERT_EQ(result_future.wait_for(0s), std::future_status::ready);
+        auto result = result_future.get();
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error(), fiber::common::IoErr::Invalid);
+    });
+}
+
+namespace {
 struct UnreadRequestResponseCase {
     const char *name;
     std::size_t body_length;
@@ -932,6 +1056,7 @@ TEST(Http3ServerConnectionTest, ServerRequestExposesExtendedConnectProtocolWhenE
         EXPECT_EQ(result.snapshot.method, fiber::http::HttpMethod::Connect);
         EXPECT_EQ(result.snapshot.scheme, "https");
         EXPECT_EQ(result.snapshot.protocol, "websocket");
+        EXPECT_TRUE(result.snapshot.body_spec.is_raw());
     });
 }
 
@@ -945,6 +1070,57 @@ TEST(Http3ServerConnectionTest, ServerRequestRejectsExtendedConnectProtocolWhenD
         Http3RequestRunResult result = run_http3_request_headers(headers, false);
 
         EXPECT_EQ(result.handler_status, std::future_status::timeout);
+    });
+}
+
+TEST(Http3ServerConnectionTest, ServerRequestTreatsClassicConnectAsRawTunnel) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        HeaderList headers{
+                {":method", "CONNECT"},
+                {":authority", "example.com:443"},
+                {"content-length", "5"},
+        };
+
+        Http3RequestRunResult result = run_http3_request_headers(headers, true);
+
+        ASSERT_EQ(result.handler_status, std::future_status::ready);
+        EXPECT_EQ(result.snapshot.method, fiber::http::HttpMethod::Connect);
+        EXPECT_EQ(result.snapshot.host, "example.com:443");
+        EXPECT_TRUE(result.snapshot.unparsed_uri.empty());
+        EXPECT_TRUE(result.snapshot.body_spec.is_raw());
+    });
+}
+
+TEST(Http3ServerConnectionTest, ServerRequestRejectsMalformedConnectPseudoHeaders) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        {
+            SCOPED_TRACE("classic CONNECT with :path");
+            HeaderList headers{{":method", "CONNECT"}, {":authority", "example.com:443"}, {":path", "/"}};
+            EXPECT_EQ(run_http3_request_headers(headers, false, true).handler_status, std::future_status::timeout);
+        }
+        {
+            SCOPED_TRACE("classic CONNECT without :authority");
+            HeaderList headers{{":method", "CONNECT"}};
+            EXPECT_EQ(run_http3_request_headers(headers, false, true).handler_status, std::future_status::timeout);
+        }
+        {
+            SCOPED_TRACE(":protocol on GET");
+            HeaderList headers{
+                    {":method", "GET"}, {":scheme", "https"},       {":authority", "example.com"},
+                    {":path", "/chat"}, {":protocol", "websocket"},
+            };
+            EXPECT_EQ(run_http3_request_headers(headers, false, true).handler_status, std::future_status::timeout);
+        }
+        {
+            SCOPED_TRACE("extended CONNECT without :path");
+            HeaderList headers{
+                    {":method", "CONNECT"},
+                    {":scheme", "https"},
+                    {":authority", "example.com"},
+                    {":protocol", "websocket"},
+            };
+            EXPECT_EQ(run_http3_request_headers(headers, false, true).handler_status, std::future_status::timeout);
+        }
     });
 }
 
@@ -1217,6 +1393,31 @@ TEST(Http3ServerConnectionTest, ServerReadBodyCompletesEmptyBodyWithTrailers) {
         EXPECT_TRUE(outcome.second_complete);
         EXPECT_TRUE(outcome.trailers_complete);
         EXPECT_EQ(outcome.trailer_value, "sha-256=empty");
+    });
+}
+
+TEST(Http3ServerConnectionTest, ServerReadBodyRejectsTrailersOnConnectStream) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        HeaderList request_headers{
+                {":method", "CONNECT"},
+                {":authority", "example.com:443"},
+        };
+        HeaderList trailers{{"digest", "sha-256=xyz"}};
+
+        std::vector<std::uint8_t> request;
+        append_frame(request, headers_frame(request_headers));
+        append_frame(request, data_frame("hello"));
+        append_frame(request, headers_frame(trailers));
+
+        Http3BodyReadOutcome outcome = run_http3_request_body(request);
+
+        EXPECT_TRUE(outcome.body_spec.is_raw());
+        EXPECT_EQ(outcome.first_error, fiber::common::IoErr::None);
+        EXPECT_EQ(outcome.first_body, "hello");
+        EXPECT_FALSE(outcome.first_complete);
+        EXPECT_EQ(outcome.second_error, fiber::common::IoErr::Invalid);
+        EXPECT_FALSE(outcome.trailers_complete);
+        EXPECT_TRUE(outcome.trailer_value.empty());
     });
 }
 

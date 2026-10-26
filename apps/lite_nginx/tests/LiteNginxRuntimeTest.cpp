@@ -2235,6 +2235,50 @@ http {
     EXPECT_EQ(proxied_request.find("Connection: close\r\n"), std::string::npos);
 }
 
+TEST(LiteNginxRuntimeTest, ProxyRejectsConnectTunnelWithNotImplemented) {
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nproxied", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "connect_proxy.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "CONNECT /tunnel HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 501 "), std::string::npos) << response;
+    EXPECT_EQ(upstream_future.wait_for(100ms), std::future_status::timeout);
+}
+
 TEST(LiteNginxRuntimeTest, RewritePathSupportsLiteralAndTemplateWhilePreservingQuery) {
     std::promise<std::string> literal_upstream_request;
     std::promise<std::string> template_upstream_request;
