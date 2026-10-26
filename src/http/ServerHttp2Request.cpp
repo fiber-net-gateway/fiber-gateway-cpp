@@ -390,9 +390,6 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpE
         if (!informational && header.status_code >= 100 && header.status_code < 200) {
             co_return std::unexpected(common::IoErr::Invalid);
         }
-        if (!informational && header.body.is_chunked()) {
-            co_return std::unexpected(common::IoErr::NotSupported);
-        }
         if (!informational && header.body.is_raw() &&
             (header.end_stream || !response_opens_tunnel(exchange, header.status_code))) {
             co_return std::unexpected(common::IoErr::Invalid);

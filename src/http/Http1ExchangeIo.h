@@ -101,6 +101,7 @@ private:
     std::string_view response_reason_;
     const HttpHeaders *response_headers_ = nullptr;
     HttpBodySpec response_body_spec_{};
+    bool response_chunked_ = false;
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
     size_t response_content_length_ = 0;
     size_t chunk_payload_remaining_ = 0;

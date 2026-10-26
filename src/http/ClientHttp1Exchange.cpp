@@ -305,10 +305,9 @@ common::IoResult<std::size_t> estimate_header_bytes(const Http1RequestHead &head
             }
             total += kContentLengthPrefix.size() + kMaxContentLengthDigits + kLineTerminator.size();
             break;
-        case HttpBodySpec::Kind::Chunked:
+        case HttpBodySpec::Kind::Stream:
             total += kChunkedHeader.size();
             break;
-        case HttpBodySpec::Kind::Stream:
         case HttpBodySpec::Kind::Raw:
             return std::unexpected(common::IoErr::NotSupported);
     }
@@ -352,10 +351,9 @@ common::IoResult<void> encode_request_header(mem::IoBuf &buf, const Http1Request
             ptr += append_decimal(ptr, head.body.content_length());
             append_bytes(ptr, kLineTerminator);
             break;
-        case HttpBodySpec::Kind::Chunked:
+        case HttpBodySpec::Kind::Stream:
             append_bytes(ptr, kChunkedHeader);
             break;
-        case HttpBodySpec::Kind::Stream:
         case HttpBodySpec::Kind::Raw:
             return std::unexpected(common::IoErr::NotSupported);
     }
@@ -787,7 +785,7 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
         co_return std::unexpected(write_result.error());
     }
 
-    if (head.body.is_chunked() && end_stream) {
+    if (head.body.is_stream() && end_stream) {
         auto final_result = co_await transport_write_all(transport, kChunkedFinal.data(), kChunkedFinal.size(),
                                                          remaining_timeout(deadline));
         if (!final_result) {
@@ -907,7 +905,7 @@ ClientHttp1Exchange::write_all(mem::IoBufChain chunk, std::chrono::milliseconds 
             }
             co_return body_bytes;
         }
-        case HttpBodySpec::Kind::Chunked: {
+        case HttpBodySpec::Kind::Stream: {
             if (body_bytes == 0 && !end_stream) {
                 co_return 0;
             }
@@ -962,7 +960,6 @@ ClientHttp1Exchange::write_all(mem::IoBufChain chunk, std::chrono::milliseconds 
             request_state_ = RequestState::RequestDone;
             co_return 0;
         }
-        case HttpBodySpec::Kind::Stream:
         case HttpBodySpec::Kind::Raw:
             co_return std::unexpected(common::IoErr::NotSupported);
     }
@@ -1060,7 +1057,7 @@ ClientHttp1Exchange::write_all(const std::uint8_t *buf, std::size_t len, bool en
             }
             co_return len;
         }
-        case HttpBodySpec::Kind::Chunked: {
+        case HttpBodySpec::Kind::Stream: {
             if (len == 0 && !end_stream) {
                 co_return 0;
             }
@@ -1101,7 +1098,6 @@ ClientHttp1Exchange::write_all(const std::uint8_t *buf, std::size_t len, bool en
             }
             co_return len;
         }
-        case HttpBodySpec::Kind::Stream:
         case HttpBodySpec::Kind::Raw:
             co_return std::unexpected(common::IoErr::NotSupported);
     }
@@ -1201,9 +1197,8 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
             }
             co_return *written;
         }
-        case HttpBodySpec::Kind::Chunked:
-            break;
         case HttpBodySpec::Kind::Stream:
+            break;
         case HttpBodySpec::Kind::Raw:
             co_return std::unexpected(common::IoErr::NotSupported);
     }
@@ -1396,9 +1391,8 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
             }
             co_return *written;
         }
-        case HttpBodySpec::Kind::Chunked:
-            break;
         case HttpBodySpec::Kind::Stream:
+            break;
         case HttpBodySpec::Kind::Raw:
             co_return std::unexpected(common::IoErr::NotSupported);
     }
@@ -1494,7 +1488,7 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
     if (request_state_ == RequestState::RequestDone) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    if (request_state_ == RequestState::Failed || !body_spec_.is_chunked()) {
+    if (request_state_ == RequestState::Failed || !body_spec_.is_stream()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (chunk_write_active_) {
