@@ -27,6 +27,8 @@
   UDP Echo 示例，展示数据报收发流程。
 - `dns_dig.cpp`
   DNS 查询示例，展示 resolver 使用、地址解析和结果处理。
+- `regex_crs_bench.cpp`
+  `fiber::regex` 在 OWASP CRS 规则上的基准，对比逐条匹配和 `RegexSet`。
 - `git_http_repo_server.cpp`
   更完整的 HTTP 服务端示例，展示更复杂的协议处理和服务逻辑。
 - `nacos_demo.cpp`

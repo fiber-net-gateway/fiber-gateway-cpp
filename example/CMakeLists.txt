@@ -7,6 +7,7 @@ set(FIBER_SIMPLE_EXAMPLES
     http3_benchmark_server
     http1_echo
     https_echo
+    regex_crs_bench
     tcp_echo
     tls_ab_bench
     tls_probe

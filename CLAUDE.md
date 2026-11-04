@@ -94,6 +94,16 @@ All stream types are coroutine-aware. Low-level fd wrappers live in `src/net/det
 
 In-tree QUIC transport implementation: `QuicConnection`, `QuicStream`, `QuicStreamReassembler`, `QuicStreamTable`, `QuicPacketCodec`, `QuicPacketProcessor`, `QuicSendScheduler`, `QuicAckHandler`, `QuicCongestion` (congestion control), `QuicCrypto`/`QuicTlsSession` (TLS 1.3 handshake), `QuicUdpEndpoint`, `QuicFrame`, `QuicTransportCodec`/`QuicTransportParamsCodec`.
 
+### Regex (`src/regex/`)
+
+Linear-time regular expressions, a port of RE2 without Abseil (`feature/regex.md`, `src/regex/UPSTREAM.md`). RE2 syntax, so no backreferences or lookaround. Public headers are in `include/fiber/regex/`.
+
+- **Regex**: compiled once, immutable, shared between threads. Dispatches to a lazy DFA, then OnePass, BitState or the Pike VM for captures
+- **RegexSet / Scanner**: many patterns in one DFA pass, and streaming input across chunks
+- **LiteralSet**: Aho-Corasick for word lists
+- **Scratch**: per-worker matching memory, including the DFA caches and their budget
+- `Encoding::Bytes` is mandatory when inspecting untrusted input; a `WorkBudget` bounds the work, and `BudgetExhausted` is never reported as `NoMatch`
+
 ### DNS (`src/dns/`)
 
 - **DnsClient**: Async multi-upstream DNS wire-protocol client (UDP/TCP)
@@ -156,7 +166,7 @@ Design state and member variables to be minimal and explicit. Establish required
 - PascalCase for types (`TcpStream`, `Task`), `FIBER_` prefix for macros
 - Header guards: `FIBER_<MODULE>_<NAME>_H`
 - Local includes with relative paths: `#include "../event/EventLoop.h"`
-- Namespaces under `fiber::...` (`fiber::async`, `fiber::event`, `fiber::net`, `fiber::http`, `fiber::quic`, `fiber::dns`, `fiber::script`, `fiber::json`, `fiber::common`, `fiber::mem`)
+- Namespaces under `fiber::...` (`fiber::async`, `fiber::event`, `fiber::net`, `fiber::http`, `fiber::quic`, `fiber::dns`, `fiber::regex`, `fiber::script`, `fiber::json`, `fiber::common`, `fiber::mem`)
 - Tests: `tests/*Test.cpp`, auto-discovered by CMake into `fiber_tests` target
 
 ### Linting (clang-tidy)
@@ -175,13 +185,13 @@ Design state and member variables to be minimal and explicit. Establish required
 - `example/` — Single-file runnable examples (e.g., `http1_echo.cpp`, `dns_dig.cpp`)
 - `apps/` — Multi-file applications. Currently `apps/lite_nginx` (lightweight reverse proxy with its own config parser, tests, and CMakeLists)
 - `tests/` — GoogleTest files (`*Test.cpp`), registered via CTest
-- `fuzz/` — libFuzzer harnesses for the TLS stack, seed corpora, and the seed generator
+- `fuzz/` — libFuzzer harnesses for the TLS stack, QUIC and the regex engine, seed corpora, and the seed generators
 - `docs/` — Design documentation
 - `feature/` — Feature design notes for individual subsystems
 - `cmake/` — Build support (toolchain selection, dependency management, executable helpers)
 
 ## Commit & PR Conventions
 
-Conventional Commits with scopes: `type(scope): subject`. Types: `feat`, `fix`, `refactor`, `perf`, `test`, `build`, `docs`, `chore`. Scopes match modules (`core`, `json`, `mem`, `build`, `http`, `quic`, `dns`, `script`). Example: `feat(json): add generator state stack`. Breaking changes get a `BREAKING CHANGE:` footer.
+Conventional Commits with scopes: `type(scope): subject`. Types: `feat`, `fix`, `refactor`, `perf`, `test`, `build`, `docs`, `chore`. Scopes match modules (`core`, `json`, `mem`, `build`, `http`, `quic`, `dns`, `regex`, `script`). Example: `feat(json): add generator state stack`. Breaking changes get a `BREAKING CHANGE:` footer.
 
 PR titles follow the same format. Include summary, motivation, linked issues, and the exact build/test commands run.
