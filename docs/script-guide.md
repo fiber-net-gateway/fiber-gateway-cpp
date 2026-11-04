@@ -413,7 +413,7 @@ return backend.request({path: "/health"});
 
 The language does not support `const`/`var`, `while`/`do`, classic three-part `for`, one-variable `for-of`, `switch`, functions or arrow functions, classes, `new`, optional chaining, nullish coalescing, compound assignment, `++`/`--`, bitwise operations, regex literals, modules, Promise, or `await`.
 
-The lexer recognizes some tokens for `++`, `--`, `~`, `#[`, and `^[`, but the parser/compiler gives them no executable semantics; using them fails compilation. `strings.match` and `strings.findAll` are also not registered.
+The lexer recognizes some tokens for `++`, `--`, `~`, `#[`, and `^[`, but the parser/compiler gives them no executable semantics; using them fails compilation.
 
 ## 5. Standard-library API
 
@@ -617,7 +617,17 @@ function strings.toString(value: ScriptValue): string;
 - Exceptions: none; creating the result may use the common abort behavior.
 - Side effects: none.
 
-`strings.match` and `strings.findAll` are not currently registered.
+#### `strings.match(text, pattern)` / `strings.findAll(text, pattern)`
+
+```typescript
+function strings.match(text: string, pattern: string): boolean | null;
+function strings.findAll(text: string, pattern: string): string[] | null;
+```
+
+- Parameters: `text` and `pattern` must be strings. `pattern` uses RE2 syntax: there are no backreferences or lookaround, matching takes linear time, and case-insensitive matching only folds ASCII letters.
+- Return: `match` reports whether `pattern` matches anywhere in `text`; anchor it with `^...$` to require the whole string. `findAll` returns the text of every non-overlapping match, in order; an empty match right after a previous match is skipped. A non-string argument or a pattern that does not compile returns `null`.
+- Exceptions: none; creating the `findAll` result may use the common abort behavior.
+- Side effects: none. Compiled patterns are cached per thread.
 
 ### 5.4 Binary functions
 
