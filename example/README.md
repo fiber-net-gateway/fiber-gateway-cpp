@@ -28,6 +28,8 @@ These examples usually have the following characteristics:
   A UDP echo example showing datagram send/receive flow.
 - `dns_dig.cpp`
   A DNS query example showing resolver usage, address resolution, and result handling.
+- `regex_crs_bench.cpp`
+  A `fiber::regex` benchmark on the OWASP CRS rules, comparing rule-by-rule matching with `RegexSet`.
 - `git_http_repo_server.cpp`
   A more complete HTTP server example showing more involved protocol handling and service logic.
 - `nacos_demo.cpp`

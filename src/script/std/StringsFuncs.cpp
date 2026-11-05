@@ -1,15 +1,20 @@
 #include "script/std/StringsFuncs.h"
 
+#include "script/std/RegexCache.h"
+
 #include <fiber/script/std/StdLibrary.h>
 
 #include <fiber/script/std/NodeText.h>
 
 #include <fiber/common/json/Utf.h>
+#include <fiber/regex/Regex.h>
+#include <fiber/regex/Scratch.h>
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
 #include <fiber/script/gc/GcInternal.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -22,10 +27,6 @@
 namespace fiber::script::std_lib {
 
 namespace {
-
-// NOTE: strings.match and strings.findAll (regex) are deliberately absent. They
-// depend on a regex-engine decision that is still open; add them alongside a
-// regex implementation when that choice is made.
 
 JsValue empty_string() noexcept { return JsValue::make_native_string("", 0); }
 
@@ -439,6 +440,76 @@ AbiResult split_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Lib
     return AbiResult::success(*arr);
 }
 
+// ---- strings.match(text, pattern) ----
+
+AbiResult match_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
+    std::string_view text;
+    std::string_view pattern;
+    if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
+        !string_utf8_view(args.args[1], pattern)) {
+        return AbiResult::success(JsValue::make_null());
+    }
+    const regex::Regex *compiled = cached_regex(pattern);
+    if (compiled == nullptr) {
+        return AbiResult::success(JsValue::make_null());
+    }
+    return AbiResult::success(
+            JsValue::make_boolean(compiled->test(text, regex_scratch()) == regex::MatchStatus::Match));
+}
+
+// ---- strings.findAll(text, pattern) ----
+
+AbiResult find_all_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+    std::string_view text;
+    std::string_view pattern;
+    if (!args.args || args.argc < 2 || !string_utf8_view(args.args[0], text) ||
+        !string_utf8_view(args.args[1], pattern)) {
+        return AbiResult::success(JsValue::make_null());
+    }
+    const regex::Regex *compiled = cached_regex(pattern);
+    if (compiled == nullptr) {
+        return AbiResult::success(JsValue::make_null());
+    }
+
+    GcHeap *heap = &frame.runtime;
+    GcHeap::LocalMark mark(*heap);
+    ValueHandle arr = heap->local_value();
+    if (!arr) {
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
+    }
+    *arr = JsValue::make_array(*heap, 0);
+    if (js_value_type(*arr) != JsNodeType::Array) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+
+    regex::Scratch &scratch = regex_scratch();
+    std::array<regex::Span, 1> match;
+    std::size_t pos = 0;
+    std::size_t last_end = regex::Span::npos;
+    while (pos <= text.size() && compiled->find(text, pos, match, scratch) == regex::MatchStatus::Match) {
+        const std::size_t begin = match[0].begin;
+        const std::size_t end = match[0].end;
+        // An empty match right after the previous match does not count.
+        if (end != begin || begin != last_end) {
+            JsValue item =
+                    begin == end ? empty_string() : JsValue::make_string(*heap, text.data() + begin, end - begin);
+            if (js_value_type(item) != JsNodeType::String || !gc_array_push(heap, arr, item)) {
+                return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+            }
+        }
+        last_end = end;
+        pos = end;
+        if (begin == end) {
+            // Step over one code point, so an empty match cannot repeat.
+            std::uint32_t cp = 0;
+            if (pos == text.size() || !fiber::json::utf8_next_codepoint(text.data(), text.size(), pos, cp)) {
+                break;
+            }
+        }
+    }
+    return AbiResult::success(*arr);
+}
+
 // ---- strings.contains(text, value) ----
 
 AbiResult contains_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
@@ -684,7 +755,12 @@ void register_strings_funcs(StdLibrary &lib) {
     lib.register_func("strings.split",
                       Library::FunctionSignature{.required_argc = 1, .fixed_argc = 2, .variadic = false},
                       {JsValue::make_null()}, &split_fn, nullptr, "strings.split");
-    // strings.findAll / strings.match: deferred (regex engine TBD).
+    lib.register_func("strings.match",
+                      Library::FunctionSignature{.required_argc = 2, .fixed_argc = 2, .variadic = false}, &match_fn,
+                      nullptr, "strings.match");
+    lib.register_func("strings.findAll",
+                      Library::FunctionSignature{.required_argc = 2, .fixed_argc = 2, .variadic = false}, &find_all_fn,
+                      nullptr, "strings.findAll");
     lib.register_func("strings.contains",
                       Library::FunctionSignature{.required_argc = 2, .fixed_argc = 2, .variadic = false}, &contains_fn,
                       nullptr, "strings.contains");

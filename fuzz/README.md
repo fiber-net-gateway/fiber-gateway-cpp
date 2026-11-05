@@ -1,7 +1,7 @@
-# TLS and QUIC fuzzing
+# TLS, QUIC and regex fuzzing
 
-libFuzzer harnesses for the in-tree TLS stack (`src/tls/`) and QUIC transport
-(`src/quic/`), built with ASan + UBSan. Off by default; a fuzz build is its
+libFuzzer harnesses for the in-tree TLS stack (`src/tls/`), QUIC transport
+(`src/quic/`) and regex engine (`src/regex/`), built with ASan + UBSan. Off by default; a fuzz build is its
 own build tree.
 
 ## TLS
@@ -27,6 +27,14 @@ own build tree.
 The stateful QUIC harnesses narrate each record with `QUIC_FUZZ_TRACE=1`
 (for checking seeds and triage). A connection that stays charged against the
 endpoint's receive-storage budget after teardown is reported as a crash.
+
+## Regex
+
+| Harness | Input | Reaches |
+|---|---|---|
+| `regex_parse_fuzzer` | `[options][pattern] FF 00 [text]` | the parser, simplifier and compiler on arbitrary patterns, and then a search with whatever the dispatcher picks |
+| `regex_engines_fuzzer` | `[options][pattern] FF 00 [text]` | one search through **every engine**, aborting if any two disagree: Pike VM, BitState, OnePass and the DFA, the last also with a memory budget too small to cache anything |
+| `regex_stream_fuzzer` | `[options][cut seed][patterns, FF 01 separated] FF 00 [text]` | a `RegexSet` against its patterns taken one at a time, and a `Scanner` fed random chunks while a second stream resets the shared DFA cache |
 
 The input layouts (control bits, record encoding) are documented at the top
 of each harness.
