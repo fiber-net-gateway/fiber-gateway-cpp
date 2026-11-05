@@ -1951,11 +1951,17 @@ bool wait_drained(int fd) {
 // Heap bytes in use as glibc's allocator sees them; 0 elsewhere (the test
 // that relies on it skips then).
 std::size_t heap_in_use() {
-#if defined(__GLIBC__)
+#if !defined(__GLIBC__) || !defined(__GLIBC_PREREQ)
+    return 0;
+#elif __GLIBC_PREREQ(2, 33)
     const struct mallinfo2 info = ::mallinfo2();
     return info.uordblks + info.hblkhd;
 #else
-    return 0;
+    // Pre-2.33 glibc has no mallinfo2; mallinfo reports the same counters
+    // with 32-bit int fields, which only wrap past 2 GiB in use — far beyond
+    // the deltas this test inspects.
+    const struct mallinfo info = ::mallinfo();
+    return static_cast<std::size_t>(info.uordblks) + static_cast<std::size_t>(info.hblkhd);
 #endif
 }
 
@@ -1977,7 +1983,7 @@ TEST(TlsStreamFdTest, TrickledHandshakeRecordStaysInOneWireBuffer) {
         const fiber::mem::IoBuf probe = fiber::mem::IoBuf::allocate(kProbe);
         ASSERT_TRUE(probe.valid());
         if (heap_in_use() < before + kProbe) {
-            GTEST_SKIP() << "the allocator in use is invisible to glibc's mallinfo2";
+            GTEST_SKIP() << "the allocator in use is invisible to glibc's mallinfo";
         }
     }
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
