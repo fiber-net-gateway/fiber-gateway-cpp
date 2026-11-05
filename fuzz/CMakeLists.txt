@@ -13,6 +13,9 @@ set(FIBER_FUZZERS
     quic_endpoint_fuzzer
     quic_client_fuzzer
     quic_network_fuzzer
+    regex_parse_fuzzer
+    regex_engines_fuzzer
+    regex_stream_fuzzer
 )
 
 foreach(fuzzer IN LISTS FIBER_FUZZERS)

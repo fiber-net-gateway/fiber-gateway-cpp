@@ -10,6 +10,7 @@
 #include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/std/StdLibrary.h>
 #include "ScriptTestHelpers.h"
+#include "script/std/RegexCache.h"
 
 using fiber::script::AbiResult;
 using fiber::script::GcHeap;
@@ -120,6 +121,74 @@ TEST(StringsFuncsTest, Split) {
     expect_script_bool(R"(let arr = strings.split("abcecdf", "c"); )"
                        R"(return length(arr) === 3 && arr[0] === "ab" && arr[1] === "e" && arr[2] === "df";)",
                        true);
+}
+
+TEST(StringsFuncsTest, Match) {
+    expect_script_bool(R"js(return strings.match("aaabbbbccc", "a+b+c+");)js", true);
+    // A partial match is enough; anchors ask for the whole string.
+    expect_script_bool(R"js(return strings.match("xxabcxx", "abc");)js", true);
+    expect_script_bool(R"js(return strings.match("xxabcxx", "^abc$");)js", false);
+    expect_script_bool(R"js(return strings.match("abc", "^abc$");)js", true);
+    expect_script_bool(R"js(return strings.match("ABC", "(?i)abc");)js", true);
+    expect_script_bool(R"js(return strings.match("", "");)js", true);
+}
+
+TEST(StringsFuncsTest, MatchSoftFailures) {
+    expect_script_null(R"js(return strings.match(1, "a");)js");
+    expect_script_null(R"js(return strings.match("a", 1);)js");
+    expect_script_null(R"js(return strings.match("a", "(");)js");
+    expect_script_null(R"js(return strings.match("aa", "(a)\\1");)js"); // no backreferences
+    expect_script_null(R"js(return strings.match("a", "(?=a)");)js");
+}
+
+TEST(StringsFuncsTest, MatchIsUnicodeAware) {
+    expect_script_bool(R"js(return strings.match("é", "^.$");)js", true);
+    expect_script_bool(R"js(return strings.match("😀", "^.$");)js", true);
+}
+
+TEST(StringsFuncsTest, FindAll) {
+    expect_script_bool(R"js(let a = strings.findAll("aa b aaa", "a+");
+                            return length(a) === 2 && a[0] === "aa" && a[1] === "aaa";)js",
+                       true);
+    expect_script_bool(R"js(let a = strings.findAll("id=1, id=22", "[0-9]+");
+                            return length(a) === 2 && a[0] === "1" && a[1] === "22";)js",
+                       true);
+    expect_script_bool(R"js(return length(strings.findAll("abc", "x")) === 0;)js", true);
+}
+
+TEST(StringsFuncsTest, FindAllEmptyMatches) {
+    // As in Go: an empty match right after a match does not count.
+    expect_script_bool(R"js(let a = strings.findAll("baaab", "a*");
+                            return length(a) === 3 && a[0] === "" && a[1] === "aaa" && a[2] === "";)js",
+                       true);
+    expect_script_bool(R"js(return length(strings.findAll("ab", "x*")) === 3;)js", true);
+    expect_script_bool(R"js(return length(strings.findAll("", "x*")) === 1;)js", true);
+    // Stepping over an empty match moves by a code point, not a byte.
+    expect_script_bool(R"js(return length(strings.findAll("éé", "")) === 3;)js", true);
+}
+
+TEST(StringsFuncsTest, FindAllSoftFailures) {
+    expect_script_null(R"js(return strings.findAll(1, "a");)js");
+    expect_script_null(R"js(return strings.findAll("a", 1);)js");
+    expect_script_null(R"js(return strings.findAll("a", "(");)js");
+}
+
+TEST(StringsFuncsTest, RegexCacheEvictsOldPatterns) {
+    using fiber::script::std_lib::cached_regex;
+    const fiber::regex::Regex *first = cached_regex("cache-first");
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(cached_regex("cache-first"), first); // a hit returns the same entry
+
+    // Invalid patterns are cached as well.
+    EXPECT_EQ(cached_regex("cache-(invalid"), nullptr);
+    EXPECT_EQ(cached_regex("cache-(invalid"), nullptr);
+
+    for (int i = 0; i < 300; ++i) {
+        ASSERT_NE(cached_regex("cache-" + std::to_string(i)), nullptr);
+    }
+    const fiber::regex::Regex *again = cached_regex("cache-first");
+    ASSERT_NE(again, nullptr);
+    EXPECT_EQ(again->test("cache-first", fiber::script::std_lib::regex_scratch()), fiber::regex::MatchStatus::Match);
 }
 
 TEST(StringsFuncsTest, Contains) {
