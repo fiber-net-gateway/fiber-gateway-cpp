@@ -265,7 +265,10 @@ Generator::Result Generator::binary(const std::uint8_t *data, size_t len) {
     if (result != Result::OK) {
         return result;
     }
-    std::string encoded = fiber::util::base64_encode(data, len);
+    std::string encoded(fiber::util::base64_encoded_size(len), '\0');
+    if (len > 0) {
+        fiber::util::base64_encode_into(data, len, encoded.data());
+    }
     result = write_string(encoded.data(), encoded.size());
     if (result != Result::OK) {
         return result;

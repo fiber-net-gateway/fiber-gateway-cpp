@@ -5,6 +5,7 @@
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
 #include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/std/OomGuard.h>
 
 #include <charconv>
 #include <cmath>
@@ -91,25 +92,28 @@ const GcArray *as_array(ConstValueHandle handle) noexcept {
 }
 
 AbiResult array_join_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
-    const GcArray *arr = as_array(args.args);
-    if (arr == nullptr) {
-        return type_error();
-    }
-
-    std::string delimiter;
-    if (args.argc >= 2) {
-        append_as_text(args.args[1], delimiter);
-    }
-
-    std::string out;
-    for (std::size_t i = 0; i < arr->size; ++i) {
-        if (i > 0) {
-            out.append(delimiter);
+    // Staging strings throw on OOM; the guard maps it to a graceful abort.
+    return oom_guard([&] {
+        const GcArray *arr = as_array(args.args);
+        if (arr == nullptr) {
+            return type_error();
         }
-        append_as_text(arr->elems[i], out);
-    }
-    JsValue result = JsValue::make_string(frame.runtime, out.data(), out.size());
-    return AbiResult::success(result);
+
+        std::string delimiter;
+        if (args.argc >= 2) {
+            append_as_text(args.args[1], delimiter);
+        }
+
+        std::string out;
+        for (std::size_t i = 0; i < arr->size; ++i) {
+            if (i > 0) {
+                out.append(delimiter);
+            }
+            append_as_text(arr->elems[i], out);
+        }
+        JsValue result = JsValue::make_string(frame.runtime, out.data(), out.size());
+        return AbiResult::success(result);
+    });
 }
 
 AbiResult array_pop_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/,

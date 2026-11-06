@@ -165,6 +165,7 @@ GcStringUtf8Result gc_string_to_utf8(const GcString *str, GcStringUtf8Cursor &cu
                                      GcStringUtf8Boundary boundary) noexcept;
 bool gc_string_to_utf8(const GcString *str, std::string &out);
 GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len);
+GcBinary *gc_new_binary_uninit(GcHeap *heap, std::size_t len) noexcept;
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity);
 bool gc_array_reserve(GcHeap *heap, GcArray *arr, std::size_t expected);
 const JsValue *gc_array_get(const GcArray *arr, std::size_t index);

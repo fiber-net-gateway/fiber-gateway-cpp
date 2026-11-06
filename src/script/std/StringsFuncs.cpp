@@ -12,6 +12,7 @@
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
 #include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/std/OomGuard.h>
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -214,35 +216,91 @@ AbiResult has_suffix_fn(void * /*userdata*/, const Library::HostCallFrame & /*fr
     return AbiResult::success(JsValue::make_boolean(text.ends_with(suffix)));
 }
 
+// UTF-16 unit count and well-formedness of a String value without a re-scan:
+// heap strings carry both in their header (free); borrowed natives are
+// tokenizer literals, counted with one utf8_scan pass. Returns false only for
+// a borrowed literal that is not valid UTF-8 (unreachable in practice; callers
+// map it to the same abort the old staging path produced inside make_string).
+bool string_utf16_meta(const JsValue &value, std::size_t &utf16_len, bool &well_formed) noexcept {
+    if (js_value_is_borrowed_string(value)) {
+        const NativeStr native = js_value_native_string(value);
+        fiber::json::Utf8ScanResult scan;
+        if (!fiber::json::utf8_scan(native.data, native.len, scan)) {
+            return false;
+        }
+        utf16_len = scan.utf16_len;
+        well_formed = true;
+        return true;
+    }
+    const GcString *str = js_value_heap_ptr<const GcString>(value);
+    if (str == nullptr) {
+        return false;
+    }
+    utf16_len = str->utf16_len;
+    well_formed = gc_string_is_well_formed(str);
+    return true;
+}
+
 // ---- strings.toLower(text) / strings.toUpper(text) ----
 // ASCII fast path only: A-Z<->a-z are flipped, all other bytes (including
 // multi-byte UTF-8 sequences) are copied verbatim, preserving UTF-8 structure.
 // Non-ASCII case mapping diverges from Java's locale-aware toLowerCase/UpperCase.
+//
+// Huffman-style two-phase like binary.base64Encode: the flip is byte- and
+// UTF-16-length preserving, so the output reuses the input's utf16_len /
+// well_formed metadata (string_utf16_meta) and one GC allocation is filled in
+// place. No throwing std::string staging.
 
-AbiResult to_lower_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+AbiResult ascii_case_flip(const Library::HostCallFrame &frame, const JsValue &value, bool lower) noexcept {
     std::string_view text;
-    if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
+    if (!string_utf8_view(value, text)) {
         return AbiResult::success(JsValue::make_null());
     }
-    std::string out;
-    out.reserve(text.size());
-    for (unsigned char b: text) {
-        out.push_back((b >= 'A' && b <= 'Z') ? static_cast<char>(b + 32) : static_cast<char>(b));
+    if (text.empty()) {
+        return AbiResult::success(empty_string());
     }
-    return make_string_result(&frame.runtime, std::string_view(out));
+    std::size_t utf16_len = 0;
+    bool well_formed = true;
+    if (!string_utf16_meta(value, utf16_len, well_formed)) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    GcHeap &heap = frame.runtime;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    GcHeap::NoGcScope no_gc(heap);
+    GcString *str = gc_new_string_wtf8_uninit(&heap, text.size(), utf16_len, well_formed);
+    if (!str) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    char *dst = gc_string_wtf8_data(str);
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const unsigned char b = static_cast<unsigned char>(text[i]);
+        if (lower) {
+            dst[i] = (b >= 'A' && b <= 'Z') ? static_cast<char>(b + 32) : static_cast<char>(b);
+        } else {
+            dst[i] = (b >= 'a' && b <= 'z') ? static_cast<char>(b - 32) : static_cast<char>(b);
+        }
+    }
+    GcString *interned = gc_detail::gc_string_intern_final(&heap, str);
+    *out = js_make_heap_ref(&interned->hdr, GcHeapKind::String);
+    return AbiResult::success(*out);
+}
+
+AbiResult to_lower_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+    if (!args.args || args.argc < 1) {
+        return AbiResult::success(JsValue::make_null());
+    }
+    return ascii_case_flip(frame, args.args[0], true);
 }
 
 AbiResult to_upper_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
-    std::string_view text;
-    if (!args.args || args.argc < 1 || !string_utf8_view(args.args[0], text)) {
+    if (!args.args || args.argc < 1) {
         return AbiResult::success(JsValue::make_null());
     }
-    std::string out;
-    out.reserve(text.size());
-    for (unsigned char b: text) {
-        out.push_back((b >= 'a' && b <= 'z') ? static_cast<char>(b - 32) : static_cast<char>(b));
-    }
-    return make_string_result(&frame.runtime, std::string_view(out));
+    return ascii_case_flip(frame, args.args[0], false);
 }
 
 // ---- strings.trim(text, cutset=null) ----
@@ -664,12 +722,36 @@ AbiResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Li
     if (static_cast<std::uint64_t>(i) * len > kMaxRepeatBytes) {
         return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    std::string out;
-    out.reserve(static_cast<std::size_t>(i) * len);
-    for (std::int32_t j = 0; j < i; ++j) {
-        out.append(text);
+    // Two-phase like ascii_case_flip: repeating preserves UTF-16 unit count
+    // per copy, so the output is i * the input's metadata; fill by memcpy
+    // doubling instead of i separate appends.
+    std::size_t unit_len = 0;
+    bool well_formed = true;
+    if (!string_utf16_meta(args.args[0], unit_len, well_formed)) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    return make_string_result(&frame.runtime, std::string_view(out));
+    GcHeap &heap = frame.runtime;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    GcHeap::NoGcScope no_gc(heap);
+    const std::size_t total = static_cast<std::size_t>(i) * len;
+    GcString *str = gc_new_string_wtf8_uninit(&heap, total, unit_len * static_cast<std::size_t>(i), well_formed);
+    if (!str) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    char *dst = gc_string_wtf8_data(str);
+    std::memcpy(dst, text.data(), len);
+    for (std::size_t filled = len; filled < total;) {
+        const std::size_t chunk = std::min(filled, total - filled);
+        std::memcpy(dst + filled, dst, chunk);
+        filled += chunk;
+    }
+    GcString *interned = gc_detail::gc_string_intern_final(&heap, str);
+    *out = js_make_heap_ref(&interned->hdr, GcHeapKind::String);
+    return AbiResult::success(*out);
 }
 
 // ---- strings.substring(text, start=0, end=2147483647) ----
@@ -715,17 +797,20 @@ AbiResult to_string0_fn(void * /*userdata*/, const Library::HostCallFrame & /*fr
 // Binary -> raw bytes, scalars -> asText).
 
 AbiResult to_string1_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
-    if (!args.args || args.argc < 1) {
-        return AbiResult::success(empty_string());
-    }
-    const JsValue &v = args.args[0];
-    JsNodeType t = js_value_type(v);
-    if (t == JsNodeType::Null || t == JsNodeType::Undefined) {
-        return make_string_result(&frame.runtime, std::string_view("null", 4));
-    }
-    std::string out;
-    node_json_to_string(v, out);
-    return make_string_result(&frame.runtime, std::string_view(out));
+    // Staging string throws on OOM; the guard maps it to a graceful abort.
+    return oom_guard([&] {
+        if (!args.args || args.argc < 1) {
+            return AbiResult::success(empty_string());
+        }
+        const JsValue &v = args.args[0];
+        JsNodeType t = js_value_type(v);
+        if (t == JsNodeType::Null || t == JsNodeType::Undefined) {
+            return make_string_result(&frame.runtime, std::string_view("null", 4));
+        }
+        std::string out;
+        node_json_to_string(v, out);
+        return make_string_result(&frame.runtime, std::string_view(out));
+    });
 }
 
 } // namespace
