@@ -172,7 +172,7 @@ Design state and member variables to be minimal and explicit. Establish required
 ### Linting (clang-tidy)
 
 - Check set and the rationale for every disable live in `.clang-tidy` and `feature/clang-tidy-rollout.md`; do not remove a disable without re-running the baseline documented there
-- Selecting any header (including explicit files/directories and deleted headers) checks all project translation units available in the selected compile database to cover direct and indirect includes; use `-p build-fuzz` separately for fuzz consumers
+- Selecting a header checks the project translation units that transitively include it, computed from the build tree's `.o.d` dependency records (a TU can only gain findings through headers it includes); TUs without a record are still checked, and without usable records every project TU is — so build the tree before relying on the closure. use `-p build-fuzz` separately for fuzz consumers
 - All project code (`src/`, `include/`, `example/`, `apps/`, `tests/`, `fuzz/`) is at zero warnings and enforced via `WarningsAsErrors: '*'` (rollout history in `feature/clang-tidy-rollout.md`; `fuzz/` TUs only exist in a `build-fuzz` db)
 - After a `-f` auto-fix run, rebuild and scan for autofix damage before trusting tests (clang-tidy 20 fix patterns; checklist in `feature/clang-tidy-rollout.md` §7)
 - `NOLINT` sparingly and always with a trailing reason comment
