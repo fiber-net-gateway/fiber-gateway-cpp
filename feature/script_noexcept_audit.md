@@ -204,7 +204,20 @@ AbiResult oom_guard(Body &&body) noexcept {
 
 ## 6. 范围外关联项（不在本审计修，记录在案）
 
-- `http_script/ScriptExchangeCtx.cpp:30` 同款 `StringSink`（`write_json` 路径）——同病，待 script 层方案定稿后跟进
+- `http_script/ScriptExchangeCtx.cpp` 同款 `StringSink`（`write_json`/`write_error_json` 路径）——**已修
+  （2026-11-06，用户定谳 IoBufChain 方案取代 try/catch 兜底）**：StringSink 删除，新增 ChainSink
+  （JSON 生成器直写 IoBufChain 传输缓冲，节点容量 16KiB−控制块命中节点池，`write()==false` 即
+  OutputSink 既有 OOM 通道，sink 自持 `oom_` 标志区分 Generator 的 ErrorState）；`send_final_with_body`
+  加 chain 重载（`mark_complete()` 即链路径 end 标记，HttpExchange::write_all 读取）；OOM→`IoErr::NoMem`
+  、值形编码错保持 `Invalid`；省一次全响应体暂存拷贝。回归测试 ×2（>16KiB 单大 token / 2100 小 token
+  渐进填充跨节点，逐字节对拍）。2886 全绿。
+- **http_script 既有项新发现（2026-11-06，首次把 checker 扫到 src/http_script，14 处，全部先于本次
+  改动存在，待逐项讨论）**：`HttpClientFuncs.cpp:312` 第三个 StringSink 孪生（http 客户端请求体
+  JSON 编码，`build_request_body`）+ 同文件 `object_pairs_to_form`/`apply_options_headers` ×2/
+  `url_field_error`；`ResponseFuncs.cpp` `set_header_fn`/`add_header_fn`/`add_cookie_fn`；
+  `ScriptExchangeCtx.cpp` `query`/`resolve_from_request`（query decode 的 std::string 拷贝）；
+  `HttpTarget.cpp:83` `parse`；`CookieCodec.h:48` `decode_cookie_header` 模板（经 ScriptExchangeCtx
+  两处 lambda 实例化报出）
 - `HttpWebSocketProxy.cpp` `build_expected_websocket_accept`（:42）与
   `prepare_websocket_handshake`（:132）noexcept 但 `std::string::resize` 抛式
   （迁移 base64 时发现）——**已修（2026-11-06，随审计收尾追加）**：两产物均
