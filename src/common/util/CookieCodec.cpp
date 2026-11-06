@@ -1,5 +1,7 @@
 #include <fiber/common/util/CookieCodec.h>
 
+#include <cstring>
+
 namespace fiber::util {
 
 namespace {
@@ -65,28 +67,6 @@ bool valid_name(std::string_view name) noexcept {
     return true;
 }
 
-void append_value(std::string &out, std::string_view value) {
-    bool quote = false;
-    for (char c: value) {
-        if (needs_quoting(static_cast<unsigned char>(c))) {
-            quote = true;
-            break;
-        }
-    }
-    if (!quote) {
-        out.append(value.data(), value.size());
-        return;
-    }
-    out.push_back('"');
-    for (char c: value) {
-        if (c == '"' || c == '\\') {
-            out.push_back('\\');
-        }
-        out.push_back(c);
-    }
-    out.push_back('"');
-}
-
 const char *same_site_text(CookieSameSite s) noexcept {
     switch (s) {
         case CookieSameSite::None:
@@ -103,25 +83,54 @@ const char *same_site_text(CookieSameSite s) noexcept {
 
 } // namespace
 
-bool encode_set_cookie(const Cookie &cookie, std::string &out) {
+namespace detail {
+
+std::size_t cookie_encode(const Cookie &cookie, char *out) noexcept {
     if (!valid_name(cookie.name)) {
-        return false;
+        return 0;
     }
-    out.clear();
-    out.append(cookie.name.data(), cookie.name.size());
-    out.push_back('=');
-    append_value(out, cookie.value);
+    std::size_t n = 0;
+    // Skips the copy while sizing (out == nullptr), so one walk serves both passes.
+    const auto put = [&](std::string_view s) noexcept {
+        if (out != nullptr && !s.empty()) {
+            std::memcpy(out + n, s.data(), s.size());
+        }
+        n += s.size();
+    };
+
+    put(cookie.name);
+    put("=");
+
+    bool quote = false;
+    for (char c: cookie.value) {
+        if (needs_quoting(static_cast<unsigned char>(c))) {
+            quote = true;
+            break;
+        }
+    }
+    if (!quote) {
+        put(cookie.value);
+    } else {
+        put("\"");
+        for (char c: cookie.value) {
+            if (c == '"' || c == '\\') {
+                put("\\");
+            }
+            put(std::string_view{&c, 1});
+        }
+        put("\"");
+    }
 
     if (!cookie.domain.empty()) {
-        out.append("; Domain=");
-        out.append(cookie.domain.data(), cookie.domain.size());
+        put("; Domain=");
+        put(cookie.domain);
     }
     if (!cookie.path.empty()) {
-        out.append("; Path=");
-        out.append(cookie.path.data(), cookie.path.size());
+        put("; Path=");
+        put(cookie.path);
     }
     if (cookie.max_age >= 0) {
-        out.append("; Max-Age=");
+        put("; Max-Age=");
         char buf[24];
         char *p = buf + sizeof(buf);
         std::uint64_t v = static_cast<std::uint64_t>(cookie.max_age);
@@ -133,19 +142,21 @@ bool encode_set_cookie(const Cookie &cookie, std::string &out) {
                 v /= 10;
             }
         }
-        out.append(p, static_cast<std::size_t>(buf + sizeof(buf) - p));
+        put(std::string_view{p, static_cast<std::size_t>(buf + sizeof(buf) - p)});
     }
     if (cookie.secure) {
-        out.append("; Secure");
+        put("; Secure");
     }
     if (cookie.http_only) {
-        out.append("; HttpOnly");
+        put("; HttpOnly");
     }
     if (const char *ss = same_site_text(cookie.same_site)) {
-        out.append("; SameSite=");
-        out.append(ss);
+        put("; SameSite=");
+        put(ss);
     }
-    return true;
+    return n;
 }
+
+} // namespace detail
 
 } // namespace fiber::util

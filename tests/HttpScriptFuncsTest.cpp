@@ -485,6 +485,32 @@ TEST(HttpScriptFuncsTest, SetHeadersAndAddCookieAndSend) {
     s.stop();
 }
 
+TEST(HttpScriptFuncsTest, AddCookieOversizeValueRejected) {
+    // Set-Cookie encoding lands in a fixed 4096-byte stack buffer; a cookie whose encoded
+    // form exceeds it (here: a >4KB value) is refused — addCookie returns false and no
+    // Set-Cookie header is emitted.
+    const std::string big(5000, 'A');
+    ServerFixture s;
+    auto script = compile_http_script(std::string(R"(var ok = resp.addCookie({name: "big", value: ")") + big +
+                                      R"("});resp.send(200, ok ? "yes" : "no");)");
+    ASSERT_NE(script, nullptr);
+    s.start(make_script_handler(script));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/big-cookie";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_EQ(result.body, "no");
+    for (const auto &[name, value]: result.response_headers) {
+        EXPECT_NE(name, "set-cookie") << value;
+    }
+
+    s.stop();
+}
+
 // ---- Route-variable ($path/$query/$header/$cookie/$req/$conn) tests ----
 
 TEST(RouteVarTest, PathVarCompileTimeExistence) {
