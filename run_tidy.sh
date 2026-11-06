@@ -10,8 +10,11 @@ set -euo pipefail
 #
 # Only translation units (.cpp/.cc/.cxx) are passed to clang-tidy — with -p a
 # header argument cannot be resolved to a compile command. Headers are checked
-# via TUs. Without a complete dependency graph, selecting any header checks
-# all project TUs in the selected database, including indirect consumers.
+# via TUs. Selecting any header checks the project TUs that transitively
+# include it, computed from the build tree's .o.d dependency records (a TU's
+# findings depend only on its own text and the headers it includes, so the
+# closure is sufficient). TUs without a dependency record are kept
+# conservatively; with no usable records at all, all project TUs are checked.
 
 # CLANG_TIDY in the environment (a command or a path) skips detection.
 REQUESTED_TIDY="${CLANG_TIDY:-}"
@@ -67,7 +70,9 @@ Usage: ./run_tidy.sh [-a] [-f] [-p build-dir] [-j jobs] [file or dir ...]
 Checks changed project translation units with clang-tidy (mirrors format_code.sh).
 Positional files/dirs replace the changed-file selection. Selecting any header
 (changed, untracked, deleted, or explicit, including within a directory) checks
-all project translation units available in the selected compile database.
+the project translation units that transitively include it, from the build
+tree's .o.d dependency records (all project TUs when no records are usable).
+Build the tree so the records cover its TUs.
 
 Options:
   -a         Check all tracked project translation units (src, apps, tests,
@@ -270,6 +275,8 @@ fi
 
 declare -A seen=()
 files=()
+headers=()
+project_tus=()
 
 is_tu() {
     case "$1" in
@@ -302,9 +309,85 @@ select_file() {
         return
     fi
     case "$1" in
-        *.h|*.hh|*.hpp|*.hxx) HEADER_SELECTED=1 ;;
+        *.h|*.hh|*.hpp|*.hxx)
+            HEADER_SELECTED=1
+            headers+=("$1")
+            ;;
         *) add_tu "$1" ;;
     esac
+}
+
+# For a header selection: add the project TUs whose recorded .o.d dependencies
+# mention any selected header (the transitive include closure — a TU can only
+# gain findings through headers it includes), plus project TUs with no record
+# (not built in this tree; cannot be ruled out). Returns 1 when nothing usable
+# was recorded, so the caller can fall back to checking every project TU.
+expand_header_closure() {
+    if [[ -z "${DB}" ]]; then
+        return 1
+    fi
+    local deps_dir
+    deps_dir="$(dirname "${DB}")"
+
+    local -a dep_files=()
+    local path
+    while IFS= read -r -d '' path; do
+        dep_files+=("${path}")
+    done < <(find "${deps_dir}" -name '*.o.d' -print0 2>/dev/null)
+    if (( ${#dep_files[@]} == 0 )); then
+        return 1
+    fi
+
+    local -a header_paths=()
+    local header
+    for header in "${headers[@]}"; do
+        header_paths+=("$(realpath -m "${header}")")
+    done
+
+    # Dep lists are absolute paths one per line ("path \\"), so fixed-string
+    # path matching is sound up to pathological names ("Foo.h.old"); a stray
+    # match only over-includes a TU, the safe direction.
+    local patterns
+    patterns="$(mktemp)"
+    printf '%s\n' "${header_paths[@]}" >"${patterns}"
+    local -A hit_files=()
+    local file
+    while IFS= read -r file; do
+        hit_files["${file}"]=1
+    done < <(grep -lF -f "${patterns}" "${dep_files[@]}" 2>/dev/null)
+    rm -f "${patterns}"
+
+    # The first dependency of a record is the TU it was compiled from.
+    local -A recorded=()
+    local -A in_closure=()
+    local dep_file tu
+    for dep_file in "${dep_files[@]}"; do
+        tu="$(sed -n '2{s/^ *//; s/ *\\$//; s/ *$//; p}' "${dep_file}")"
+        [[ -n "${tu}" ]] || continue
+        recorded["${tu}"]=1
+        if [[ -n "${hit_files[${dep_file}]+x}" ]]; then
+            in_closure["${tu}"]=1
+        fi
+    done
+
+    local closure=0 missing=0 skipped=0
+    for path in "${project_tus[@]}"; do
+        if [[ -n "${in_closure[${path}]+x}" ]]; then
+            add_tu "${path}"
+            closure=$((closure + 1))
+        elif [[ -z "${recorded[${path}]+x}" ]]; then
+            add_tu "${path}" # no dep record — cannot rule the TU out
+            missing=$((missing + 1))
+        else
+            skipped=$((skipped + 1))
+        fi
+    done
+
+    if (( ${#in_closure[@]} == 0 )); then
+        return 1 # nothing includes the selection (brand-new header?) or path drift; go wide
+    fi
+    echo "run_tidy.sh: header selected — checking ${closure} TU(s) in its include closure from ${deps_dir} .o.d records (${skipped} outside the closure skipped, ${missing} without records kept)" >&2
+    return 0
 }
 
 if (( $# > 0 )); then
@@ -344,17 +427,19 @@ if (( $# == 0 && CHECK_ALL == 0 )); then
     done < <( { git diff --name-only -z --diff-filter=ACDMRT HEAD -- "${HDR_PATHS[@]}"; git ls-files --others --exclude-standard -z -- "${HDR_PATHS[@]}"; } )
 fi
 
-if (( HEADER_SELECTED == 1 || (CHECK_ALL == 1 && $# == 0) )); then
-    if (( HEADER_SELECTED == 1 )); then
-        echo "run_tidy.sh: header selected — checking all project translation units in the selected compile db (including indirect consumers)" >&2
-    fi
+if (( CHECK_ALL == 1 && $# == 0 )); then
     while IFS= read -r -d '' path; do
         add_tu "${REPO_ROOT}/${path}"
     done < <(git ls-files -z -- "${TU_PATHS[@]}")
-    if (( HEADER_SELECTED == 1 )); then
-        while IFS= read -r -d '' path; do
-            add_tu "${REPO_ROOT}/${path}"
-        done < <(git ls-files --others --exclude-standard -z -- "${TU_PATHS[@]}")
+elif (( HEADER_SELECTED == 1 )); then
+    while IFS= read -r -d '' path; do
+        project_tus+=("${REPO_ROOT}/${path}")
+    done < <( { git ls-files -z -- "${TU_PATHS[@]}"; git ls-files --others --exclude-standard -z -- "${TU_PATHS[@]}"; } )
+    if ! expand_header_closure; then
+        echo "run_tidy.sh: header selected — no usable .o.d dependency records; checking all project translation units (including indirect consumers)" >&2
+        for path in "${project_tus[@]}"; do
+            add_tu "${path}"
+        done
     fi
 fi
 
