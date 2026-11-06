@@ -49,7 +49,8 @@ bool build_expected_websocket_accept(std::string_view key, std::string &out) noe
         SHA1_Update(&ctx, kWebSocketGuid.data(), kWebSocketGuid.size()) != 1 || SHA1_Final(digest.data(), &ctx) != 1) {
         return false;
     }
-    out = fiber::util::base64_encode(digest.data(), digest.size());
+    out.resize(fiber::util::base64_encoded_size(digest.size()));
+    fiber::util::base64_encode_into(digest.data(), digest.size(), out.data());
     return out.size() == 28;
 }
 
@@ -136,7 +137,8 @@ bool prepare_websocket_handshake(WebSocketHandshake &handshake) noexcept {
     if (RAND_bytes(random.data(), random.size()) != 1) {
         return false;
     }
-    handshake.generated_key = fiber::util::base64_encode(random.data(), random.size());
+    handshake.generated_key.resize(fiber::util::base64_encoded_size(random.size()));
+    fiber::util::base64_encode_into(random.data(), random.size(), handshake.generated_key.data());
     return handshake.generated_key.size() == 24;
 }
 

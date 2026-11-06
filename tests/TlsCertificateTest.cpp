@@ -48,8 +48,11 @@ std::string pem_block_der(const char *pem) {
             b64.push_back(c);
         }
     }
-    std::string der;
-    EXPECT_TRUE(fiber::util::base64_decode(b64, der));
+    bool b64_ok = false;
+    const std::size_t der_len = fiber::util::base64_decoded_size(b64, b64_ok);
+    EXPECT_TRUE(b64_ok);
+    std::string der(der_len, '\0');
+    EXPECT_TRUE(der_len == 0 || fiber::util::base64_decode_into(b64, reinterpret_cast<std::uint8_t *>(der.data())));
     return der;
 }
 

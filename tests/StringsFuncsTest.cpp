@@ -102,6 +102,18 @@ TEST(StringsFuncsTest, ToUpper) {
     expect_script_string(R"(return strings.toUpper("abc");)", "ABC");
 }
 
+TEST(StringsFuncsTest, ToLowerToUpperPreserveUtf16Units) {
+    // Case flipping is ASCII-only (é/ö pass through verbatim); substring
+    // indexes by UTF-16 units, so a corrupted utf16_len on the flipped result
+    // (non-ASCII literal input takes the utf8_scan path) would mis-slice or
+    // throw.
+    expect_script_string(R"(return strings.substring(strings.toUpper("héllo"), 1, 2);)", "é");
+    expect_script_string(R"(return strings.substring(strings.toLower("HÉLLO"), 1, 2);)", "É");
+    // Runtime-concatenated heap string exercises the header-metadata path.
+    expect_script_string(R"(let s = "ö" + "aB"; return strings.toUpper(s);)", "öAB");
+    expect_script_string(R"(let s = "Ö" + "Ab"; return strings.toLower(s);)", "Öab");
+}
+
 TEST(StringsFuncsTest, Trim) {
     expect_script_bool(R"(return strings.trim(" \tabc \t ") === "abc";)", true);
     expect_script_bool(R"(return strings.trim("aaabc a", "a") === "bc ";)", true);
@@ -216,6 +228,15 @@ TEST(StringsFuncsTest, LastIndexAny) {
 }
 
 TEST(StringsFuncsTest, Repeat) { expect_script_bool(R"(return strings.repeat("acd", 3) === "acdacdacd";)", true); }
+
+TEST(StringsFuncsTest, RepeatPreservesUtf16Units) {
+    // Repeating a multi-byte pattern keeps UTF-16 unit counting exact;
+    // substring indexes by UTF-16 units, so a corrupted utf16_len on the
+    // repeated result would mis-slice or throw.
+    expect_script_string(R"(return strings.repeat("é", 3);)", "ééé");
+    expect_script_string(R"(return strings.substring(strings.repeat("aé", 2), 1, 3);)", "éa");
+    expect_script_string(R"(return strings.substring(strings.repeat("aé", 3), 4, 5);)", "a");
+}
 
 TEST(StringsFuncsTest, Substring) {
     expect_script_bool(R"(return strings.substring("0123456789", 3) === "3456789" )"

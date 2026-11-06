@@ -11,6 +11,7 @@
 #include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/json/JsValueDecode.h>
 #include <fiber/script/json/JsValueEncode.h>
+#include <fiber/script/std/OomGuard.h>
 
 #include <cmath>
 #include <cstddef>
@@ -24,11 +25,13 @@ namespace fiber::script::std_lib {
 namespace {
 
 // Writes generated JSON into a std::string buffer. Mirrors the StringSink used by
-// http_script/ScriptExchangeCtx and the JsValueEncode tests.
+// http_script/ScriptExchangeCtx and the JsValueEncode tests. Not noexcept: append
+// throws on OOM, and an inner noexcept boundary would terminate before the caller's
+// oom_guard can map it to an abort.
 class StringSink final : public fiber::json::OutputSink {
 public:
     explicit StringSink(std::string &out) noexcept : out_(out) {}
-    [[nodiscard]] bool write(const char *data, std::size_t len) noexcept override {
+    [[nodiscard]] bool write(const char *data, std::size_t len) override {
         out_.append(data, len);
         return true;
     }
@@ -108,31 +111,35 @@ AbiResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Lib
 // TypeError. OOM on the result string aborts.
 
 AbiResult stringify_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
-    GcHeap &heap = frame.runtime;
+    // Staging string throws on OOM (StringSink::write is deliberately not
+    // noexcept); the guard maps it to a graceful abort.
+    return oom_guard([&] {
+        GcHeap &heap = frame.runtime;
 
-    JsValue value = (args.args && args.argc >= 1) ? args.args[0] : JsValue::make_undefined();
-    JsNodeType type = js_value_type(value);
+        JsValue value = (args.args && args.argc >= 1) ? args.args[0] : JsValue::make_undefined();
+        JsNodeType type = js_value_type(value);
 
-    if (type == JsNodeType::Undefined) {
-        return AbiResult::success(JsValue::make_undefined());
-    }
-
-    if (type == JsNodeType::Float) {
-        double d = js_value_double(value);
-        if (std::isnan(d) || std::isinf(d)) {
-            // Matches JS JSON.stringify: NaN/Infinity serialize as "null".
-            return make_string_result(heap, std::string_view("null", 4));
+        if (type == JsNodeType::Undefined) {
+            return AbiResult::success(JsValue::make_undefined());
         }
-    }
 
-    std::string out;
-    StringSink sink(out);
-    fiber::json::Generator gen(sink);
-    fiber::json::Generator::Result result = fiber::script::json::encode_js_value(gen, value);
-    if (result != fiber::json::Generator::Result::OK) {
-        return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
-    }
-    return make_string_result(heap, std::string_view(out));
+        if (type == JsNodeType::Float) {
+            double d = js_value_double(value);
+            if (std::isnan(d) || std::isinf(d)) {
+                // Matches JS JSON.stringify: NaN/Infinity serialize as "null".
+                return make_string_result(heap, std::string_view("null", 4));
+            }
+        }
+
+        std::string out;
+        StringSink sink(out);
+        fiber::json::Generator gen(sink);
+        fiber::json::Generator::Result result = fiber::script::json::encode_js_value(gen, value);
+        if (result != fiber::json::Generator::Result::OK) {
+            return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
+        }
+        return make_string_result(heap, std::string_view(out));
+    });
 }
 
 } // namespace
