@@ -65,3 +65,29 @@ TEST(IpAddressTest, MulticastDetection) {
     auto v4_other = fiber::net::IpAddress::v4({10, 0, 0, 1});
     EXPECT_FALSE(v4_other.is_multicast());
 }
+
+TEST(IpAddressTest, ToStringViewMatchesToString) {
+    const std::array<fiber::net::IpAddress, 5> addresses = {
+            fiber::net::IpAddress::v4({192, 168, 0, 1}),
+            fiber::net::IpAddress::v4({255, 255, 255, 255}),
+            fiber::net::IpAddress::any_v4(),
+            fiber::net::IpAddress::loopback_v6(),
+            fiber::net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}),
+    };
+    for (const auto &address: addresses) {
+        std::array<char, fiber::net::IpAddress::kMaxTextLen> buffer{};
+        const std::string_view text = address.to_string_view(buffer);
+        EXPECT_EQ(text, address.to_string());
+        EXPECT_EQ(buffer[text.size()], '\0');
+    }
+}
+
+TEST(IpAddressTest, ToStringViewBorrowsCallerBuffer) {
+    std::array<char, fiber::net::IpAddress::kMaxTextLen> buffer{};
+    const fiber::net::IpAddress address = fiber::net::IpAddress::loopback_v6();
+    const std::string_view text = address.to_string_view(buffer);
+    EXPECT_EQ(text, "::1");
+    // The view points into the caller buffer and the text stays NUL-terminated.
+    EXPECT_EQ(text.data(), buffer.data());
+    EXPECT_STREQ(buffer.data(), "::1");
+}

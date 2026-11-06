@@ -104,24 +104,26 @@ bool IpAddress::parse(std::string_view text, IpAddress &out) noexcept {
     return false;
 }
 
-std::string IpAddress::to_string() const {
-    char buffer[INET6_ADDRSTRLEN]{};
-    const void *src = nullptr;
-    int family = AF_INET;
+std::string_view IpAddress::to_string_view(std::array<char, kMaxTextLen> &out) const noexcept {
+    static_assert(kMaxTextLen >= INET6_ADDRSTRLEN);
+    int family = AF_UNSPEC;
     if (is_v4()) {
-        src = bytes_.data();
         family = AF_INET;
     } else if (is_v6()) {
-        src = bytes_.data();
         family = AF_INET6;
     } else {
         return {};
     }
-    const char *result = ::inet_ntop(family, src, buffer, sizeof(buffer));
-    if (!result) {
+    const char *text = ::inet_ntop(family, bytes_.data(), out.data(), out.size());
+    if (text == nullptr) {
         return {};
     }
-    return {result};
+    return {text, std::strlen(text)};
+}
+
+std::string IpAddress::to_string() const {
+    std::array<char, kMaxTextLen> buffer{};
+    return std::string(to_string_view(buffer));
 }
 
 } // namespace fiber::net
