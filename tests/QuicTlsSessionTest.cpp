@@ -129,7 +129,7 @@ void with_server_flight(F &&test) {
         auto initial = crypto_chain(queued_crypto(server, fiber::quic::QuicEncryptionLevel::Initial));
         ASSERT_TRUE(client.tls().provide_crypto_data(fiber::quic::QuicEncryptionLevel::Initial, initial));
         auto flight = crypto_chain(queued_crypto(server, fiber::quic::QuicEncryptionLevel::Handshake));
-        ASSERT_NE(flight.readable_bytes(), 0u);
+        ASSERT_NE(flight.readable_bytes(), 0U);
         test(client, flight, tickets);
     });
 }
@@ -275,7 +275,7 @@ TEST(QuicTlsSessionTest, PostHandshakeChainPreservesEngineTailBeforeLaterProvide
         ASSERT_TRUE(client.tls().provide_crypto_data(QuicEncryptionLevel::Application, rest));
         EXPECT_TRUE(rest.empty());
         ASSERT_TRUE(client.tls().drive_handshake());
-        ASSERT_EQ(tickets.size(), 2u);
+        ASSERT_EQ(tickets.size(), 2U);
         auto tail = crypto_chain(std::span(kTicket).subspan(3));
         ASSERT_TRUE(client.tls().provide_crypto_data(QuicEncryptionLevel::Application, tail));
         ASSERT_TRUE(client.tls().process_post_handshake());
@@ -308,7 +308,7 @@ TEST(QuicTlsSessionTest, PostHandshakeChainRejectsOversizedInputAndEngineTail) {
     for (bool engine_tail: {false, true}) {
         with_server_flight([&](auto &client, auto &flight, auto &) {
             using fiber::quic::QuicEncryptionLevel;
-            std::vector<std::uint8_t> oversized(64 * 1024 + 1, 0);
+            std::vector<std::uint8_t> oversized((64 * 1024) + 1, 0);
             auto input = crypto_chain(oversized);
             if (engine_tail) {
                 ASSERT_TRUE(flight.append_chain(std::move(input)));
