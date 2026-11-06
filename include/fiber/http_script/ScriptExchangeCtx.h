@@ -87,8 +87,19 @@ public:
     // Route captures for $path.<name>, injected by the host after route match and before
     // scripts run. Names and values borrow the matcher text / request path buffer; the span
     // itself must outlive every script execution against this ctx.
+    //
+    // Rebinding swaps the captures (route re-matching across candidates), so memoized Path
+    // constants must not survive: the next candidate's $path.* would read the previous
+    // candidate's values. Unlinking single entries would break the linear-probe chains, so
+    // the whole memo resets here; every entry re-derives from request state on demand.
     void set_path_vars(std::span<const std::pair<std::string_view, std::string_view>> vars) noexcept {
         path_vars_ = vars;
+        if (constant_cache_ != nullptr) {
+            for (std::size_t i = 0; i < constant_cache_capacity_; ++i) {
+                constant_cache_[i] = ConstantEntry{};
+            }
+            constant_cache_size_ = 0;
+        }
     }
 
     // Runtime entry for ConstPackage-compiled constants. `name` is the package-normalized

@@ -771,6 +771,49 @@ TEST(RouteVarTest, RepeatedConstantReadsAreStable) {
     s.stop();
 }
 
+TEST(RouteVarTest, PathVarRebindInvalidatesMemoizedConstant) {
+    // Route re-matching rebinds captures on one reused ctx: the second candidate's $path.id
+    // must resolve against its own captures, not the first candidate's memoized value.
+    ServerFixture s;
+    auto compiled = compile_route_script("return $path.id;", {"id"});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start([compiled](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        fiber::http_script::ScriptExchangeCtx ctx{
+                exchange, heap, fiber::http_script::ScriptConnectionInfo{.scheme = "http", .tls = false}};
+        const std::pair<std::string_view, std::string_view> first_vars[] = {{"id", "foo"}};
+        const std::pair<std::string_view, std::string_view> second_vars[] = {{"id", "api"}};
+        ctx.set_path_vars(first_vars);
+        auto first = co_await compiled.script->exec_async(fiber::script::JsValue::make_undefined(), &ctx, heap);
+        ctx.set_path_vars(second_vars);
+        auto second = co_await compiled.script->exec_async(fiber::script::JsValue::make_undefined(), &ctx, heap);
+        std::string_view first_view;
+        std::string_view second_view;
+        const bool ok = first.kind == fiber::script::ScriptResultKind::Value &&
+                        second.kind == fiber::script::ScriptResultKind::Value &&
+                        fiber::script::std_lib::string_utf8_view(first.value(), first_view) &&
+                        fiber::script::std_lib::string_utf8_view(second.value(), second_view) && first_view == "foo" &&
+                        second_view == "api";
+        fiber::http::HttpHeaders headers(exchange.pool());
+        co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = ok ? 200 : 500,
+                .headers = &headers,
+                .body = fiber::http::HttpBodySpec::ContentLength(0),
+                .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+                .end_stream = true,
+        });
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/candidates";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    s.stop();
+}
+
 TEST(RouteVarTest, ContextNamespaceIsRejectedAtCompileTime) {
     // $context was never bound by any host; it is a compile error, not a silent null.
     auto compiled = compile_route_script("resp.sendJson(200, $context.cluster);", {});
