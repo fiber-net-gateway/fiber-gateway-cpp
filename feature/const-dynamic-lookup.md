@@ -1,6 +1,6 @@
 # 脚本常量动态查找重设计(ConstPackage / ScriptExchangeCtx)
 
-状态:已实施,未提交(2026-11-06)。实施时修正 D2:Path 为**末个**胜 —— 旧
+状态:已实施并提交 03ea19bf(2026-11-06)。实施时修正 D2:Path 为**末个**胜 —— 旧
 `bind_path_constants` 逐对无条件覆盖,重复名末对胜出;文档原记"首个胜"有误,代码按实际旧语义实现。
 动机:一个请求会执行多个脚本(rewrite 模板、set_header 模板、script_file、access_log 模板),
 且配置热更后请求中途可能换到新编译的脚本/新 ConstPackage。当前 `ScriptExchangeCtx` 与单个
