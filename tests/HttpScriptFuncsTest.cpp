@@ -412,6 +412,70 @@ TEST(HttpScriptFuncsTest, RequestViewsAndSendJson) {
     s.stop();
 }
 
+// A >16KiB JSON body spans multiple sink nodes: the chain-encoded response must arrive
+// byte-exact with a correct Content-Length (regression for the IoBufChain write_json path,
+// including the node-boundary case where a generator token exceeds the tail's tailroom).
+TEST(HttpScriptFuncsTest, SendJsonMultiNodeBody) {
+    ServerFixture s;
+    constexpr int kRepeats = 4200; // 4200 * 8 = 33600 bytes > two sink nodes
+    auto script = compile_http_script(
+            R"(resp.sendJson(200, strings.repeat("abcdefgh", )" + std::to_string(kRepeats) + "));");
+    ASSERT_NE(script, nullptr);
+    s.start(make_script_handler(script));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/script";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_EQ(result.content_type, "application/json");
+
+    std::string expected = "\"";
+    for (int i = 0; i < kRepeats; ++i) {
+        expected += "abcdefgh";
+    }
+    expected += "\"";
+    EXPECT_EQ(result.body.size(), expected.size());
+    EXPECT_EQ(result.body, expected);
+
+    s.stop();
+}
+
+// Companion to SendJsonMultiNodeBody: an array of 2100 small elements encodes as ~2100
+// short generator tokens, exercising the progressive tail-fill path (tokens too large for
+// the current tail's tailroom roll to a fresh node) instead of one large-token allocation.
+TEST(HttpScriptFuncsTest, SendJsonMultiNodeArrayBody) {
+    ServerFixture s;
+    constexpr int kElements = 2100; // 2100 * 10 + separators > two sink nodes
+    auto script = compile_http_script(R"(resp.sendJson(200, strings.split(strings.repeat("abcdefgh,", )" +
+                                      std::to_string(kElements - 1) + R"js() + "abcdefgh", ","));)js");
+    ASSERT_NE(script, nullptr);
+    s.start(make_script_handler(script));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/script";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_EQ(result.status_code, 200);
+
+    std::string expected = "[";
+    for (int i = 0; i < kElements; ++i) {
+        if (i > 0) {
+            expected += ",";
+        }
+        expected += "\"abcdefgh\"";
+    }
+    expected += "]";
+    EXPECT_EQ(result.body.size(), expected.size());
+    EXPECT_EQ(result.body, expected);
+
+    s.stop();
+}
+
 TEST(HttpScriptFuncsTest, ReadJsonBodyAndEcho) {
     ServerFixture s;
     auto script = compile_http_script("let b = req.readJson();"

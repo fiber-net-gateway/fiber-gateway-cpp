@@ -8,6 +8,7 @@
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
+#include "../common/mem/IoBufChain.h"
 #include "../http/HttpExchange.h"
 #include "../http/HttpHeaders.h"
 #include "../http/HttpResponseWriter.h"
@@ -185,6 +186,10 @@ private:
 
     fiber::async::Task<fiber::common::IoResult<void>> send_final_with_body(int status, std::size_t content_length,
                                                                            const std::uint8_t *data) noexcept;
+    // Chain-body variant: encodes straight into the transport buffer (no staging copy);
+    // end-of-stream comes from body.complete(), set by the implementation before write_all.
+    fiber::async::Task<fiber::common::IoResult<void>> send_final_with_body(int status,
+                                                                           fiber::mem::IoBufChain body) noexcept;
 
     fiber::http::HttpExchange &exchange_;
     fiber::http::HttpResponseWriter response_writer_;
