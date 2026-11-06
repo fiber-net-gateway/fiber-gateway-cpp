@@ -1,9 +1,11 @@
 #ifndef FIBER_HTTP_WEB_SOCKET_PROXY_H
 #define FIBER_HTTP_WEB_SOCKET_PROXY_H
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
-#include <string>
+#include <string_view>
 
 #include "../async/Task.h"
 
@@ -22,13 +24,30 @@ enum class WebSocketDownstream : std::uint8_t {
     ExtendedConnect,
 };
 
+// Fixed-size handshake fields: base64(RAND 16B) is always 24 chars and
+// base64(SHA1 20B) always 28 — both exceed std::string SSO, so heap staging
+// under noexcept was a terminate risk. Fixed arrays make the handshake
+// trivially copyable and allocation-free.
+inline constexpr std::size_t kWebSocketKeyB64Len = 24;
+inline constexpr std::size_t kWebSocketAcceptB64Len = 28;
+
 struct WebSocketHandshake {
     WebSocketDownstream downstream = WebSocketDownstream::None;
-    std::string generated_key;
-    std::string expected_accept;
+    bool key_generated = false; // set by prepare_websocket_handshake (extended connect only)
+    bool accept_ready = false; // set by prepare_upstream_websocket_headers on success
+    std::array<char, kWebSocketKeyB64Len> generated_key{};
+    std::array<char, kWebSocketAcceptB64Len> expected_accept{};
 
     [[nodiscard]] bool active() const noexcept { return downstream != WebSocketDownstream::None; }
     [[nodiscard]] bool extended_connect() const noexcept { return downstream == WebSocketDownstream::ExtendedConnect; }
+    // Views are empty until the corresponding flag is set, matching the old
+    // std::string fields' unset-state semantics.
+    [[nodiscard]] std::string_view key_view() const noexcept {
+        return key_generated ? std::string_view{generated_key.data(), generated_key.size()} : std::string_view{};
+    }
+    [[nodiscard]] std::string_view accept_view() const noexcept {
+        return accept_ready ? std::string_view{expected_accept.data(), expected_accept.size()} : std::string_view{};
+    }
 };
 
 [[nodiscard]] WebSocketDownstream detect_websocket_downstream(const HttpExchange &exchange) noexcept;

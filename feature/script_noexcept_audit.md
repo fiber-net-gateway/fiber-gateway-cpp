@@ -207,7 +207,12 @@ AbiResult oom_guard(Body &&body) noexcept {
 - `http_script/ScriptExchangeCtx.cpp:30` 同款 `StringSink`（`write_json` 路径）——同病，待 script 层方案定稿后跟进
 - `HttpWebSocketProxy.cpp` `build_expected_websocket_accept`（:42）与
   `prepare_websocket_handshake`（:132）noexcept 但 `std::string::resize` 抛式
-  （迁移 base64 时发现）——按 house policy 维持现状（非 script 路径）
+  （迁移 base64 时发现）——**已修（2026-11-06，随审计收尾追加）**：两产物均
+  定长（base64(RAND 16B)=24、base64(SHA1 20B)=28，皆超 SSO 故原为堆分配），
+  `WebSocketHandshake` 字段改定长数组 + `key_generated`/`accept_ready` 就绪位
+  + `key_view()`/`accept_view()`（未就绪返回空 view，与旧空串语义逐位一致），
+  两函数变零分配，`static_assert` 锁长度；调用方（ProxyHandler designated-init、
+  HttpClientFuncs 默认构造）零改动，checker 定向该 TU 归零
 - util 层 `std::string` 系 API（UrlForm 等；Base64 的 std::string 版已随 ID 1/2 删除）
   对非 noexcept 调用方按 house policy 维持现状
 - `.clang-tidy` 的 `bugprone-exception-escape` 全局禁用维持不变（本审计用定向重跑做验收）
