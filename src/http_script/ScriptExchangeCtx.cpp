@@ -197,9 +197,10 @@ fiber::script::JsValue ScriptExchangeCtx::cookies() noexcept {
     }
     fiber::http::HttpHeaders::MatchRange cookie_headers = exchange_.request_headers().get_all("cookie", kCookieHash);
     for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
-        fiber::util::decode_cookie_header(field.value_view(), [&](std::string_view name, std::string_view value) {
-            put_string(heap_, cookies_root_, name, value);
-        });
+        fiber::util::decode_cookie_header(field.value_view(),
+                                          [&](std::string_view name, std::string_view value) noexcept {
+                                              put_string(heap_, cookies_root_, name, value);
+                                          });
     }
     return *cookies_root_;
 }
@@ -306,7 +307,7 @@ bool ScriptExchangeCtx::resolve_from_request(ConstType type, std::string_view na
                 bool found = false;
                 fiber::script::JsValue value = fiber::script::JsValue::make_null();
                 fiber::util::decode_cookie_header(field.value_view(),
-                                                  [&](std::string_view key, std::string_view cookie_value) {
+                                                  [&](std::string_view key, std::string_view cookie_value) noexcept {
                                                       if (!found && const_name_equal(name, key)) {
                                                           found = true;
                                                           value = native_string_value(cookie_value);

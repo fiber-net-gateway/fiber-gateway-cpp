@@ -1,9 +1,10 @@
 #ifndef FIBER_UTIL_COOKIE_CODEC_H
 #define FIBER_UTIL_COOKIE_CODEC_H
 
+#include <cstddef>
 #include <cstdint>
-#include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace fiber::util {
 
@@ -37,12 +38,15 @@ struct Cookie {
 // first '=' splits name/value. A segment without '=' yields (segment, ""). Empty
 // segments are skipped. Mirrors Netty ServerCookieDecoder (lax) for the Cookie header.
 // sink is called as sink(std::string_view name, std::string_view value); its return is
-// ignored (decoding always visits every pair).
+// ignored (decoding always visits every pair). noexcept holds exactly when calling sink
+// does — the split itself never throws.
 template<typename Sink>
-void decode_cookie_header(std::string_view header, Sink &&sink);
+void decode_cookie_header(std::string_view header,
+                          Sink &&sink) noexcept(noexcept(sink(std::string_view{}, std::string_view{})));
 
 template<typename Sink>
-void decode_cookie_header(std::string_view header, Sink &&sink) {
+void decode_cookie_header(std::string_view header,
+                          Sink &&sink) noexcept(noexcept(sink(std::string_view{}, std::string_view{}))) {
     const std::size_t len = header.size();
     std::size_t pos = 0;
     while (pos <= len) {
@@ -68,11 +72,42 @@ void decode_cookie_header(std::string_view header, Sink &&sink) {
     }
 }
 
-// Encodes a cookie into a "Set-Cookie" header value (without the field name). Returns
-// false (and leaves out empty) when the name is empty or contains an invalid token char,
-// matching Netty ServerCookieEncoder.STRICT raising on invalid names (resp.addCookie
-// then yields false). On success, out holds "name=value; Domain=...; ...".
-[[nodiscard]] bool encode_set_cookie(const Cookie &cookie, std::string &out);
+namespace detail {
+
+// CookieCodec internals: one layout walk shared by sizing (out == nullptr) and writing
+// (out != nullptr) so the two passes cannot drift. Returns the encoded byte count, or 0
+// when the cookie name is invalid (out is then not touched). When writing, out must
+// hold at least the count returned by the sizing pass.
+std::size_t cookie_encode(const Cookie &cookie, char *out) noexcept;
+
+} // namespace detail
+
+// Encodes a cookie into a "Set-Cookie" header value (without the field name), e.g.
+// "name=value; Domain=...; ...". The exact encoded size is measured first and passed to
+// alloc, which must return a writable buffer of that many bytes, or nullptr to refuse
+// (e.g. a fixed stack buffer that is too small). Returns a view over the encoded bytes
+// in the returned buffer, or an empty view when the name is empty or contains an invalid
+// token char (matching Netty ServerCookieEncoder.STRICT raising on invalid names;
+// resp.addCookie then yields false), or when alloc returned nullptr. An empty view is an
+// unambiguous failure signal: a valid cookie always encodes to at least "n=". noexcept
+// holds exactly when calling alloc does — pass a non-throwing alloc (stack buffer,
+// BufPool) and the whole encode is non-throwing.
+template<typename Alloc>
+[[nodiscard]] std::string_view encode_set_cookie(const Cookie &cookie,
+                                                 Alloc &&alloc) noexcept(noexcept(alloc(std::size_t{}))) {
+    static_assert(std::is_convertible_v<decltype(alloc(std::size_t{})), char *>,
+                  "alloc must be callable as char *(std::size_t)");
+    const std::size_t size = detail::cookie_encode(cookie, nullptr);
+    if (size == 0) {
+        return {};
+    }
+    char *out = alloc(size);
+    if (out == nullptr) {
+        return {};
+    }
+    detail::cookie_encode(cookie, out);
+    return {out, size};
+}
 
 } // namespace fiber::util
 

@@ -250,8 +250,14 @@ AbiResult add_cookie_fn(void * /*userdata*/, const Library::HostCallFrame &frame
         cookie.same_site = fiber::util::CookieSameSite::Unset;
     }
 
-    std::string encoded;
-    if (!fiber::util::encode_set_cookie(cookie, encoded)) {
+    // Encode into a stack buffer sized to the largest cookie a browser would keep (RFC
+    // 6265 6.1 requires implementations to support at least 4096 bytes per cookie);
+    // anything larger is refused and yields false. add_response_header copies the value
+    // into the per-request header arena, so the buffer never outlives this call.
+    char encoded_buf[4096];
+    std::string_view encoded = fiber::util::encode_set_cookie(
+            cookie, [&](std::size_t n) noexcept -> char * { return n <= sizeof(encoded_buf) ? encoded_buf : nullptr; });
+    if (encoded.empty()) {
         return AbiResult::success(JsValue::make_boolean(false));
     }
     ctx->add_response_header("Set-Cookie", encoded);
