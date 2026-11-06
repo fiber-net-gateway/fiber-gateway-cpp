@@ -102,9 +102,6 @@ const RouteScriptExtension::HostCallable *RouteScriptExtension::resolve_constant
     if (namespace_name == "$cookie") {
         return const_builder_->add_constant(ConstType::Cookie, key);
     }
-    if (namespace_name == "$context") {
-        return const_builder_->add_constant(ConstType::Context, key);
-    }
     return nullptr;
 }
 

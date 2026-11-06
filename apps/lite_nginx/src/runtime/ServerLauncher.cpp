@@ -164,17 +164,12 @@ send_plain_response(fiber::http::HttpExchange &exchange, fiber::http::HttpRespon
 // text and request path buffer).
 fiber::async::Task<void>
 run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter response, fiber::script::Script &script,
-           const fiber::http_script::ConstPackage &const_package,
            const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
            fiber::http_script::HttpScriptServices *services, const logging::RequestLogContext &log_context,
            fiber::http_script::ScriptRequestBody request_body, const RequestBodyLimiter &body_limiter) {
     fiber::script::GcHeap heap;
     fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection, request_body, response};
-    auto constants_ready = ctx.prepare_constants(const_package);
-    if (!constants_ready || !ctx.bind_path_constants(const_package, path_vars)) {
-        co_await ctx.write_error_json(500, "SCRIPT_CONSTANTS");
-        co_return;
-    }
+    ctx.set_path_vars(path_vars);
     ctx.set_services(services);
     fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
     auto result = co_await script.exec_async(root, &ctx, heap);
@@ -417,8 +412,8 @@ private:
                 fiber::http_script::make_script_request_body(body_limiter);
         if (location.script) {
             assert(location.const_package != nullptr);
-            co_await run_script(exchange, response_scope.writer(), *location.script, *location.const_package,
-                                log_context.path_vars, script_services_, log_context, request_body, body_limiter);
+            co_await run_script(exchange, response_scope.writer(), *location.script, log_context.path_vars,
+                                script_services_, log_context, request_body, body_limiter);
         } else {
             co_await proxy_.handle(exchange, response_scope.writer(), request_body.pipe_reader(), listener, location,
                                    log_context.path_vars, script_services_, log_context);

@@ -70,6 +70,19 @@ std::string_view copy_to_pool(fiber::mem::BufPool &pool, std::string_view value)
     return {data, value.size()};
 }
 
+// Native string over borrowed bytes (request buffer or exchange pool). Empty inputs are
+// normalized to a non-null base for make_native_string.
+fiber::script::JsValue native_string_value(std::string_view value) noexcept {
+    if (value.empty()) {
+        // NOLINTNEXTLINE(bugprone-string-constructor)
+        value = std::string_view{"", 0};
+    }
+    return fiber::script::JsValue::make_native_string(value.data(), value.size());
+}
+
+constexpr std::size_t kInitialConstantCacheCapacity = 8;
+constexpr std::size_t kConstantCacheMinFreeQuarter = 4; // grow when free slots < capacity/4
+
 } // namespace
 
 ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap) noexcept :
@@ -191,148 +204,151 @@ fiber::script::JsValue ScriptExchangeCtx::cookies() noexcept {
     return *cookies_root_;
 }
 
-fiber::common::IoResult<void>
-ScriptExchangeCtx::prepare_constants(const ConstPackage &package,
-                                     std::span<const IndexedConstValue> external_values) noexcept {
-    if (const_package_identity_ != nullptr) {
-        return std::unexpected(fiber::common::IoErr::Invalid);
+const ScriptExchangeCtx::ConstantEntry *ScriptExchangeCtx::cache_find(std::uint64_t hash, ConstType type,
+                                                                      std::string_view name) const noexcept {
+    if (constant_cache_ == nullptr) {
+        return nullptr;
     }
-
-    constant_slot_count_ = package.size();
-    const_package_identity_ = package.identity();
-    if (constant_slot_count_ != 0) {
-        constant_slots_ = static_cast<fiber::script::JsValue *>(exchange_.pool().alloc(
-                constant_slot_count_ * sizeof(fiber::script::JsValue), alignof(fiber::script::JsValue)));
-        if (constant_slots_ == nullptr) {
-            const_package_identity_ = nullptr;
-            constant_slot_count_ = 0;
-            return std::unexpected(fiber::common::IoErr::NoMem);
+    const std::size_t mask = constant_cache_capacity_ - 1;
+    std::size_t slot = static_cast<std::size_t>(hash) & mask;
+    for (;;) {
+        const ConstantEntry &entry = constant_cache_[slot];
+        if (entry.name.data() == nullptr) {
+            return nullptr; // empty slot: absent (the table always keeps one empty slot)
         }
-        for (std::size_t i = 0; i < constant_slot_count_; ++i) {
-            constant_slots_[i] = fiber::script::JsValue::make_null();
+        if (entry.hash == hash && entry.type == type && entry.name == name) {
+            return &entry;
         }
+        slot = (slot + 1) & mask;
     }
+}
 
-    auto set_string = [&](ConstIndex index, std::string_view value, bool copy) -> bool {
-        if (index >= constant_slot_count_) {
+bool ScriptExchangeCtx::cache_insert(std::uint64_t hash, ConstType type, std::string_view name,
+                                     fiber::script::JsValue value) noexcept {
+    if (constant_cache_ == nullptr ||
+        constant_cache_size_ + 1 > constant_cache_capacity_ - constant_cache_capacity_ / kConstantCacheMinFreeQuarter) {
+        const std::size_t new_capacity =
+                constant_cache_capacity_ == 0 ? kInitialConstantCacheCapacity : constant_cache_capacity_ * 2;
+        auto *fresh = static_cast<ConstantEntry *>(
+                exchange_.pool().alloc(new_capacity * sizeof(ConstantEntry), alignof(ConstantEntry)));
+        if (fresh == nullptr) {
             return false;
         }
-        if (copy) {
-            value = copy_to_pool(exchange_.pool(), value);
-            if (value.data() == nullptr) {
-                return false;
-            }
+        for (std::size_t i = 0; i < new_capacity; ++i) {
+            fresh[i] = ConstantEntry{};
         }
-        constant_slots_[index] = fiber::script::JsValue::make_native_string(value.data(), value.size());
-        return true;
-    };
-
-    if (!package.entries(ConstType::Header).empty()) {
-        for (const fiber::http::HttpHeaders::HeaderField &field: exchange_.request_headers()) {
-            const ConstIndex index = package.find(ConstType::Header, field.lowcase_view());
-            if (index == kInvalidConstIndex) {
+        const std::size_t mask = new_capacity - 1;
+        for (std::size_t i = 0; i < constant_cache_capacity_; ++i) {
+            const ConstantEntry &old = constant_cache_[i];
+            if (old.name.data() == nullptr) {
                 continue;
             }
-            if (index >= constant_slot_count_) {
-                return std::unexpected(fiber::common::IoErr::Invalid);
+            std::size_t slot = static_cast<std::size_t>(old.hash) & mask;
+            while (fresh[slot].name.data() != nullptr) {
+                slot = (slot + 1) & mask;
             }
-            if (fiber::script::js_value_type(constant_slots_[index]) == fiber::script::JsNodeType::Null &&
-                !set_string(index, field.value_view(), false)) {
-                return std::unexpected(fiber::common::IoErr::NoMem);
-            }
+            fresh[slot] = old;
         }
+        constant_cache_ = fresh; // the replaced array stays in the request pool (arena)
+        constant_cache_capacity_ = new_capacity;
     }
 
-    if (!package.entries(ConstType::Query).empty()) {
-        auto decoded = fiber::util::form_decode_query(
-                exchange_.uri().query, [&](std::string_view name, std::string_view value) -> bool {
-                    const ConstIndex index = package.find(ConstType::Query, name);
-                    return index == kInvalidConstIndex || set_string(index, value, true);
-                });
-        if (!decoded && decoded.error() == fiber::common::IoErr::NoMem) {
-            return std::unexpected(fiber::common::IoErr::NoMem);
-        }
-        // Preserve the existing lenient behavior: malformed escapes leave any values
-        // decoded before the error available to the script.
+    const std::size_t mask = constant_cache_capacity_ - 1;
+    std::size_t slot = static_cast<std::size_t>(hash) & mask;
+    while (constant_cache_[slot].name.data() != nullptr) {
+        slot = (slot + 1) & mask;
     }
+    constant_cache_[slot] = ConstantEntry{.hash = hash, .name = name, .type = type, .value = value};
+    ++constant_cache_size_;
+    return true;
+}
 
-    if (!package.entries(ConstType::Cookie).empty()) {
-        fiber::http::HttpHeaders::MatchRange cookie_headers =
-                exchange_.request_headers().get_all("cookie", kCookieHash);
-        for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
-            fiber::util::decode_cookie_header(field.value_view(), [&](std::string_view name, std::string_view value) {
-                const ConstIndex index = package.find(ConstType::Cookie, name);
-                if (index != kInvalidConstIndex && index < constant_slot_count_ &&
-                    fiber::script::js_value_type(constant_slots_[index]) == fiber::script::JsNodeType::Null) {
-                    (void) set_string(index, value, false);
+bool ScriptExchangeCtx::resolve_from_request(ConstType type, std::string_view name,
+                                             fiber::script::JsValue &out) noexcept {
+    switch (type) {
+        case ConstType::Header: {
+            // Borrowed from the header buffer; first occurrence wins.
+            for (const fiber::http::HttpHeaders::HeaderField &field: exchange_.request_headers()) {
+                if (const_name_equal(name, field.lowcase_view())) {
+                    out = native_string_value(field.value_view());
+                    return true;
                 }
-            });
+            }
+            break;
         }
-    }
-
-    if (!bind_constants(external_values)) {
-        return std::unexpected(fiber::common::IoErr::Invalid);
-    }
-    return {};
-}
-
-bool ScriptExchangeCtx::bind_constants(std::span<const IndexedConstValue> values) noexcept {
-    if (const_package_identity_ == nullptr) {
-        return false;
-    }
-    for (const IndexedConstValue &entry: values) {
-        if (entry.index == kInvalidConstIndex) {
-            continue;
+        case ConstType::Query: {
+            // Decoded values live only for the duration of the sink call, so each match is
+            // copied into the exchange pool; the last match wins. Malformed escapes keep
+            // the pairs decoded before the error (lenient, as before).
+            std::string_view matched{};
+            auto decoded = fiber::util::form_decode_query(
+                    exchange_.uri().query, [&](std::string_view key, std::string_view value) -> bool {
+                        if (!const_name_equal(name, key)) {
+                            return true;
+                        }
+                        matched = copy_to_pool(exchange_.pool(), value);
+                        return matched.data() != nullptr; // false aborts the decode as NoMem
+                    });
+            if (!decoded && decoded.error() == fiber::common::IoErr::NoMem) {
+                return false;
+            }
+            if (matched.data() != nullptr) {
+                out = fiber::script::JsValue::make_native_string(matched.data(), matched.size());
+                return true;
+            }
+            break;
         }
-        if (!bind_constant(entry.index, entry.value)) {
-            return false;
+        case ConstType::Cookie: {
+            // Borrowed from the header buffer; first occurrence wins across all cookie headers.
+            fiber::http::HttpHeaders::MatchRange cookie_headers =
+                    exchange_.request_headers().get_all("cookie", kCookieHash);
+            for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
+                bool found = false;
+                fiber::script::JsValue value = fiber::script::JsValue::make_null();
+                fiber::util::decode_cookie_header(field.value_view(),
+                                                  [&](std::string_view key, std::string_view cookie_value) {
+                                                      if (!found && const_name_equal(name, key)) {
+                                                          found = true;
+                                                          value = native_string_value(cookie_value);
+                                                      }
+                                                  });
+                if (found) {
+                    out = value;
+                    return true;
+                }
+            }
+            break;
         }
+        case ConstType::Path: {
+            // Borrowed from the matcher text; the last pair with a matching name wins,
+            // mirroring the previous sequential bind.
+            for (const auto &[var_name, var_value]: path_vars_) {
+                if (const_name_equal(name, var_name)) {
+                    out = native_string_value(var_value);
+                }
+            }
+            return true;
+        }
+        case ConstType::Count:
+            break;
     }
+    out = fiber::script::JsValue::make_null();
     return true;
 }
 
-bool ScriptExchangeCtx::bind_constant(ConstIndex index, std::string_view value) noexcept {
-    if (const_package_identity_ == nullptr || index >= constant_slot_count_) {
-        return false;
-    }
-    if (value.empty()) {
-        // Normalize to a non-null data pointer for make_native_string.
-        // NOLINTNEXTLINE(bugprone-string-constructor)
-        value = std::string_view("", 0);
-    }
-    constant_slots_[index] = fiber::script::JsValue::make_native_string(value.data(), value.size());
-    return true;
-}
-
-bool ScriptExchangeCtx::bind_path_constants(
-        const ConstPackage &package,
-        std::span<const std::pair<std::string_view, std::string_view>> path_values) noexcept {
-    if (const_package_identity_ != package.identity()) {
-        return false;
-    }
-    for (const auto &[name, value]: path_values) {
-        const ConstIndex index = package.find(ConstType::Path, name);
-        if (index != kInvalidConstIndex && !bind_constant(index, value)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void ScriptExchangeCtx::clear_constants(std::span<const ConstIndex> indices) noexcept {
-    for (ConstIndex index: indices) {
-        if (index != kInvalidConstIndex && index < constant_slot_count_) {
-            constant_slots_[index] = fiber::script::JsValue::make_null();
-        }
-    }
-}
-
-fiber::script::AbiResult ScriptExchangeCtx::constant(const void *package_identity, ConstIndex index) const noexcept {
-    if (package_identity == nullptr || package_identity != const_package_identity_ || index >= constant_slot_count_ ||
-        constant_slots_ == nullptr) {
+fiber::script::AbiResult ScriptExchangeCtx::resolve_constant(ConstType type, std::string_view name,
+                                                             std::uint64_t hash) noexcept {
+    if (type == ConstType::Count || name.data() == nullptr) {
         return fiber::script::AbiResult::abort(fiber::script::ScriptAbortReason::InvalidState);
     }
-    return fiber::script::AbiResult::success(constant_slots_[index]);
+    if (const ConstantEntry *hit = cache_find(hash, type, name); hit != nullptr) {
+        return fiber::script::AbiResult::success(hit->value);
+    }
+    fiber::script::JsValue value{};
+    if (!resolve_from_request(type, name, value) || !cache_insert(hash, type, name, value)) {
+        return fiber::script::AbiResult::abort(fiber::script::ScriptAbortReason::OutOfMemory);
+    }
+    return fiber::script::AbiResult::success(value);
 }
 
 fiber::script::AbiResult ScriptExchangeCtx::lookup_property(fiber::script::GcHeap &heap, fiber::script::JsValue object,
