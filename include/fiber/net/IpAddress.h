@@ -17,6 +17,8 @@ class IpAddress {
 public:
     static constexpr std::size_t kV4Size = 4;
     static constexpr std::size_t kV6Size = 16;
+    // Longest IPv4/IPv6 text form (pinned to INET6_ADDRSTRLEN in the .cpp), NUL included.
+    static constexpr std::size_t kMaxTextLen = 46;
 
     IpAddress() = default;
 
@@ -48,6 +50,9 @@ public:
 
     static bool parse(std::string_view text, IpAddress &out) noexcept;
     std::string to_string() const;
+    // Zero-allocation variant; the returned view borrows `out` (which stays NUL-terminated).
+    // Unspecified family yields an empty view; the scope id is not rendered.
+    [[nodiscard]] std::string_view to_string_view(std::array<char, kMaxTextLen> &out) const noexcept;
 
     friend bool operator==(const IpAddress &left, const IpAddress &right) noexcept = default;
 

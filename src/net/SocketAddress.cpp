@@ -1,7 +1,9 @@
 #include <fiber/net/SocketAddress.h>
 
 #include <arpa/inet.h>
+#include <charconv>
 #include <cstring>
+#include <system_error>
 
 namespace fiber::net {
 
@@ -13,15 +15,35 @@ SocketAddress SocketAddress::any_v4(std::uint16_t port) { return {IpAddress::any
 
 SocketAddress SocketAddress::any_v6(std::uint16_t port) { return {IpAddress::any_v6(), port}; }
 
-std::string SocketAddress::to_string() const {
-    std::string ip_text = ip_.to_string();
+std::string_view SocketAddress::to_string_view(std::array<char, kMaxTextLen> &out) const noexcept {
+    static_assert(kMaxTextLen >= 1 + (IpAddress::kMaxTextLen - 1) + 1 + 1 + 5);
+    std::array<char, IpAddress::kMaxTextLen> ip_buffer{};
+    const std::string_view ip_text = ip_.to_string_view(ip_buffer);
     if (ip_text.empty()) {
         return {};
     }
+    char *cursor = out.data();
     if (ip_.is_v6()) {
-        return "[" + ip_text + "]:" + std::to_string(port_);
+        *cursor++ = '[';
     }
-    return ip_text + ":" + std::to_string(port_);
+    std::memcpy(cursor, ip_text.data(), ip_text.size());
+    cursor += ip_text.size();
+    if (ip_.is_v6()) {
+        *cursor++ = ']';
+    }
+    *cursor++ = ':';
+    const std::to_chars_result result = std::to_chars(cursor, out.data() + out.size(), port_);
+    if (result.ec != std::errc{}) {
+        return {};
+    }
+    cursor = result.ptr;
+    *cursor = '\0';
+    return {out.data(), static_cast<std::size_t>(cursor - out.data())};
+}
+
+std::string SocketAddress::to_string() const {
+    std::array<char, kMaxTextLen> buffer{};
+    return std::string(to_string_view(buffer));
 }
 
 bool SocketAddress::to_sockaddr(sockaddr_storage &out, socklen_t &len) const noexcept {
