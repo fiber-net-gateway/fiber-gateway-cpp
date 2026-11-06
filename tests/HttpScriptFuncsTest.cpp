@@ -42,6 +42,7 @@
 #include <fiber/script/Script.h>
 #include <fiber/script/ScriptCompiler.h>
 #include <fiber/script/ScriptResult.h>
+#include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
 
 namespace {
@@ -179,7 +180,7 @@ DetachedTask run_http1_client(fiber::event::EventLoop *loop, std::uint16_t port,
     fiber::http::HttpHeaders headers(pool);
     headers.set("host", "localhost");
     for (const auto &[name, value]: req.headers) {
-        headers.set(name, value);
+        headers.add(name, value); // add: repeated names must reach the server as duplicates
     }
 
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
@@ -353,9 +354,7 @@ fiber::http::HttpHandler make_route_script_handler(const CompiledRouteScript &co
         RouteMatchCollector mc;
         std::string_view path = exchange.uri().path;
         (void) matcher->match_path(path, mc);
-        auto constants_ready = ctx.prepare_constants(*const_package);
-        EXPECT_TRUE(constants_ready.has_value());
-        EXPECT_TRUE(ctx.bind_path_constants(*const_package, mc.vars));
+        ctx.set_path_vars(mc.vars);
         fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
         auto result = co_await script->exec_async(root, &ctx, heap);
         (void) result;
@@ -664,25 +663,93 @@ TEST(RouteVarTest, DynamicNamespacesAlwaysResolve) {
     EXPECT_TRUE(compiled.ok) << compiled.error;
 }
 
-TEST(RouteVarTest, RejectsExecutionAgainstAnotherConstantPackage) {
+TEST(RouteVarTest, ScriptsFromTwoPackagesShareOneContext) {
+    // Scripts compiled against two independent packages — the mid-request config-reload
+    // shape — resolve their constants against one ScriptExchangeCtx with no per-package
+    // preparation. (The previous slot design aborted this with InvalidState.)
     ServerFixture s;
-    auto compiled = compile_route_script("resp.sendJson(200, $header.first);", {});
-    auto other = compile_route_script("resp.sendJson(200, $header.second);", {});
+    auto first = compile_route_script("return $header.x_dup;", {});
+    auto second = compile_route_script("return $header.only_in_second;", {});
+    ASSERT_TRUE(first.ok) << first.error;
+    ASSERT_TRUE(second.ok) << second.error;
+    s.start([first, second](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        fiber::http_script::ScriptExchangeCtx ctx{
+                exchange, heap, fiber::http_script::ScriptConnectionInfo{.scheme = "http", .tls = false}};
+        auto a = co_await first.script->exec_async(fiber::script::JsValue::make_undefined(), &ctx, heap);
+        auto b = co_await second.script->exec_async(fiber::script::JsValue::make_undefined(), &ctx, heap);
+        std::string_view a_view;
+        std::string_view b_view;
+        const bool ok =
+                a.kind == fiber::script::ScriptResultKind::Value && b.kind == fiber::script::ScriptResultKind::Value &&
+                fiber::script::std_lib::string_utf8_view(a.value(), a_view) &&
+                fiber::script::std_lib::string_utf8_view(b.value(), b_view) && a_view == "one" && b_view == "two";
+        fiber::http::HttpHeaders headers(exchange.pool());
+        co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = ok ? 200 : 500,
+                .headers = &headers,
+                .body = fiber::http::HttpBodySpec::ContentLength(0),
+                .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+                .end_stream = true,
+        });
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/two-packages";
+    req.headers = {{"X-Dup", "one"}, {"Only-In-Second", "two"}};
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    s.stop();
+}
+
+TEST(RouteVarTest, DuplicateKeysKeepPerTypeFirstLastSemantics) {
+    ServerFixture s;
+    auto compiled = compile_route_script("resp.sendJson(200, {h: $header.x_dup, q: $query.a, c: $cookie.k});", {});
     ASSERT_TRUE(compiled.ok) << compiled.error;
-    ASSERT_TRUE(other.ok) << other.error;
-    // Keep the script's userdata owner alive while preparing slots from another package.
-    auto userdata_package = compiled.const_package;
-    compiled.const_package = std::move(other.const_package);
     s.start(make_route_script_handler(compiled, "/*"));
 
     ClientRequest req;
     req.method = fiber::http::HttpMethod::Get;
-    req.target = "/identity";
+    req.target = "/?a=one&a=two";
+    req.headers = {{"X-Dup", "first"}, {"X-Dup", "second"}, {"cookie", "k=first; k=second"}};
     ClientResult result = s.request(std::move(req));
 
-    EXPECT_EQ(result.status_code, 500);
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    // Header: first occurrence wins; query: last occurrence wins; cookie: first wins.
+    EXPECT_TRUE(contains(result.body, "\"h\":\"first\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"q\":\"two\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"c\":\"first\"")) << result.body;
     s.stop();
-    userdata_package.reset();
+}
+
+TEST(RouteVarTest, RepeatedConstantReadsAreStable) {
+    ServerFixture s;
+    // The second read of $query.a hits the per-request memo; the value must not change.
+    auto compiled =
+            compile_route_script("resp.sendJson(200, {same: $query.a === $query.a, q1: $query.a, q2: $query.a});", {});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(compiled, "/*"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/?a=1";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"same\":true")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"q1\":\"1\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"q2\":\"1\"")) << result.body;
+    s.stop();
+}
+
+TEST(RouteVarTest, ContextNamespaceIsRejectedAtCompileTime) {
+    // $context was never bound by any host; it is a compile error, not a silent null.
+    auto compiled = compile_route_script("resp.sendJson(200, $context.cluster);", {});
+    EXPECT_FALSE(compiled.ok);
+    EXPECT_NE(compiled.error.find("constant not found"), std::string::npos) << compiled.error;
 }
 
 TEST(RouteVarTest, PathVarResolvesCapturedValue) {

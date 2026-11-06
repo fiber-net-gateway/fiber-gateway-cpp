@@ -44,6 +44,8 @@ struct AccessLogRuntime {
     // A source without interpolation uses literal_message directly.
     std::string literal_message;
     std::shared_ptr<fiber::script::Script> template_script;
+    // Lifetime anchor only: template_script's compiled constants point into this package's
+    // storage, so it must outlive every execution even though nothing calls it at runtime.
     std::shared_ptr<const fiber::http_script::ConstPackage> const_package;
 };
 
@@ -142,6 +144,9 @@ struct LocationRuntime {
     // Non-null when this location runs a script (kind == Script) instead of proxying.
     std::shared_ptr<fiber::script::Script> script;
     // Immutable constant layout shared by every script/template compiled for this location.
+    // Lifetime anchor for the compiled constants' userdata — script/rewrite_path.template_script/
+    // set_headers[].template_script all point into this package's storage; keep it alive as
+    // long as any of them even though nothing calls the package at runtime.
     std::shared_ptr<const fiber::http_script::ConstPackage> const_package;
 };
 

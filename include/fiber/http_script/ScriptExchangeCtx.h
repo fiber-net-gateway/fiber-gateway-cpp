@@ -28,11 +28,6 @@ struct ScriptConnectionInfo {
     bool tls = false;
 };
 
-struct IndexedConstValue {
-    ConstIndex index = kInvalidConstIndex;
-    std::string_view value;
-};
-
 // Per-request script attach payload. Bound to one HttpExchange and one script GcHeap for
 // the request lifetime and reused by serial script invocations. The host passes `&ctx` as
 // the `attach` argument to Script::exec_async/exec_sync, so req.*/resp.* host functions can
@@ -43,7 +38,11 @@ struct IndexedConstValue {
 //   1. Lazy, cached JsValue views of the request query/headers/cookies, held across calls
 //      in persistent GC root slots (GcHeap::global_value), mirroring Java ReqFunc.Ctx
 //      stored via HttpExchange.Attr.
-//   2. An indexed dynamic-constant frame prepared from an immutable ConstPackage before scripts run.
+//   2. Memoized, on-demand resolution of script constants ($path/$query/$header/$cookie).
+//      Compiled constants arrive from their ConstPackage as (type, normalized name, hash)
+//      and are resolved against request state at first access, then cached. The ctx holds
+//      no per-package state, so scripts compiled against different packages — including a
+//      new configuration generation mid-request — share one ctx.
 //   3. A response state machine: response headers accumulate in pending_headers_ until a
 //      send/write flushes them through the host-provided HttpResponseWriter (header_sent_
 //      guards against post-send mutation).
@@ -85,23 +84,23 @@ public:
     [[nodiscard]] fiber::script::JsValue headers() noexcept;
     [[nodiscard]] fiber::script::JsValue cookies() noexcept;
 
-    // Prepares the request-wide dynamic constant slots used by every compiled script bound
-    // to package. The slot array contains only immediate or borrowed JsValues; decoded query
-    // values are copied into the request pool before they are stored. Path variables are
-    // bound separately once the route matcher has selected a candidate. Fixed $req/$conn
-    // fields are read directly by ExchangeConstExtension and do not consume slots.
-    [[nodiscard]] fiber::common::IoResult<void>
-    prepare_constants(const ConstPackage &package, std::span<const IndexedConstValue> external_values = {}) noexcept;
-    [[nodiscard]] bool bind_constant(ConstIndex index, std::string_view value) noexcept;
-    [[nodiscard]] bool bind_constants(std::span<const IndexedConstValue> values) noexcept;
-    [[nodiscard]] bool
-    bind_path_constants(const ConstPackage &package,
-                        std::span<const std::pair<std::string_view, std::string_view>> path_values) noexcept;
-    void clear_constants(std::span<const ConstIndex> indices) noexcept;
+    // Route captures for $path.<name>, injected by the host after route match and before
+    // scripts run. Names and values borrow the matcher text / request path buffer; the span
+    // itself must outlive every script execution against this ctx.
+    void set_path_vars(std::span<const std::pair<std::string_view, std::string_view>> vars) noexcept {
+        path_vars_ = vars;
+    }
 
-    // Called by ConstPackage's compiled HostCallable. package_identity must match the
-    // immutable package used by prepare_constants.
-    [[nodiscard]] fiber::script::AbiResult constant(const void *package_identity, ConstIndex index) const noexcept;
+    // Runtime entry for ConstPackage-compiled constants. `name` is the package-normalized
+    // key and `hash` its const_name_hash, both precomputed at package build. First access
+    // resolves the value from request state and memoizes it; later accesses are a single
+    // probe. Absent values resolve to Null; only allocation failure aborts (OutOfMemory).
+    //
+    // `name` must point into the caller's ConstPackage storage and is borrowed by the memo
+    // for the ctx lifetime: a compiled script and its ConstPackage must outlive every
+    // ScriptExchangeCtx the script executes against.
+    [[nodiscard]] fiber::script::AbiResult resolve_constant(ConstType type, std::string_view name,
+                                                            std::uint64_t hash) noexcept;
 
     // Looks up key on a GC object (the cached query/headers/cookies views). Returns Undefined
     // when the object is absent or the key is not present; aborts only on allocation failure.
@@ -137,6 +136,23 @@ public:
 private:
     friend class ExchangeConstExtension;
 
+    // Open-addressing memo of resolved constants (power-of-two capacity, linear probing,
+    // grown at 3/4 load so at least one slot stays empty and probes terminate). Entries
+    // hold only immediate JsValues — native strings backed by the request buffers or the
+    // exchange pool, or Null for a confirmed miss — so no GC rooting is needed.
+    //
+    // `name` borrows the normalized key from the owning ConstPackage's Ref and keeps
+    // borrowing it for the ctx lifetime. Contract: a compiled script and its ConstPackage
+    // must OUTLIVE every ScriptExchangeCtx the script executes against — the script's own
+    // compiled userdata points into the same storage, so any caller keeping the script
+    // runnable already satisfies this. name.data() == nullptr marks an empty slot.
+    struct ConstantEntry {
+        std::uint64_t hash = 0;
+        std::string_view name;
+        ConstType type = ConstType::Count;
+        fiber::script::JsValue value{};
+    };
+
     // Builds the cached object into its root slot on first access. Returns the cached
     // JsValue (or Undefined on failure). Idempotent: a failed build leaves the slot empty
     // so the next call retries.
@@ -144,6 +160,17 @@ private:
     fiber::script::JsValue build_headers() noexcept;
     fiber::script::JsValue build_cookies() noexcept;
     fiber::script::AbiResult remote_address_constant() noexcept;
+
+    [[nodiscard]] const ConstantEntry *cache_find(std::uint64_t hash, ConstType type,
+                                                  std::string_view name) const noexcept;
+    [[nodiscard]] bool cache_insert(std::uint64_t hash, ConstType type, std::string_view name,
+                                    fiber::script::JsValue value) noexcept;
+    // Resolves a constant directly from request state. Returns false only on allocation
+    // failure (query decode copy); a confirmed miss yields Null in out. Duplicate-key
+    // semantics per type: Header/Cookie first occurrence wins, Query/Path last wins —
+    // matching the previous prepare-time slot fill.
+    [[nodiscard]] bool resolve_from_request(ConstType type, std::string_view name,
+                                            fiber::script::JsValue &out) noexcept;
 
     fiber::async::Task<fiber::common::IoResult<void>> send_final_with_body(int status, std::size_t content_length,
                                                                            const std::uint8_t *data) noexcept;
@@ -164,9 +191,10 @@ private:
     // exchange.pool(); conversion failure is cached as Null, while OOM remains retryable.
     fiber::script::JsValue remote_addr_constant_{};
 
-    const void *const_package_identity_ = nullptr;
-    fiber::script::JsValue *constant_slots_ = nullptr;
-    std::size_t constant_slot_count_ = 0;
+    std::span<const std::pair<std::string_view, std::string_view>> path_vars_{};
+    ConstantEntry *constant_cache_ = nullptr; // exchange pool; null until first insert
+    std::size_t constant_cache_capacity_ = 0; // power of two
+    std::size_t constant_cache_size_ = 0;
 
     fiber::http::HttpHeaders pending_headers_;
     bool header_sent_ = false;
