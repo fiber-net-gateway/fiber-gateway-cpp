@@ -4770,6 +4770,47 @@ TEST(LiteNginxRuntimeTest, Http2BodyDisagreeingWithContentLengthIsNeverEchoed) {
     EXPECT_NE(short_of_it.status_code, 200) << short_of_it.body;
 }
 
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitBoundsWhatJsonExpandsInto) {
+    ScriptHeapLimitServer server("req.readJson(); resp.send(200, \"parsed\");");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    std::string body = "[";
+    for (int i = 0; i < 300; ++i) {
+        body += "[],";
+    }
+    body.back() = ']';
+    ASSERT_LT(body.size(), 1024U); // the text alone would fit the limit
+    ASSERT_TRUE(send_all(client, post_with_length(body)));
+    const std::string refused = recv_http_response(client);
+    EXPECT_NE(refused.find("HTTP/1.1 500"), std::string::npos) << refused;
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+
+    ASSERT_TRUE(send_all(client, post_with_length("[1,2]")));
+    const std::string next = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(next.find("HTTP/1.1 200"), std::string::npos) << next;
+}
+
+// The first bytes already rule the body out, but the script resumes with it consumed.
+TEST(LiteNginxRuntimeTest, ReadJsonReadsAnInvalidBodyToTheEnd) {
+    ScriptHeapLimitServer server("req.readJson();");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    const std::string request = post_with_length("{bad" + std::string(4096, 'x'));
+    const std::string_view all(request);
+    const std::size_t held_back = 1024;
+    ASSERT_TRUE(send_all(client, all.substr(0, all.size() - held_back)));
+    pollfd readable{.fd = client, .events = POLLIN, .revents = 0};
+    EXPECT_EQ(::poll(&readable, 1, 200), 0);
+
+    ASSERT_TRUE(send_all(client, all.substr(all.size() - held_back)));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("invalid json body"), std::string::npos) << response;
+}
+
 TEST(LiteNginxRuntimeTest, ScriptCanAnswerAHeapLimitRefusalItself) {
     ScriptHeapLimitServer server("try { req.readBinary(); } catch (e) { resp.send(413, \"too big\"); }");
     const int client = connect_client(server.port());

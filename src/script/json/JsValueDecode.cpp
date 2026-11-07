@@ -4,12 +4,17 @@
 
 #include <fiber/script/json/JsValueDecode.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <new>
 
 namespace fiber::script::json {
 namespace {
 
 constexpr std::size_t kMaxDepth = 128;
+// How much heap a byte of JSON may decode into. Documents of empty containers measure 40.
+constexpr std::size_t kMaxHeapBytesPerJsonByte = 48;
 
 enum class FrameKind : std::uint8_t {
     Array,
@@ -37,12 +42,13 @@ public:
         *out_ = JsValue::make_undefined();
         scratch_ = heap_.local_value();
         if (!scratch_) {
-            return set_error("out of memory");
+            return set_out_of_memory();
         }
         return true;
     }
 
     [[nodiscard]] const char *error_message() const noexcept { return error_message_; }
+    [[nodiscard]] bool out_of_memory() const noexcept { return out_of_memory_; }
 
     [[nodiscard]] fiber::json::DecodeCallbacks callbacks() noexcept {
         fiber::json::DecodeCallbacks callbacks;
@@ -68,6 +74,11 @@ private:
         return false;
     }
 
+    [[nodiscard]] bool set_out_of_memory() noexcept {
+        out_of_memory_ = true;
+        return set_error("out of memory");
+    }
+
     [[nodiscard]] bool attach_value(JsValue value) noexcept {
         if (!scratch_) {
             return set_error("invalid JSON builder state");
@@ -90,7 +101,7 @@ private:
                 return set_error("invalid JSON builder state");
             }
             if (!gc_array_push(&heap_, frame.container, *scratch_)) {
-                return set_error("out of memory");
+                return set_out_of_memory();
             }
             *scratch_ = JsValue::make_undefined();
             return true;
@@ -104,7 +115,7 @@ private:
             return set_error("invalid JSON builder state");
         }
         if (!gc_object_set(&heap_, frame.container, *frame.pending_key, *scratch_)) {
-            return set_error("out of memory");
+            return set_out_of_memory();
         }
         *frame.pending_key = JsValue::make_undefined();
         *scratch_ = JsValue::make_undefined();
@@ -118,7 +129,7 @@ private:
 
         ValueHandle rooted_container = heap_.local_value();
         if (!rooted_container) {
-            return set_error("out of memory");
+            return set_out_of_memory();
         }
         *rooted_container = container;
 
@@ -126,7 +137,7 @@ private:
         if (kind == FrameKind::Object) {
             pending_key = heap_.local_value();
             if (!pending_key) {
-                return set_error("out of memory");
+                return set_out_of_memory();
             }
             *pending_key = JsValue::make_undefined();
         }
@@ -166,7 +177,7 @@ private:
 
     [[nodiscard]] bool add_string(const char *data, std::size_t len) noexcept {
         if (!gc_make_string(&heap_, scratch_, data, len)) {
-            return set_error("out of memory");
+            return set_out_of_memory();
         }
         return attach_value(*scratch_);
     }
@@ -184,14 +195,14 @@ private:
         }
 
         if (!gc_make_string(&heap_, frame.pending_key, data, len)) {
-            return set_error("out of memory");
+            return set_out_of_memory();
         }
         return true;
     }
 
     [[nodiscard]] bool start_array() noexcept {
         if (!gc_make_array(&heap_, scratch_, 0)) {
-            return set_error("out of memory");
+            return set_out_of_memory();
         }
         JsValue value = *scratch_;
         return attach_value(value) && push_frame(FrameKind::Array, value);
@@ -199,7 +210,7 @@ private:
 
     [[nodiscard]] bool start_object() noexcept {
         if (!gc_make_object(&heap_, scratch_, 0)) {
-            return set_error("out of memory");
+            return set_out_of_memory();
         }
         JsValue value = *scratch_;
         return attach_value(value) && push_frame(FrameKind::Object, value);
@@ -261,7 +272,19 @@ private:
     Frame frames_[kMaxDepth] = {};
     std::size_t depth_ = 0;
     const char *error_message_ = nullptr;
+    bool out_of_memory_ = false;
 };
+
+// Finishes the report of a failed decode with what only the builder knows, and clears out.
+void settle_failure(DecodeStatus status, const DecodeBuilder &builder, ValueHandle out, ParseError &error) noexcept {
+    if (out) {
+        *out = JsValue::make_undefined();
+    }
+    if (status == DecodeStatus::Canceled && builder.error_message()) {
+        error.message = builder.error_message();
+    }
+    error.out_of_memory = error.out_of_memory || builder.out_of_memory();
+}
 
 } // namespace
 
@@ -286,6 +309,7 @@ DecodeStatus decode_js_value(GcHeap &heap, const char *data, std::size_t len, Va
         if (error) {
             error->message = builder.error_message();
             error->offset = 0;
+            error->out_of_memory = builder.out_of_memory();
         }
         return DecodeStatus::Error;
     }
@@ -293,12 +317,7 @@ DecodeStatus decode_js_value(GcHeap &heap, const char *data, std::size_t len, Va
     ParseError parse_error{};
     DecodeStatus status = fiber::json::decode(data, len, builder.callbacks(), &parse_error);
     if (!decode_success(status)) {
-        if (out) {
-            *out = JsValue::make_undefined();
-        }
-        if (status == DecodeStatus::Canceled && builder.error_message()) {
-            parse_error.message = builder.error_message();
-        }
+        settle_failure(status, builder, out, parse_error);
     }
 
     if (error) {
@@ -317,6 +336,7 @@ DecodeStatus decode_js_value(GcHeap &heap, const char *data, std::size_t len, Js
         if (error) {
             error->message = "out of memory";
             error->offset = 0;
+            error->out_of_memory = true;
         }
         return DecodeStatus::Error;
     }
@@ -326,6 +346,68 @@ DecodeStatus decode_js_value(GcHeap &heap, const char *data, std::size_t len, Js
         out = *rooted;
     }
     return status;
+}
+
+struct JsValueStreamDecoder::State {
+    State(GcHeap &heap, ValueHandle out) noexcept : builder(heap, out), decoder(builder.callbacks()) {}
+
+    DecodeBuilder builder;
+    fiber::json::Decoder<> decoder;
+};
+
+JsValueStreamDecoder::JsValueStreamDecoder(GcHeap &heap, ValueHandle out) noexcept :
+    heap_(heap), out_(out), state_(new (std::nothrow) State(heap, out)) {
+    if (!state_) {
+        error_.message = "out of memory";
+        error_.out_of_memory = true;
+        status_ = DecodeStatus::Error;
+    } else if (!state_->builder.init()) {
+        error_.message = state_->builder.error_message();
+        error_.out_of_memory = state_->builder.out_of_memory();
+        status_ = DecodeStatus::Error;
+    }
+}
+
+JsValueStreamDecoder::~JsValueStreamDecoder() = default;
+
+bool JsValueStreamDecoder::failed() const noexcept {
+    return status_ == DecodeStatus::Error || status_ == DecodeStatus::Canceled;
+}
+
+DecodeStatus JsValueStreamDecoder::settle(DecodeStatus status) noexcept {
+    status_ = status;
+    if (failed()) {
+        error_ = state_->decoder.error();
+        settle_failure(status, state_->builder, out_, error_);
+    }
+    return status;
+}
+
+DecodeStatus JsValueStreamDecoder::feed(const char *data, std::size_t len) noexcept {
+    if (failed()) {
+        return status_;
+    }
+    // Nothing can be collected once the chunk is being decoded, and an allocation refused then
+    // ends the decode. So if the chunk might not fit, reclaim what the script left behind now.
+    const std::size_t most = len > std::numeric_limits<std::size_t>::max() / kMaxHeapBytesPerJsonByte
+                                     ? std::numeric_limits<std::size_t>::max()
+                                     : len * kMaxHeapBytesPerJsonByte;
+    (void) heap_.ensure_can_alloc(std::min(most, heap_.max_bytes()));
+    // Deferred for the reason decode_js_value gives: all of this decode's values stay rooted.
+    GcHeap::NoGcScope no_gc(heap_, /*defer_collect=*/true);
+    return settle(state_->decoder.parse(data, len));
+}
+
+DecodeStatus JsValueStreamDecoder::finish() noexcept {
+    if (failed()) {
+        return status_;
+    }
+    GcHeap::NoGcScope no_gc(heap_, /*defer_collect=*/true);
+    return settle(state_->decoder.finish());
+}
+
+std::size_t JsValueStreamDecoder::pending_bytes() const noexcept {
+    return state_ ? state_->decoder.pending_bytes() : 0;
 }
 
 } // namespace fiber::script::json

@@ -66,10 +66,15 @@ AbiResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Lib
         data = "";
     }
 
+    // The decode cannot collect once it starts, so make what room garbage is taking first.
+    (void) heap.ensure_can_alloc(text.size());
     fiber::json::ParseError error{};
     fiber::json::DecodeStatus status = fiber::script::json::decode_js_value(heap, data, text.size(), out, &error);
     if (status == fiber::json::DecodeStatus::Complete || status == fiber::json::DecodeStatus::Ok) {
         return AbiResult::success(*out);
+    }
+    if (error.out_of_memory) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
 
     // Parse failure: build a catchable SyntaxError with the decoder's message/offset.
