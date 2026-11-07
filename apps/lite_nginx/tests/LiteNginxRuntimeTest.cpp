@@ -5733,6 +5733,15 @@ TEST(LiteNginxRuntimeTest, HttpProxyPassFlushControlsResponseBodyBuffering) {
     }
 }
 
+// The staged upstream pauses mid-body for 500 ms, well past the timeout given here. A body may
+// pause longer than it took to reach the upstream, so that timeout does not bound it.
+TEST(LiteNginxRuntimeTest, HttpProxyPassResponseBodyMayPausePastAShortTimeout) {
+    StagedProxyPassOutcome outcome = run_staged_proxy_pass("{timeout: 100}");
+    EXPECT_TRUE(outcome.error.empty()) << outcome.error;
+    EXPECT_NE(outcome.response.find("HTTP/1.1 200"), std::string::npos) << outcome.response;
+    EXPECT_NE(outcome.response.find("firstsecond"), std::string::npos) << outcome.response;
+}
+
 TEST(LiteNginxRuntimeTest, HttpProxyPassFlushControlsGzipSyncFlush) {
     struct TestCase {
         std::string_view options;

@@ -1221,7 +1221,7 @@ interface HttpService {
 | `query` | A non-empty string replaces inbound query; an object form-encodes a replacement (an empty object removes it); another type or empty string inherits inbound query |
 | `headers` | Sets/removes fields after copying inbound request headers; conversion matches `request()`. Request framing fields are removed again afterward |
 | `responseHeaders` | Sets/removes fields after filtering upstream response headers; conversion matches `headers` |
-| `timeout` | Only a positive integer applies; default 30000 ms. Used for upstream acquisition, connection, I/O, and ordinary response reads |
+| `timeout` | Only a positive integer applies; default 30000 ms. Used for upstream acquisition, connection, and I/O. Reading the request or response body waits for the larger of this and 60 seconds without progress. Writing the response body to the client always waits 30 seconds |
 | `flush` | Only boolean `true` enables the low-latency body pipe; default `false` |
 | `websocket` | Only boolean `true` enables WebSocket proxying; default `false` |
 

@@ -29,6 +29,7 @@
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -58,6 +59,9 @@ using namespace fiber::http::proxy_core;
 namespace {
 
 constexpr std::chrono::milliseconds kDefaultTimeout{30000};
+// How long a client may leave a proxied response body write waiting. Fixed rather than taken from
+// the script's timeout, which describes the upstream.
+constexpr std::chrono::milliseconds kResponseBodyWriteTimeout{30000};
 
 // Budgets against a hostile upstream: the buffered response body is capped
 // (options.maxResponseSize overrides the default) and only a bounded run of
@@ -785,11 +789,15 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     if (!send_result) {
         co_return error_exn(*heap, "http.proxyPass: send request header failed");
     }
+    // A body may pause for longer than it takes to reach the upstream, so a short timeout does
+    // not bound it, in either direction.
+    const std::chrono::milliseconds body_timeout = std::max(timeout, kBodyIdleTimeout);
+
     if (!req_end_stream) {
         ctx->mark_request_body_consumed();
         const ScriptRequestBody request_body = ctx->request_body();
         for (;;) {
-            auto body_result = co_await request_body.read(kBodyChunkSize);
+            auto body_result = co_await request_body.read(kBodyChunkSize, body_timeout);
             if (!body_result) {
                 (void) upstream.abort(body_result.error());
                 co_return error_exn(*heap, "http.proxyPass: read request body failed");
@@ -899,8 +907,8 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     const fiber::http::HttpBodyPipeOptions pipe_options{
             .buffer_size = fiber::http::kDefaultBodyPipeBufferSize,
             .low_water = flush ? fiber::http::kUnbufferedBodyPipeLowWater : fiber::http::kDefaultBodyPipeLowWater,
-            .read_timeout = timeout,
-            .write_timeout = std::chrono::milliseconds::max(),
+            .read_timeout = body_timeout,
+            .write_timeout = kResponseBodyWriteTimeout,
     };
     auto pipe_result = co_await fiber::http::pipe_http_body(
             fiber::http::make_http_body_pipe_reader(upstream),

@@ -12,6 +12,10 @@
 
 namespace fiber::http_script {
 
+// How long a script waits for the next bytes of a body. It limits each read's idle wait, not the
+// whole transfer, like proxy_read_timeout's default.
+inline constexpr std::chrono::milliseconds kBodyIdleTimeout{60000};
+
 class ScriptRequestBody {
 public:
     using DiscardFn = async::Task<common::IoResult<void>> (*)(void *context,

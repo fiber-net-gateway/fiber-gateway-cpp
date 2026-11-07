@@ -1210,7 +1210,7 @@ interface HttpService {
 | `query` | 非空字符串原样替换；对象按 form-urlencoded 替换（空对象会删除入站 query）；其他类型和空字符串继承入站 query |
 | `headers` | 对复制后的上游请求头执行设置/删除；值转换规则与 `request()` 相同。处理完后再次删除请求 framing headers |
 | `responseHeaders` | 对过滤后的下游响应头执行设置/删除；值转换规则与 `headers` 相同 |
-| `timeout` | 只有正整数生效，单位毫秒，默认 30000；用于上游获取、连接、读写和普通响应读取 |
+| `timeout` | 只有正整数生效，单位毫秒，默认 30000；用于上游获取、连接和读写。读取请求 body 和响应 body 时，等待时长取它和 60 秒中较大的值，按没有进展的时间计算。向客户端写响应 body 时固定等待 30 秒 |
 | `flush` | 只有布尔 `true` 启用低延迟 body pipe，默认 `false` |
 | `websocket` | 只有布尔 `true` 启用 WebSocket 代理，默认 `false` |
 
