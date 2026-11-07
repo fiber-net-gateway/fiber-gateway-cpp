@@ -36,6 +36,7 @@
 #include <fiber/common/util/RoutePathMatcher.h>
 #include <fiber/http_script/ExchangeConstExtension.h>
 #include <fiber/http_script/HttpScriptLib.h>
+#include <fiber/http_script/HttpScriptServices.h>
 #include <fiber/http_script/RouteScriptExtension.h>
 #include <fiber/http_script/ScriptExchangeCtx.h>
 #include <fiber/script/JsGc.h>
@@ -570,6 +571,7 @@ public:
 
     Task<fiber::common::IoResult<fiber::mem::IoBufChain>> read_body(std::size_t max_bytes,
                                                                     std::chrono::milliseconds timeout) noexcept {
+        read_timeout_ = timeout;
         auto result = co_await exchange_.read_body(max_bytes, timeout);
         if (result) {
             bytes_read_ += result->readable_bytes();
@@ -585,11 +587,13 @@ public:
     fiber::common::IoResult<void> abort(fiber::common::IoErr reason) noexcept { return exchange_.abort(reason); }
 
     [[nodiscard]] std::size_t discarded_after() const noexcept { return discarded_after_; }
+    [[nodiscard]] std::chrono::milliseconds read_timeout() const noexcept { return read_timeout_; }
 
 private:
     fiber::http::HttpExchange &exchange_;
     std::size_t bytes_read_ = 0;
     std::size_t discarded_after_ = 0;
+    std::chrono::milliseconds read_timeout_{0};
 };
 
 TEST(HttpScriptFuncsTest, ReadJsonGivesUpOnALongTokenAsSoonAsItCannotFit) {
@@ -622,6 +626,156 @@ TEST(HttpScriptFuncsTest, ReadJsonGivesUpOnALongTokenAsSoonAsItCannotFit) {
     EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
     EXPECT_GT(discarded_after->load(), 0U);
     EXPECT_LT(discarded_after->load(), kTokenBytes / 2);
+}
+
+class LoopbackUpstream final : public fiber::http_script::HttpUpstreamConnection {
+public:
+    explicit LoopbackUpstream(fiber::event::EventLoop &loop) : connection_(loop) {}
+
+    [[nodiscard]] fiber::http::Http1ClientConnection &connection() noexcept override { return connection_; }
+    [[nodiscard]] std::string_view host_header() const noexcept override { return "upstream"; }
+
+private:
+    fiber::http::Http1ClientConnection connection_;
+};
+
+class LoopbackServices final : public fiber::http_script::HttpScriptServices {
+public:
+    explicit LoopbackServices(std::uint16_t port) noexcept : port_(port) {}
+
+    [[nodiscard]] Task<fiber::common::IoResult<std::unique_ptr<fiber::http_script::HttpUpstreamConnection>>>
+    acquire(const fiber::http_script::HttpTargetSpec & /*target*/,
+            std::chrono::milliseconds timeout) noexcept override {
+        auto upstream = std::make_unique<LoopbackUpstream>(fiber::event::EventLoop::current());
+        auto connected = co_await upstream->connection().connect(
+                fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port_), timeout);
+        if (!connected) {
+            co_return std::unexpected(connected.error());
+        }
+        co_return std::unique_ptr<fiber::http_script::HttpUpstreamConnection>(std::move(upstream));
+    }
+
+private:
+    std::uint16_t port_;
+};
+
+// Forwards to the exchange, noting the timeout of the last body write.
+class WatchedResponse {
+public:
+    explicit WatchedResponse(fiber::http::HttpExchange &exchange) noexcept :
+        inner_(fiber::http::make_http_response_writer(exchange)) {}
+
+    [[nodiscard]] fiber::http::HttpResponseWriter writer() noexcept { return {this, kOps}; }
+    [[nodiscard]] std::chrono::milliseconds write_timeout() const noexcept { return write_timeout_; }
+
+private:
+    using Written = Task<fiber::common::IoResult<std::size_t>>;
+
+    static WatchedResponse *self(void *ctx) noexcept { return static_cast<WatchedResponse *>(ctx); }
+    static Task<fiber::common::IoResult<void>>
+    send_header(void *ctx, const fiber::http::OutgoingHeaderBlockView &header, std::chrono::milliseconds timeout) {
+        return self(ctx)->inner_.send_header(header, timeout);
+    }
+    static Written write_all_chain(void *ctx, fiber::mem::IoBufChain chunk,
+                                   std::chrono::milliseconds timeout) noexcept {
+        return self(ctx)->inner_.write_all(std::move(chunk), timeout);
+    }
+    static Written write_all_bytes(void *ctx, const std::uint8_t *buf, std::size_t len, bool end,
+                                   std::chrono::milliseconds timeout) noexcept {
+        return self(ctx)->inner_.write_all(buf, len, end, timeout);
+    }
+    static Written write_chain(void *ctx, fiber::mem::IoBufChain &chunk, std::chrono::milliseconds timeout) noexcept {
+        self(ctx)->write_timeout_ = timeout;
+        return self(ctx)->inner_.write(chunk, timeout);
+    }
+    static Written write_bytes(void *ctx, const std::uint8_t *buf, std::size_t len, bool end,
+                               std::chrono::milliseconds timeout) noexcept {
+        self(ctx)->write_timeout_ = timeout;
+        return self(ctx)->inner_.write(buf, len, end, timeout);
+    }
+    static Task<fiber::common::IoResult<void>> flush(void *ctx, std::chrono::milliseconds timeout) noexcept {
+        return self(ctx)->inner_.flush(timeout);
+    }
+    static fiber::common::IoResult<void> abort(void *ctx, fiber::common::IoErr reason) noexcept {
+        return self(ctx)->inner_.abort(reason);
+    }
+
+    static constexpr fiber::http::HttpResponseWriter::Ops kOps{
+            .send_header = &send_header,
+            .write_all_chain = &write_all_chain,
+            .write_all_bytes = &write_all_bytes,
+            .write_chain = &write_chain,
+            .write_bytes = &write_bytes,
+            .flush = &flush,
+            .abort = &abort,
+    };
+
+    fiber::http::HttpResponseWriter inner_;
+    std::chrono::milliseconds write_timeout_{0};
+};
+
+struct ProxyPassBodyTimeouts {
+    std::chrono::milliseconds read{0};
+    std::chrono::milliseconds write{0};
+};
+
+// What proxyPass passes when it moves a body. No test can wait out the real timeouts, and with
+// none at all a stalled client would hold the upstream connection forever.
+ProxyPassBodyTimeouts proxy_pass_body_timeouts(std::string_view options) {
+    ServerFixture upstream;
+    auto echo = compile_http_script("resp.send(200, req.readBinary());");
+    EXPECT_NE(echo, nullptr);
+    upstream.start(make_script_handler(echo));
+
+    std::string source = "directive svc = http \"@backend\"; svc.proxyPass(";
+    source.append(options);
+    source.append(");");
+    auto compiled = compile_route_script(source, {});
+    EXPECT_TRUE(compiled.ok) << compiled.error;
+
+    LoopbackServices services(upstream.port);
+    auto read_timeout = std::make_shared<std::atomic<std::int64_t>>(0);
+    auto write_timeout = std::make_shared<std::atomic<std::int64_t>>(0);
+    ServerFixture front;
+    front.start([&compiled, &services, read_timeout, write_timeout](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        WatchedBody body(exchange);
+        WatchedResponse response(exchange);
+        fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, fiber::http_script::ScriptConnectionInfo{},
+                                                  fiber::http_script::make_script_request_body(body)};
+        ctx.set_response_writer(response.writer());
+        ctx.set_services(&services);
+        fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
+        auto result = co_await compiled.script->exec_async(root, &ctx, heap);
+        (void) result;
+        read_timeout->store(body.read_timeout().count());
+        write_timeout->store(response.write_timeout().count());
+        co_return;
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Post;
+    req.target = "/x";
+    req.body = "payload";
+    ClientResult result = front.request(std::move(req));
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_EQ(result.body, "payload");
+    front.stop();
+    upstream.stop();
+    return {.read = std::chrono::milliseconds(read_timeout->load()),
+            .write = std::chrono::milliseconds(write_timeout->load())};
+}
+
+TEST(HttpScriptFuncsTest, ProxyPassBodyReadsWaitAtLeastAMinute) {
+    EXPECT_EQ(proxy_pass_body_timeouts("").read, std::chrono::seconds(60));
+    EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 500}").read, std::chrono::seconds(60));
+    EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 90000}").read, std::chrono::seconds(90));
+}
+
+TEST(HttpScriptFuncsTest, ProxyPassResponseBodyWritesWaitThirtySecondsWhateverTheTimeout) {
+    EXPECT_EQ(proxy_pass_body_timeouts("").write, std::chrono::seconds(30));
+    EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 500}").write, std::chrono::seconds(30));
+    EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 90000}").write, std::chrono::seconds(30));
 }
 
 TEST(HttpScriptFuncsTest, ReadJsonReportsBadJsonAsIt) {

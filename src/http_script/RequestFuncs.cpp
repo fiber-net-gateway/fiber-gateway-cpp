@@ -20,7 +20,6 @@
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -49,8 +48,6 @@ using fiber::script::std_lib::string_utf8_view;
 using JsonValueDecoder = fiber::script::json::JsValueStreamDecoder;
 
 constexpr std::size_t kBodyReadBytes = 65536;
-// Limits each read's idle wait, not the whole upload, like proxy_read_timeout's default.
-constexpr std::chrono::milliseconds kBodyIdleTimeout{60000};
 // Tighter than the pipe's default: a pipe holds one buffer, a body held for a GC copy can
 // reach the heap limit, so what it pins must stay close to what it counts.
 constexpr std::size_t kHeldBodyCoalesceRatio = 2;
