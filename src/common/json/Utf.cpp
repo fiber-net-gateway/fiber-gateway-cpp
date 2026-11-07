@@ -134,7 +134,7 @@ bool utf8_write_utf16(const char *data, std::size_t len, char16_t *dst, std::siz
     return out_pos == dst_len;
 }
 
-void utf8_repair(std::string_view src, std::string &out) {
+void utf8_repair(std::string_view src, std::string &out) noexcept {
     const char *data = src.data();
     const std::size_t len = src.size();
     std::size_t pos = 0;

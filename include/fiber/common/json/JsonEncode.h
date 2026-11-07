@@ -7,26 +7,40 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace fiber::json {
 
 class OutputSink {
 public:
     virtual ~OutputSink() = default;
-    [[nodiscard]] virtual bool write(const char *data, size_t len) = 0;
-    virtual void reset() {}
+    [[nodiscard]] virtual bool write(const char *data, size_t len) noexcept = 0;
+    virtual void reset() noexcept {}
 };
 
 class CallbackSink final : public OutputSink {
 public:
-    using PrintCallback = int (*)(void *ctx, const char *str, size_t len);
+    using PrintCallback = int (*)(void *ctx, const char *str, size_t len) noexcept;
 
-    CallbackSink(PrintCallback cb, void *ctx);
-    [[nodiscard]] bool write(const char *data, size_t len) override;
+    CallbackSink(PrintCallback cb, void *ctx) noexcept;
+    [[nodiscard]] bool write(const char *data, size_t len) noexcept override;
 
 private:
     PrintCallback callback_;
     void *ctx_;
+};
+
+// Appends to a caller-owned std::string. An allocation failure fails the write, so the
+// generator stops with ErrorState; out_of_memory() tells that apart from an encoding error.
+class StringSink final : public OutputSink {
+public:
+    explicit StringSink(std::string &out) noexcept : out_(out) {}
+    [[nodiscard]] bool write(const char *data, size_t len) noexcept override;
+    [[nodiscard]] bool out_of_memory() const noexcept { return out_of_memory_; }
+
+private:
+    std::string &out_;
+    bool out_of_memory_ = false;
 };
 
 class Generator {
@@ -81,52 +95,53 @@ public:
         EscapeSolidus = 0x10
     };
 
-    explicit Generator(OutputSink &sink);
+    explicit Generator(OutputSink &sink) noexcept;
     Generator(const Generator &) = delete;
     Generator &operator=(const Generator &) = delete;
     Generator(Generator &&) = delete;
     Generator &operator=(Generator &&) = delete;
 
-    void clear();
-    void set_option(Option opt, bool enabled = true);
-    void set_indent_string(const std::string &indent);
+    void clear() noexcept;
+    void set_option(Option opt, bool enabled = true) noexcept;
+    // Returns false, keeping the current indent, when the copy cannot be allocated.
+    [[nodiscard]] bool set_indent_string(std::string_view indent) noexcept;
 
-    [[nodiscard]] State get_state() const;
+    [[nodiscard]] State get_state() const noexcept;
 
-    Result map_open();
-    Result map_close();
-    Result array_open();
-    Result array_close();
+    Result map_open() noexcept;
+    Result map_close() noexcept;
+    Result array_open() noexcept;
+    Result array_close() noexcept;
 
-    Result string(const char *str, size_t len);
-    Result string(const std::string &str);
-    Result string_from_chunks(StringChunkProducer producer, void *ctx);
+    Result string(const char *str, size_t len) noexcept;
+    Result string(const std::string &str) noexcept;
+    Result string_from_chunks(StringChunkProducer producer, void *ctx) noexcept;
     // Binary values are encoded as base64 JSON strings.
-    Result binary(const std::uint8_t *data, size_t len);
-    Result integer(int64_t value);
-    Result double_value(double value);
-    Result bool_value(bool value);
-    Result null_value();
+    Result binary(const std::uint8_t *data, size_t len) noexcept;
+    Result integer(int64_t value) noexcept;
+    Result double_value(double value) noexcept;
+    Result bool_value(bool value) noexcept;
+    Result null_value() noexcept;
 
 
 private:
     static constexpr size_t MAX_STACK = 128;
 
-    [[nodiscard]] bool has_option(Option opt) const;
-    [[nodiscard]] Result append(const char *data, size_t len);
-    [[nodiscard]] Result append(char ch);
-    [[nodiscard]] Result append_indent(size_t level);
-    [[nodiscard]] Result prefix_for_value();
-    [[nodiscard]] Result prefix_for_key();
-    [[nodiscard]] Result write_string(const char *str, size_t len);
-    [[nodiscard]] Result write_string_content(const char *str, size_t len);
-    [[nodiscard]] Result write_string_from_chunks(StringChunkProducer producer, void *ctx);
-    [[nodiscard]] Result finish_value();
-    [[nodiscard]] Result push(State state);
-    [[nodiscard]] Result pop();
-    [[nodiscard]] Result set_error(Result result);
-    [[nodiscard]] State &current_state();
-    [[nodiscard]] const State &current_state() const;
+    [[nodiscard]] bool has_option(Option opt) const noexcept;
+    [[nodiscard]] Result append(const char *data, size_t len) noexcept;
+    [[nodiscard]] Result append(char ch) noexcept;
+    [[nodiscard]] Result append_indent(size_t level) noexcept;
+    [[nodiscard]] Result prefix_for_value() noexcept;
+    [[nodiscard]] Result prefix_for_key() noexcept;
+    [[nodiscard]] Result write_string(const char *str, size_t len) noexcept;
+    [[nodiscard]] Result write_string_content(const char *str, size_t len) noexcept;
+    [[nodiscard]] Result write_string_from_chunks(StringChunkProducer producer, void *ctx) noexcept;
+    [[nodiscard]] Result finish_value() noexcept;
+    [[nodiscard]] Result push(State state) noexcept;
+    [[nodiscard]] Result pop() noexcept;
+    [[nodiscard]] Result set_error(Result result) noexcept;
+    [[nodiscard]] State &current_state() noexcept;
+    [[nodiscard]] const State &current_state() const noexcept;
 
     OutputSink &sink_;
     State state_stack_[MAX_STACK] = {};

@@ -23,20 +23,6 @@ namespace fiber::script::std_lib {
 
 namespace {
 
-// Writes generated JSON into a std::string buffer. Mirrors the StringSink used by
-// http_script/ScriptExchangeCtx and the JsValueEncode tests.
-class StringSink final : public fiber::json::OutputSink {
-public:
-    explicit StringSink(std::string &out) noexcept : out_(out) {}
-    [[nodiscard]] bool write(const char *data, std::size_t len) noexcept override {
-        out_.append(data, len);
-        return true;
-    }
-
-private:
-    std::string &out_;
-};
-
 // Materializes a view as a heap String result, mapping make_string's OOM (returns
 // undefined) to a graceful abort. Mirrors StringsFuncs' make_string_result.
 AbiResult make_string_result(GcHeap &heap, std::string_view sv) noexcept {
@@ -126,9 +112,12 @@ AbiResult stringify_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
     }
 
     std::string out;
-    StringSink sink(out);
+    fiber::json::StringSink sink(out);
     fiber::json::Generator gen(sink);
     fiber::json::Generator::Result result = fiber::script::json::encode_js_value(gen, value);
+    if (sink.out_of_memory()) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
     if (result != fiber::json::Generator::Result::OK) {
         return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
     }

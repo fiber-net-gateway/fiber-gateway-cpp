@@ -31,6 +31,7 @@ enum class JsonPathCompileErrorCode : std::uint8_t {
     WildcardConflict,
     CaptureConflict,
     PathTooDeep,
+    OutOfMemory,
 };
 
 struct JsonPathCompileError {
@@ -50,8 +51,9 @@ public:
     JsonPathProgram(JsonPathProgram &&) noexcept = default;
     JsonPathProgram &operator=(JsonPathProgram &&) noexcept = default;
 
+    // Allocation failure is reported as JsonPathCompileErrorCode::OutOfMemory.
     [[nodiscard]] static std::expected<JsonPathProgram, JsonPathCompileError>
-    compile(std::span<const JsonPathRule> rules);
+    compile(std::span<const JsonPathRule> rules) noexcept;
 
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] std::size_t rule_count() const noexcept;
@@ -81,6 +83,10 @@ private:
         [[nodiscard]] bool has_children() const noexcept;
     };
 
+    // compile() turns bad_alloc from these two into OutOfMemory. They must stay
+    // potentially-throwing: noexcept here would terminate before reaching its catch.
+    [[nodiscard]] static std::expected<JsonPathProgram, JsonPathCompileError>
+    compile_rules(std::span<const JsonPathRule> rules);
     [[nodiscard]] std::uint32_t add_node();
     [[nodiscard]] std::uint32_t find_exact(std::uint32_t node, std::string_view key) const noexcept;
     [[nodiscard]] std::uint32_t find_index(std::uint32_t node, std::size_t index) const noexcept;

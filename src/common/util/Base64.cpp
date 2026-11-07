@@ -28,33 +28,36 @@ constexpr int decode_digit(unsigned char c) noexcept {
 
 } // namespace
 
-std::string base64_encode(const std::uint8_t *data, std::size_t len) {
-    std::string out;
-    out.reserve(((len + 2) / 3) * 4);
+void base64_encode_to(const std::uint8_t *data, std::size_t len, char *out) noexcept {
     std::size_t i = 0;
     while (i + 2 < len) {
         std::uint32_t triple = (static_cast<std::uint32_t>(data[i]) << 16) |
                                (static_cast<std::uint32_t>(data[i + 1]) << 8) | static_cast<std::uint32_t>(data[i + 2]);
-        out.push_back(kEnc[(triple >> 18) & 0x3F]);
-        out.push_back(kEnc[(triple >> 12) & 0x3F]);
-        out.push_back(kEnc[(triple >> 6) & 0x3F]);
-        out.push_back(kEnc[triple & 0x3F]);
+        *out++ = kEnc[(triple >> 18) & 0x3F];
+        *out++ = kEnc[(triple >> 12) & 0x3F];
+        *out++ = kEnc[(triple >> 6) & 0x3F];
+        *out++ = kEnc[triple & 0x3F];
         i += 3;
     }
     if (i < len) {
         std::uint32_t triple = static_cast<std::uint32_t>(data[i]) << 16;
-        out.push_back(kEnc[(triple >> 18) & 0x3F]);
+        *out++ = kEnc[(triple >> 18) & 0x3F];
         if (i + 1 < len) {
             triple |= static_cast<std::uint32_t>(data[i + 1]) << 8;
-            out.push_back(kEnc[(triple >> 12) & 0x3F]);
-            out.push_back(kEnc[(triple >> 6) & 0x3F]);
-            out.push_back('=');
+            *out++ = kEnc[(triple >> 12) & 0x3F];
+            *out++ = kEnc[(triple >> 6) & 0x3F];
+            *out++ = '=';
         } else {
-            out.push_back(kEnc[(triple >> 12) & 0x3F]);
-            out.push_back('=');
-            out.push_back('=');
+            *out++ = kEnc[(triple >> 12) & 0x3F];
+            *out++ = '=';
+            *out++ = '=';
         }
     }
+}
+
+std::string base64_encode(const std::uint8_t *data, std::size_t len) {
+    std::string out(base64_encoded_size(len), '\0');
+    base64_encode_to(data, len, out.data());
     return out;
 }
 

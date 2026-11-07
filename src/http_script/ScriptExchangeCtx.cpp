@@ -25,19 +25,10 @@ namespace {
 // Pre-hashed Cookie header name for per-request cookie parsing.
 constexpr std::uint64_t kCookieHash = fiber::http::http_header_name_hash("cookie");
 
-// Writes generated JSON into a std::string buffer. Used by write_json to materialize a
-// JsValue as bytes before handing them to HttpExchange::write_all.
-class StringSink final : public fiber::json::OutputSink {
-public:
-    explicit StringSink(std::string &out) noexcept : out_(out) {}
-    [[nodiscard]] bool write(const char *data, std::size_t len) noexcept override {
-        out_.append(data, len);
-        return true;
-    }
-
-private:
-    std::string &out_;
-};
+// The error a failed JSON encode into sink is reported as.
+fiber::common::IoErr json_encode_error(const fiber::json::StringSink &sink) noexcept {
+    return sink.out_of_memory() ? fiber::common::IoErr::NoMem : fiber::common::IoErr::Invalid;
+}
 
 // Stores a string value into the object at obj_root under key, overwriting any prior
 // value (mirrors Java ObjectNode.put). Returns false on allocation failure. The new
@@ -413,12 +404,12 @@ ScriptExchangeCtx::send_final_with_body(int status, std::size_t content_length, 
 fiber::async::Task<fiber::common::IoResult<void>>
 ScriptExchangeCtx::write_json(int status, const fiber::script::JsValue &body) noexcept {
     std::string json;
-    StringSink sink(json);
+    fiber::json::StringSink sink(json);
     fiber::json::Generator gen(sink);
     auto encode_result = fiber::script::json::encode_js_value(gen, body);
     if (encode_result != fiber::json::Generator::Result::OK &&
         encode_result != fiber::json::Generator::Result::GenerateComplete) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
     set_response_header("Content-Type", "application/json");
     co_return co_await send_final_with_body(status, json.size(), reinterpret_cast<const std::uint8_t *>(json.data()));
@@ -436,21 +427,21 @@ fiber::async::Task<fiber::common::IoResult<void>> ScriptExchangeCtx::write_empty
 fiber::async::Task<fiber::common::IoResult<void>>
 ScriptExchangeCtx::write_error_json(int status, std::string_view error_name) noexcept {
     std::string json;
-    StringSink sink(json);
+    fiber::json::StringSink sink(json);
     fiber::json::Generator gen(sink);
     using R = fiber::json::Generator::Result;
     if (gen.map_open() != R::OK) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
     if (gen.string("error", 5) != R::OK) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
     if (gen.string(error_name.data(), error_name.size()) != R::OK) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
     const R close_result = gen.map_close();
     if (close_result != R::OK && close_result != R::GenerateComplete) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
     set_response_header("Content-Type", "application/json");
     co_return co_await send_final_with_body(status, json.size(), reinterpret_cast<const std::uint8_t *>(json.data()));
