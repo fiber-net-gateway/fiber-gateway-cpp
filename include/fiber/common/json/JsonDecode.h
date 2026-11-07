@@ -283,7 +283,9 @@ template<std::size_t MaxDepth = 128>
                                   ParseError *error = nullptr) noexcept {
     Decoder<MaxDepth> decoder(callbacks);
     DecodeStatus status = decoder.parse(data, len);
-    if (status == DecodeStatus::NeedMore) {
+    // Also after Complete: a token after the value that ran into the end of the input is still
+    // held, and only finishing rejects it.
+    if (status == DecodeStatus::NeedMore || status == DecodeStatus::Complete) {
         status = decoder.finish();
     }
     if (error) {
