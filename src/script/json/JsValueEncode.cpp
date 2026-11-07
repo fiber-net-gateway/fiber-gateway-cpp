@@ -129,19 +129,24 @@ Generator::Result JsValueEncoder::step_exception(Frame &frame) noexcept {
         case 0:
             return gen_.string("position", 8);
         case 1:
-            return gen_.integer(exc->position);
+            return gen_.integer(exc ? exc->position : -1);
         case 2:
             return gen_.string("name", 4);
-        case 3:
-            return exc->name ? emit_gc_string(exc->name) : gen_.null_value();
+        case 3: {
+            if (exc) {
+                return exc->name ? emit_gc_string(exc->name) : gen_.null_value();
+            }
+            const std::string_view name = exception_kind_name(frame.tagged);
+            return gen_.string(name.data(), name.size());
+        }
         case 4:
             return gen_.string("message", 7);
         case 5:
-            return exc->message ? emit_gc_string(exc->message) : gen_.null_value();
+            return exc && exc->message ? emit_gc_string(exc->message) : gen_.null_value();
         case 6:
             return gen_.string("meta", 4);
         case 7:
-            return emit_value(exc->meta);
+            return exc ? emit_value(exc->meta) : gen_.null_value();
         default:
             depth_ -= 1;
             return gen_.map_close();
@@ -220,15 +225,17 @@ Generator::Result JsValueEncoder::emit_value(const JsValue &value) noexcept {
             return Generator::Result::OK;
         }
         case JsNodeType::Exception: {
+            // Null for a tagged exception, which is a kind and nothing more.
             const auto *exc = js_value_heap_ptr<const GcException>(value);
-            if (!exc) {
-                return Generator::Result::InvalidValue;
-            }
             const Generator::Result result = gen_.map_open();
             if (result != Generator::Result::OK) {
                 return result;
             }
-            push_frame(Frame::Kind::Exception).exception = exc;
+            Frame &frame = push_frame(Frame::Kind::Exception);
+            frame.exception = exc;
+            if (!exc) {
+                frame.tagged = js_value_exception_kind(value);
+            }
             return Generator::Result::OK;
         }
         case JsNodeType::Binary:

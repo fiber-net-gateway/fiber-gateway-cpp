@@ -1498,7 +1498,8 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
 }
 
 fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, std::uint16_t port,
-                                                 std::promise<Http2GzipOutcome> *promise) {
+                                                 std::promise<Http2GzipOutcome> *promise,
+                                                 fiber::http::HttpMethod method = fiber::http::HttpMethod::Get) {
     Http2GzipOutcome outcome;
     fiber::http::HttpClientTlsOptions tls;
     tls.server_name = "localhost";
@@ -1521,7 +1522,7 @@ fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, 
     fiber::http::ClientHttp2Exchange exchange(*connection, pool);
     auto send_result = co_await exchange.send_request_header(
             {
-                    .method = fiber::http::HttpMethod::Get,
+                    .method = method,
                     .scheme = "https",
                     .authority = "localhost",
                     .path = "/gzip",
@@ -1572,8 +1573,8 @@ struct Http3GzipOutcome {
 
 fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *endpoint,
                                                  const fiber::net::SocketAddress *server_addr,
-                                                 const std::string *cert_path,
-                                                 std::promise<Http3GzipOutcome> *promise) {
+                                                 const std::string *cert_path, std::promise<Http3GzipOutcome> *promise,
+                                                 fiber::http::HttpMethod method = fiber::http::HttpMethod::Get) {
     Http3GzipOutcome outcome;
     auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(*cert_path));
     if (!trust_store) {
@@ -1612,7 +1613,7 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
         fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         auto send_result = co_await exchange.send_request_header(
                 {
-                        .method = fiber::http::HttpMethod::Get,
+                        .method = method,
                         .scheme = "https",
                         .authority = "localhost",
                         .path = "/gzip",
@@ -5219,6 +5220,95 @@ http {
     EXPECT_GT(response.size(), std::size_t{64} * 1024);
 }
 
+TEST(LiteNginxRuntimeTest, CaughtBuiltInErrorCanBeSentAsJson) {
+    const std::string response = script_response_until_close(
+            "try { let x = 1 / 0; } catch (e) { resp.sendJson(200, {caught: e}); }", kCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response),
+              R"({"caught":{"position":-1,"name":"RangeError","message":null,"meta":null}})");
+}
+
+TEST(LiteNginxRuntimeTest, ReturnValueThatCannotBeEncodedServes500) {
+    const std::string response = script_response_until_close("return {bad: \"\xF0\x9F\x98\x80\"[0]};", kCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 500 "), std::string::npos) << response;
+    EXPECT_NE(response.find("Content-Type: application/json\r\n"), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response), R"({"error":"TypeError"})");
+}
+
+constexpr std::string_view kHeadCloseRequest = "HEAD /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+TEST(LiteNginxRuntimeTest, HeadRequestToScriptGetsHeadersWithNoBody) {
+    const std::pair<std::string, std::string_view> cases[] = {
+            {"resp.sendJson(200, {a: 1});", "Content-Type: application/json\r\n"},
+            {send_json_rows_source(kLargeJsonRows), "Content-Type: application/json\r\n"},
+            {"return {a: 1};", "Content-Type: application/json\r\n"},
+            {"resp.send(200, \"text\");", "Content-Type: text/plain;charset=utf-8\r\n"},
+    };
+    for (const auto &[source, content_type]: cases) {
+        const std::string response = script_response_until_close(source, kHeadCloseRequest);
+        EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response.substr(0, 300);
+        EXPECT_NE(response.find(content_type), std::string::npos) << response.substr(0, 300);
+        EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response.substr(0, 300);
+        EXPECT_TRUE(body_after_headers(response).empty()) << response.substr(0, 300);
+    }
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestToFailingScriptKeepsTheStatus) {
+    const std::string response = script_response_until_close("let x = 1 / 0;", kHeadCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 500 "), std::string::npos) << response;
+    EXPECT_TRUE(body_after_headers(response).empty()) << response;
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestToGzipLocationIsNotCompressed) {
+    const std::string response =
+            script_response_until_close("resp.sendJson(200, {a: 1});",
+                                        "HEAD /x HTTP/1.1\r\n"
+                                        "Host: localhost\r\n"
+                                        "Accept-Encoding: gzip\r\n"
+                                        "Connection: close\r\n\r\n",
+                                        "gzip on;\n    gzip_types application/json;\n    gzip_min_length 1;");
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Content-Encoding:"), std::string::npos) << response;
+    EXPECT_TRUE(body_after_headers(response).empty()) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ConnectionServesAnotherRequestAfterHead) {
+    TestScriptFile script("head_keepalive", "resp.sendJson(200, {a: 1});");
+    ASSERT_TRUE(script.ok());
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    auto config = ConfigLoader::load_from_string(config_text, "head_keepalive.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    ASSERT_TRUE(send_all(client, "HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    const std::string head = recv_until_contains(client, "\r\n\r\n");
+    EXPECT_NE(head.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << head;
+    ASSERT_TRUE(send_all(client, kCloseRequest));
+    const std::string response = recv_until_close(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response), R"({"a":1})");
+}
+
 struct LargeJsonOutcome {
     fiber::common::IoErr error = fiber::common::IoErr::None;
     int status_code = 0;
@@ -5230,7 +5320,8 @@ struct LargeJsonOutcome {
 enum class LargeJsonProtocol { Http2, Http3 };
 
 // Runs one request to a TLS listener serving source, over HTTP/2 or HTTP/3.
-LargeJsonOutcome fetch_large_json(LargeJsonProtocol protocol, const std::string &source) {
+LargeJsonOutcome fetch_large_json(LargeJsonProtocol protocol, const std::string &source,
+                                  fiber::http::HttpMethod method = fiber::http::HttpMethod::Get) {
     TestPemFile cert("large-json-cert", kSelfSignedCertPem);
     TestPemFile key("large-json-key", kSelfSignedKeyPem);
     TestScriptFile script("large_json_tls", source);
@@ -5284,8 +5375,9 @@ http {
         const std::string &cert_path = cert.path();
         std::promise<Http3GzipOutcome> promise;
         auto future = promise.get_future();
-        fiber::async::spawn(group.at(0),
-                            [&]() { return run_http3_gzip_client(&endpoint, &server_addr, &cert_path, &promise); });
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_http3_gzip_client(&endpoint, &server_addr, &cert_path, &promise, method);
+        });
         if (future.wait_for(8s) == std::future_status::ready) {
             Http3GzipOutcome result = future.get();
             outcome = {.error = result.error,
@@ -5303,7 +5395,8 @@ http {
     group.start();
     std::promise<Http2GzipOutcome> promise;
     auto future = promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return run_http2_gzip_client(&group.at(0), harness.port(), &promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_http2_gzip_client(&group.at(0), harness.port(), &promise, method); });
     if (future.wait_for(8s) == std::future_status::ready) {
         Http2GzipOutcome result = future.get();
         outcome = {.error = result.error,
@@ -5335,6 +5428,34 @@ TEST_P(LiteNginxLargeJsonTest, SendJsonFailureAfterTheFlushFailsTheStream) {
     EXPECT_EQ(outcome.status_code, 200);
     EXPECT_NE(outcome.error, fiber::common::IoErr::None);
     EXPECT_FALSE(outcome.body_complete);
+}
+
+TEST_P(LiteNginxLargeJsonTest, HeadRequestGetsHeadersWithNoBody) {
+    for (const std::string &source: {std::string("resp.sendJson(200, {a: 1});"), std::string("return {a: 1};"),
+                                     std::string("resp.send(200, \"text\");"), send_json_rows_source(kLargeJsonRows)}) {
+        const LargeJsonOutcome outcome = fetch_large_json(GetParam(), source, fiber::http::HttpMethod::Head);
+        EXPECT_EQ(outcome.error, fiber::common::IoErr::None) << source.substr(0, 60);
+        EXPECT_EQ(outcome.status_code, 200) << source.substr(0, 60);
+        EXPECT_TRUE(outcome.body.empty()) << source.substr(0, 60);
+        EXPECT_TRUE(outcome.body_complete) << source.substr(0, 60);
+    }
+}
+
+TEST_P(LiteNginxLargeJsonTest, ResponseWithoutContentDropsTheBody) {
+    const std::pair<std::string, int> cases[] = {
+            {"let x = 1;", 204},
+            {"resp.send(204);", 204},
+            {"resp.send(304);", 304},
+            {"resp.sendJson(204, {a: 1});", 204},
+            {"resp.sendJson(304, {a: 1});", 304},
+    };
+    for (const auto &[source, status]: cases) {
+        const LargeJsonOutcome outcome = fetch_large_json(GetParam(), source);
+        EXPECT_EQ(outcome.error, fiber::common::IoErr::None) << source;
+        EXPECT_EQ(outcome.status_code, status) << source;
+        EXPECT_TRUE(outcome.body.empty()) << source;
+        EXPECT_TRUE(outcome.body_complete) << source;
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Protocols, LiteNginxLargeJsonTest,
