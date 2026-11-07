@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 #include "LoopTestSupport.h"
+#include "support/AllocFailure.h"
 
 namespace {
 
@@ -333,6 +334,37 @@ TEST(JsonPathTest, ReportsInvalidJsonAndHandlerRejection) {
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().code, JsonPathVisitErrorCode::HandlerRejected);
     EXPECT_EQ(rejected.error().action, 17U);
+}
+
+TEST(JsonPathTest, CompileReportsOutOfMemoryAtEveryAllocation) {
+    if constexpr (!fiber::test::kAllocFailureAvailable) {
+        GTEST_SKIP() << "no operator new replacement in this build";
+    }
+    // Long names force heap strings, so edge keys and capture names allocate too.
+    const JsonPathRule rules[] = {
+            {.expression = "$.exact_field_name_longer_than_any_small_string.leaf", .action = 1},
+            {.expression = "$.items[2].leaf", .action = 2},
+            {.expression = "$.map.*capture_name_longer_than_any_small_string.leaf", .action = 3},
+            {.expression = "$.list[*capture_index_longer_than_any_small_string].leaf", .action = 4},
+    };
+
+    std::size_t failures = 0;
+    for (std::size_t successes = 0;; ++successes) {
+        auto compiled = [&] {
+            fiber::test::ScopedAllocFailure out_of_memory(successes);
+            return JsonPathProgram::compile(rules);
+        }();
+        if (compiled) {
+            EXPECT_EQ(compiled->rule_count(), 4U);
+            break;
+        }
+        EXPECT_EQ(compiled.error().code, JsonPathCompileErrorCode::OutOfMemory) << successes;
+        EXPECT_EQ(compiled.error().message, "out of memory") << successes;
+        ++failures;
+    }
+    // One injected failure per allocation in the compile; guards against the sweep passing
+    // because injection never reached compile().
+    EXPECT_GT(failures, 10U);
 }
 
 } // namespace

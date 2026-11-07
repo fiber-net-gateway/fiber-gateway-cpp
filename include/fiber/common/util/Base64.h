@@ -12,6 +12,13 @@ namespace fiber::util {
 // Matches java.util.Base64.getEncoder() (basic encoder).
 std::string base64_encode(const std::uint8_t *data, std::size_t len);
 
+// Size of the encoding of len input bytes.
+[[nodiscard]] constexpr std::size_t base64_encoded_size(std::size_t len) noexcept { return (len + 2) / 3 * 4; }
+
+// Same encoding as base64_encode without allocating: writes exactly
+// base64_encoded_size(len) bytes to out.
+void base64_encode_to(const std::uint8_t *data, std::size_t len, char *out) noexcept;
+
 // Strict basic base64 decode (java.util.Base64.getDecoder() parity). Returns false
 // on any structural error: length not a multiple of 4, characters outside the
 // alphabet (incl. whitespace/newlines), or misplaced/overlong '=' padding. On

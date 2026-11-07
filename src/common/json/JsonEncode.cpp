@@ -2,16 +2,18 @@
 
 #include <fiber/common/util/Base64.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <string>
 #include <system_error>
 
 namespace fiber::json {
 namespace {
 
-bool is_valid_utf8(const unsigned char *data, size_t len) {
+bool is_valid_utf8(const unsigned char *data, size_t len) noexcept {
     size_t i = 0;
     while (i < len) {
         unsigned char c = data[i];
@@ -77,24 +79,34 @@ bool is_valid_utf8(const unsigned char *data, size_t len) {
 
 } // namespace
 
-CallbackSink::CallbackSink(PrintCallback cb, void *ctx) : callback_(cb), ctx_(ctx) {}
+CallbackSink::CallbackSink(PrintCallback cb, void *ctx) noexcept : callback_(cb), ctx_(ctx) {}
 
-bool CallbackSink::write(const char *data, size_t len) {
+bool CallbackSink::write(const char *data, size_t len) noexcept {
     if (!callback_) {
         return false;
     }
     return callback_(ctx_, data, len) == 0;
 }
 
-Generator::Generator(OutputSink &sink) : sink_(sink) { clear(); }
+bool StringSink::write(const char *data, size_t len) noexcept {
+    try {
+        out_.append(data, len);
+    } catch (const std::bad_alloc &) {
+        out_of_memory_ = true;
+        return false;
+    }
+    return true;
+}
 
-void Generator::clear() {
+Generator::Generator(OutputSink &sink) noexcept : sink_(sink) { clear(); }
+
+void Generator::clear() noexcept {
     sink_.reset();
     depth_ = 1;
     state_stack_[0] = State::Start;
 }
 
-void Generator::set_option(Option opt, bool enabled) {
+void Generator::set_option(Option opt, bool enabled) noexcept {
     uint32_t bit = static_cast<uint32_t>(opt);
     if (enabled) {
         options_ |= bit;
@@ -103,14 +115,19 @@ void Generator::set_option(Option opt, bool enabled) {
     }
 }
 
-void Generator::set_indent_string(const std::string &indent) {
-    indent_string_ = indent;
+bool Generator::set_indent_string(std::string_view indent) noexcept {
+    try {
+        indent_string_.assign(indent);
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
     set_option(Option::IndentString, true);
+    return true;
 }
 
-Generator::State Generator::get_state() const { return current_state(); }
+Generator::State Generator::get_state() const noexcept { return current_state(); }
 
-Generator::Result Generator::map_open() {
+Generator::Result Generator::map_open() noexcept {
     Result result = prefix_for_value();
     if (result != Result::OK) {
         return result;
@@ -122,7 +139,7 @@ Generator::Result Generator::map_open() {
     return push(State::MapStart);
 }
 
-Generator::Result Generator::map_close() {
+Generator::Result Generator::map_close() noexcept {
     State state = current_state();
     if (state != State::MapStart && state != State::MapKey) {
         return set_error(Result::ErrorState);
@@ -148,7 +165,7 @@ Generator::Result Generator::map_close() {
     return finish_value();
 }
 
-Generator::Result Generator::array_open() {
+Generator::Result Generator::array_open() noexcept {
     Result result = prefix_for_value();
     if (result != Result::OK) {
         return result;
@@ -160,7 +177,7 @@ Generator::Result Generator::array_open() {
     return push(State::ArrayStart);
 }
 
-Generator::Result Generator::array_close() {
+Generator::Result Generator::array_close() noexcept {
     State state = current_state();
     if (state != State::ArrayStart && state != State::InArray) {
         return set_error(Result::ErrorState);
@@ -186,7 +203,7 @@ Generator::Result Generator::array_close() {
     return finish_value();
 }
 
-Generator::Result Generator::string(const char *str, size_t len) {
+Generator::Result Generator::string(const char *str, size_t len) noexcept {
     State state = current_state();
     if (state == State::MapStart || state == State::MapKey) {
         Result result = prefix_for_key();
@@ -219,9 +236,9 @@ Generator::Result Generator::string(const char *str, size_t len) {
     return finish_value();
 }
 
-Generator::Result Generator::string(const std::string &str) { return string(str.data(), str.size()); }
+Generator::Result Generator::string(const std::string &str) noexcept { return string(str.data(), str.size()); }
 
-Generator::Result Generator::string_from_chunks(StringChunkProducer producer, void *ctx) {
+Generator::Result Generator::string_from_chunks(StringChunkProducer producer, void *ctx) noexcept {
     if (!producer) {
         return set_error(Result::InvalidString);
     }
@@ -257,7 +274,7 @@ Generator::Result Generator::string_from_chunks(StringChunkProducer producer, vo
     return finish_value();
 }
 
-Generator::Result Generator::binary(const std::uint8_t *data, size_t len) {
+Generator::Result Generator::binary(const std::uint8_t *data, size_t len) noexcept {
     if (!data && len > 0) {
         return set_error(Result::InvalidString);
     }
@@ -265,15 +282,30 @@ Generator::Result Generator::binary(const std::uint8_t *data, size_t len) {
     if (result != Result::OK) {
         return result;
     }
-    std::string encoded = fiber::util::base64_encode(data, len);
-    result = write_string(encoded.data(), encoded.size());
+    result = append('\"');
+    if (result != Result::OK) {
+        return result;
+    }
+    // Whole 3-byte groups per chunk, so '=' padding can only land in the last one.
+    constexpr size_t kChunkBytes = size_t{3} * 256;
+    char encoded[fiber::util::base64_encoded_size(kChunkBytes)];
+    for (size_t pos = 0; pos < len; pos += kChunkBytes) {
+        const size_t chunk = std::min(kChunkBytes, len - pos);
+        fiber::util::base64_encode_to(data + pos, chunk, encoded);
+        // Not append(): EscapeSolidus applies to the '/' of the base64 alphabet.
+        result = write_string_content(encoded, fiber::util::base64_encoded_size(chunk));
+        if (result != Result::OK) {
+            return result;
+        }
+    }
+    result = append('\"');
     if (result != Result::OK) {
         return result;
     }
     return finish_value();
 }
 
-Generator::Result Generator::integer(int64_t value) {
+Generator::Result Generator::integer(int64_t value) noexcept {
     Result result = prefix_for_value();
     if (result != Result::OK) {
         return result;
@@ -290,7 +322,7 @@ Generator::Result Generator::integer(int64_t value) {
     return finish_value();
 }
 
-Generator::Result Generator::double_value(double value) {
+Generator::Result Generator::double_value(double value) noexcept {
     if (!std::isfinite(value)) {
         return set_error(Result::InvalidValue);
     }
@@ -311,7 +343,7 @@ Generator::Result Generator::double_value(double value) {
     return finish_value();
 }
 
-Generator::Result Generator::bool_value(bool value) {
+Generator::Result Generator::bool_value(bool value) noexcept {
     Result result = prefix_for_value();
     if (result != Result::OK) {
         return result;
@@ -327,7 +359,7 @@ Generator::Result Generator::bool_value(bool value) {
     return finish_value();
 }
 
-Generator::Result Generator::null_value() {
+Generator::Result Generator::null_value() noexcept {
     Result result = prefix_for_value();
     if (result != Result::OK) {
         return result;
@@ -339,9 +371,9 @@ Generator::Result Generator::null_value() {
     return finish_value();
 }
 
-bool Generator::has_option(Option opt) const { return (options_ & static_cast<uint32_t>(opt)) != 0; }
+bool Generator::has_option(Option opt) const noexcept { return (options_ & static_cast<uint32_t>(opt)) != 0; }
 
-Generator::Result Generator::append(const char *data, size_t len) {
+Generator::Result Generator::append(const char *data, size_t len) noexcept {
     if (len == 0) {
         return Result::OK;
     }
@@ -354,9 +386,9 @@ Generator::Result Generator::append(const char *data, size_t len) {
     return Result::OK;
 }
 
-Generator::Result Generator::append(char ch) { return append(&ch, 1); }
+Generator::Result Generator::append(char ch) noexcept { return append(&ch, 1); }
 
-Generator::Result Generator::append_indent(size_t level) {
+Generator::Result Generator::append_indent(size_t level) noexcept {
     if (indent_string_.empty()) {
         return Result::OK;
     }
@@ -369,7 +401,7 @@ Generator::Result Generator::append_indent(size_t level) {
     return Result::OK;
 }
 
-Generator::Result Generator::prefix_for_value() {
+Generator::Result Generator::prefix_for_value() noexcept {
     State state = current_state();
     if (state == State::Error) {
         return Result::ErrorState;
@@ -404,7 +436,7 @@ Generator::Result Generator::prefix_for_value() {
     return Result::OK;
 }
 
-Generator::Result Generator::prefix_for_key() {
+Generator::Result Generator::prefix_for_key() noexcept {
     State state = current_state();
     if (state == State::Error) {
         return Result::ErrorState;
@@ -439,7 +471,7 @@ Generator::Result Generator::prefix_for_key() {
     return set_error(Result::ErrorState);
 }
 
-Generator::Result Generator::write_string(const char *str, size_t len) {
+Generator::Result Generator::write_string(const char *str, size_t len) noexcept {
     if (!str && len > 0) {
         return set_error(Result::InvalidString);
     }
@@ -459,7 +491,7 @@ Generator::Result Generator::write_string(const char *str, size_t len) {
     return append('\"');
 }
 
-Generator::Result Generator::write_string_content(const char *str, size_t len) {
+Generator::Result Generator::write_string_content(const char *str, size_t len) noexcept {
     if (!str && len > 0) {
         return set_error(Result::InvalidString);
     }
@@ -515,7 +547,7 @@ Generator::Result Generator::write_string_content(const char *str, size_t len) {
     return Result::OK;
 }
 
-Generator::Result Generator::write_string_from_chunks(StringChunkProducer producer, void *ctx) {
+Generator::Result Generator::write_string_from_chunks(StringChunkProducer producer, void *ctx) noexcept {
     if (!producer) {
         return set_error(Result::InvalidString);
     }
@@ -553,7 +585,7 @@ Generator::Result Generator::write_string_from_chunks(StringChunkProducer produc
     return append('\"');
 }
 
-Generator::Result Generator::finish_value() {
+Generator::Result Generator::finish_value() noexcept {
     State &state = current_state();
     switch (state) {
         case State::Start:
@@ -577,7 +609,7 @@ Generator::Result Generator::finish_value() {
     return set_error(Result::ErrorState);
 }
 
-Generator::Result Generator::push(State state) {
+Generator::Result Generator::push(State state) noexcept {
     if (depth_ >= MAX_STACK) {
         return set_error(Result::MaxDepthExceeded);
     }
@@ -586,7 +618,7 @@ Generator::Result Generator::push(State state) {
     return Result::OK;
 }
 
-Generator::Result Generator::pop() {
+Generator::Result Generator::pop() noexcept {
     if (depth_ <= 1) {
         return set_error(Result::ErrorState);
     }
@@ -594,13 +626,13 @@ Generator::Result Generator::pop() {
     return Result::OK;
 }
 
-Generator::Result Generator::set_error(Result result) {
+Generator::Result Generator::set_error(Result result) noexcept {
     current_state() = State::Error;
     return result;
 }
 
-Generator::State &Generator::current_state() { return state_stack_[depth_ - 1]; }
+Generator::State &Generator::current_state() noexcept { return state_stack_[depth_ - 1]; }
 
-const Generator::State &Generator::current_state() const { return state_stack_[depth_ - 1]; }
+const Generator::State &Generator::current_state() const noexcept { return state_stack_[depth_ - 1]; }
 
 } // namespace fiber::json

@@ -29,7 +29,8 @@ struct Utf8ScanResult {
 // before they are stored in a GcString (which rejects invalid UTF-8). out is not
 // cleared; callers may pre-clear. A single U+FFFD is emitted per ill-formed byte
 // (skip-one policy), matching the common REPLACE decoder behaviour.
-void utf8_repair(std::string_view src, std::string &out);
+// Allocation failure is fatal by house policy (no-exceptions; bad_alloc would terminate).
+void utf8_repair(std::string_view src, std::string &out) noexcept;
 
 } // namespace fiber::json
 

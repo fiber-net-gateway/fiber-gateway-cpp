@@ -24,7 +24,7 @@ namespace {
 
 class StringSink final : public OutputSink {
 public:
-    [[nodiscard]] bool write(const char *data, size_t len) override {
+    [[nodiscard]] bool write(const char *data, size_t len) noexcept override {
         if (len == 0) {
             return true;
         }
@@ -35,7 +35,7 @@ public:
         return true;
     }
 
-    void reset() override { output.clear(); }
+    void reset() noexcept override { output.clear(); }
 
     std::string output;
 };

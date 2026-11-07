@@ -42,7 +42,7 @@ encode_payload(const T &value, const NacosPayloadMetadata &metadata, std::size_t
     public:
         BoundedStringSink(std::string &output, std::size_t limit) noexcept : output_(&output), limit_(limit) {}
 
-        [[nodiscard]] bool write(const char *data, std::size_t len) override {
+        [[nodiscard]] bool write(const char *data, std::size_t len) noexcept override {
             if ((!data && len > 0) || len > limit_ - output_->size()) {
                 too_large_ = true;
                 return false;
@@ -51,7 +51,7 @@ encode_payload(const T &value, const NacosPayloadMetadata &metadata, std::size_t
             return true;
         }
 
-        void reset() override { output_->clear(); }
+        void reset() noexcept override { output_->clear(); }
 
         [[nodiscard]] bool too_large() const noexcept { return too_large_; }
 
