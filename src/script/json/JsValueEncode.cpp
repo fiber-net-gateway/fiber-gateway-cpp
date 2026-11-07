@@ -4,165 +4,313 @@
 
 #include <fiber/script/json/JsValueEncode.h>
 
+#include <fiber/common/Assert.h>
 #include <fiber/script/gc/GcInternal.h>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <string_view>
 
 namespace fiber::script::json {
 namespace {
 
-Generator::Result encode_array(Generator &gen, const GcArray *arr);
-Generator::Result encode_object(Generator &gen, const GcObject *obj);
+// Longer strings and binaries go out in slices, so one value cannot hold back a flush. Escaping can
+// grow a string slice sixfold. The binary slice is a whole number of 3-byte base64 groups.
+constexpr std::size_t kStringSliceBytes = static_cast<std::size_t>(16 * 1024);
+constexpr std::size_t kBinarySliceBytes = static_cast<std::size_t>(3 * 4096);
 
-Generator::Result encode_gc_string(Generator &gen, const GcString *str) {
-    std::string_view view;
-    if (!gc_string_utf8_view(str, view)) {
-        return Generator::Result::InvalidString;
+// End of the slice starting at pos, moved back onto a code point boundary. Text that is not valid
+// UTF-8 has no boundary to find and is cut at the full slice length.
+std::size_t string_slice_end(const char *data, std::size_t pos, std::size_t len) noexcept {
+    const std::size_t end = pos + kStringSliceBytes;
+    if (end >= len) {
+        return len;
     }
-    return gen.string(view.data(), view.size());
-}
-
-Generator::Result encode_array(Generator &gen, const GcArray *arr) {
-    if (!arr) {
-        return Generator::Result::InvalidValue;
-    }
-    Generator::Result result = gen.array_open();
-    if (result != Generator::Result::OK) {
-        return result;
-    }
-    for (std::size_t i = 0; i < arr->size; ++i) {
-        result = encode_js_value(gen, arr->elems[i]);
-        if (result != Generator::Result::OK) {
-            return result;
+    for (std::size_t cut = end; cut > end - 4; --cut) {
+        if ((static_cast<unsigned char>(data[cut]) & 0xC0) != 0x80) {
+            return cut;
         }
     }
-    return gen.array_close();
-}
-
-Generator::Result encode_object(Generator &gen, const GcObject *obj) {
-    if (!obj) {
-        return Generator::Result::InvalidValue;
-    }
-    Generator::Result result = gen.map_open();
-    if (result != Generator::Result::OK) {
-        return result;
-    }
-    int32_t cursor = obj->head;
-    while (cursor != -1) {
-        const GcObjectEntry &entry = obj->entries[cursor];
-        if (!entry.occupied || !entry.key) {
-            return Generator::Result::InvalidValue;
-        }
-        result = encode_gc_string(gen, entry.key);
-        if (result != Generator::Result::OK) {
-            return result;
-        }
-        result = encode_js_value(gen, entry.value);
-        if (result != Generator::Result::OK) {
-            return result;
-        }
-        cursor = entry.next_order;
-    }
-    return gen.map_close();
+    return end;
 }
 
 } // namespace
 
-Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
+JsValueEncoder::JsValueEncoder(Generator &gen, const JsValue &root) noexcept : gen_(gen), root_(root) {}
+
+JsValueEncoder::Status JsValueEncoder::run(std::size_t limit) noexcept {
+    if (error_ != Generator::Result::OK) {
+        return Status::Failed;
+    }
+    if (finished()) {
+        return Status::Done;
+    }
+    const std::size_t written = gen_.bytes_written();
+    stop_ = limit > std::numeric_limits<std::size_t>::max() - written ? std::numeric_limits<std::size_t>::max()
+                                                                      : written + limit;
+    for (;;) {
+        const Generator::Result result = step();
+        if (result != Generator::Result::OK) {
+            error_ = result;
+            return Status::Failed;
+        }
+        if (finished()) {
+            return Status::Done;
+        }
+        if (gen_.bytes_written() >= stop_) {
+            return Status::Yield;
+        }
+    }
+}
+
+Generator::Result JsValueEncoder::step() noexcept {
+    if (token_ != Token::None) {
+        return continue_token();
+    }
+    if (!started_) {
+        started_ = true;
+        return emit_value(root_);
+    }
+    Frame &top = frames_[depth_ - 1];
+    switch (top.kind) {
+        case Frame::Kind::Array:
+            return step_array(top);
+        case Frame::Kind::Object:
+            return step_object(top);
+        case Frame::Kind::Exception:
+            return step_exception(top);
+    }
+    return Generator::Result::InvalidValue;
+}
+
+Generator::Result JsValueEncoder::step_array(Frame &frame) noexcept {
+    const std::size_t depth = depth_;
+    const GcArray *arr = frame.array;
+    while (frame.index < arr->size) {
+        const Generator::Result result = emit_value(arr->elems[frame.index++]);
+        if (result != Generator::Result::OK || must_return(depth)) {
+            return result;
+        }
+    }
+    depth_ -= 1;
+    return gen_.array_close();
+}
+
+Generator::Result JsValueEncoder::step_object(Frame &frame) noexcept {
+    const std::size_t depth = depth_;
+    const GcObject *obj = frame.object;
+    while (frame.cursor != -1) {
+        const GcObjectEntry &entry = obj->entries[frame.cursor];
+        if (!frame.key_written) {
+            if (!entry.occupied || !entry.key) {
+                return Generator::Result::InvalidValue;
+            }
+            frame.key_written = true;
+            const Generator::Result result = emit_gc_string(entry.key);
+            if (result != Generator::Result::OK || must_return(depth)) {
+                return result;
+            }
+        }
+        frame.key_written = false;
+        frame.cursor = entry.next_order;
+        const Generator::Result result = emit_value(entry.value);
+        if (result != Generator::Result::OK || must_return(depth)) {
+            return result;
+        }
+    }
+    depth_ -= 1;
+    return gen_.map_close();
+}
+
+Generator::Result JsValueEncoder::step_exception(Frame &frame) noexcept {
+    const GcException *exc = frame.exception;
+    switch (frame.index++) {
+        case 0:
+            return gen_.string("position", 8);
+        case 1:
+            return gen_.integer(exc->position);
+        case 2:
+            return gen_.string("name", 4);
+        case 3:
+            return exc->name ? emit_gc_string(exc->name) : gen_.null_value();
+        case 4:
+            return gen_.string("message", 7);
+        case 5:
+            return exc->message ? emit_gc_string(exc->message) : gen_.null_value();
+        case 6:
+            return gen_.string("meta", 4);
+        case 7:
+            return emit_value(exc->meta);
+        default:
+            depth_ -= 1;
+            return gen_.map_close();
+    }
+}
+
+Generator::Result JsValueEncoder::continue_token() noexcept {
+    if (token_ == Token::String) {
+        const std::size_t end = string_slice_end(token_data_, token_pos_, token_len_);
+        const Generator::Result result = gen_.string_append(token_data_ + token_pos_, end - token_pos_);
+        if (result != Generator::Result::OK) {
+            return result;
+        }
+        token_pos_ = end;
+        if (end != token_len_) {
+            return Generator::Result::OK;
+        }
+        token_ = Token::None;
+        return gen_.string_end();
+    }
+    const std::size_t end = std::min(token_pos_ + kBinarySliceBytes, token_len_);
+    const Generator::Result result =
+            gen_.binary_append(reinterpret_cast<const std::uint8_t *>(token_data_) + token_pos_, end - token_pos_);
+    if (result != Generator::Result::OK) {
+        return result;
+    }
+    token_pos_ = end;
+    if (end != token_len_) {
+        return Generator::Result::OK;
+    }
+    token_ = Token::None;
+    return gen_.binary_end();
+}
+
+Generator::Result JsValueEncoder::emit_value(const JsValue &value) noexcept {
     switch (js_value_type(value)) {
         case JsNodeType::Null:
-            return gen.null_value();
+        case JsNodeType::Undefined:
+            return gen_.null_value();
         case JsNodeType::Boolean:
-            return gen.bool_value(js_value_bool(value));
+            return gen_.bool_value(js_value_bool(value));
         case JsNodeType::Integer:
-            return gen.integer(js_value_int64(value));
+            return gen_.integer(js_value_int64(value));
         case JsNodeType::Float:
-            return gen.double_value(js_value_double(value));
+            return emit_double(js_value_double(value));
         case JsNodeType::String:
             if (js_value_is_borrowed_string(value)) {
-                NativeStr native = js_value_native_string(value);
-                return gen.string(native.data, native.len);
-            } else {
-                const auto *str = js_value_heap_ptr<const GcString>(value);
-                if (!str) {
-                    return Generator::Result::InvalidString;
-                }
-                return encode_gc_string(gen, str);
+                const NativeStr native = js_value_native_string(value);
+                return emit_string(native.data, native.len);
             }
-        case JsNodeType::Array:
-            return encode_array(gen, js_value_heap_ptr<const GcArray>(value));
-        case JsNodeType::Object:
-            return encode_object(gen, js_value_heap_ptr<const GcObject>(value));
+            return emit_gc_string(js_value_heap_ptr<const GcString>(value));
+        case JsNodeType::Array: {
+            const auto *arr = js_value_heap_ptr<const GcArray>(value);
+            if (!arr) {
+                return Generator::Result::InvalidValue;
+            }
+            const Generator::Result result = gen_.array_open();
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            push_frame(Frame::Kind::Array).array = arr;
+            return Generator::Result::OK;
+        }
+        case JsNodeType::Object: {
+            const auto *obj = js_value_heap_ptr<const GcObject>(value);
+            if (!obj) {
+                return Generator::Result::InvalidValue;
+            }
+            const Generator::Result result = gen_.map_open();
+            if (result != Generator::Result::OK) {
+                return result;
+            }
+            Frame &frame = push_frame(Frame::Kind::Object);
+            frame.object = obj;
+            frame.cursor = obj->head;
+            return Generator::Result::OK;
+        }
         case JsNodeType::Exception: {
             const auto *exc = js_value_heap_ptr<const GcException>(value);
             if (!exc) {
                 return Generator::Result::InvalidValue;
             }
-            Generator::Result result = gen.map_open();
+            const Generator::Result result = gen_.map_open();
             if (result != Generator::Result::OK) {
                 return result;
             }
-            result = gen.string("position", 8);
-            if (result != Generator::Result::OK) {
-                return result;
-            }
-            result = gen.integer(exc->position);
-            if (result != Generator::Result::OK) {
-                return result;
-            }
-            result = gen.string("name", 4);
-            if (result != Generator::Result::OK) {
-                return result;
-            }
-            if (exc->name) {
-                result = encode_gc_string(gen, exc->name);
-            } else {
-                result = gen.null_value();
-            }
-            if (result != Generator::Result::OK) {
-                return result;
-            }
-            result = gen.string("message", 7);
-            if (result != Generator::Result::OK) {
-                return result;
-            }
-            if (exc->message) {
-                result = encode_gc_string(gen, exc->message);
-            } else {
-                result = gen.null_value();
-            }
-            if (result != Generator::Result::OK) {
-                return result;
-            }
-            result = gen.string("meta", 4);
-            if (result != Generator::Result::OK) {
-                return result;
-            }
-            if (js_value_is_undefined(exc->meta)) {
-                result = gen.null_value();
-            } else {
-                result = encode_js_value(gen, exc->meta);
-            }
-            if (result != Generator::Result::OK) {
-                return result;
-            }
-            return gen.map_close();
+            push_frame(Frame::Kind::Exception).exception = exc;
+            return Generator::Result::OK;
         }
         case JsNodeType::Binary:
             if (js_value_is_borrowed_binary(value)) {
-                NativeBin native = js_value_native_binary(value);
-                return gen.binary(native.data, native.len);
+                const NativeBin native = js_value_native_binary(value);
+                return emit_binary(native.data, native.len);
             } else {
                 const auto *bin = js_value_heap_ptr<const GcBinary>(value);
                 if (!bin) {
                     return Generator::Result::InvalidString;
                 }
-                return gen.binary(bin->data, bin->len);
+                return emit_binary(bin->data, bin->len);
             }
-        case JsNodeType::Undefined:
-            return gen.null_value();
         case JsNodeType::Interator:
             return Generator::Result::InvalidValue;
     }
     return Generator::Result::InvalidValue;
+}
+
+Generator::Result JsValueEncoder::emit_double(double value) noexcept {
+    if (std::isnan(value)) {
+        return gen_.string("NaN", 3);
+    }
+    if (std::isinf(value)) {
+        return value < 0 ? gen_.string("-Infinity", 9) : gen_.string("Infinity", 8);
+    }
+    return gen_.double_value(value);
+}
+
+Generator::Result JsValueEncoder::emit_gc_string(const GcString *str) noexcept {
+    std::string_view view;
+    if (!gc_string_utf8_view(str, view)) {
+        return Generator::Result::InvalidString;
+    }
+    return emit_string(view.data(), view.size());
+}
+
+Generator::Result JsValueEncoder::emit_string(const char *data, std::size_t len) noexcept {
+    if (len <= kStringSliceBytes) {
+        return gen_.string(data, len);
+    }
+    const Generator::Result result = gen_.string_begin();
+    if (result != Generator::Result::OK) {
+        return result;
+    }
+    token_ = Token::String;
+    token_data_ = data;
+    token_len_ = len;
+    token_pos_ = 0;
+    return Generator::Result::OK;
+}
+
+Generator::Result JsValueEncoder::emit_binary(const std::uint8_t *data, std::size_t len) noexcept {
+    if (len <= kBinarySliceBytes) {
+        return gen_.binary(data, len);
+    }
+    const Generator::Result result = gen_.binary_begin();
+    if (result != Generator::Result::OK) {
+        return result;
+    }
+    token_ = Token::Binary;
+    token_data_ = reinterpret_cast<const char *>(data);
+    token_len_ = len;
+    token_pos_ = 0;
+    return Generator::Result::OK;
+}
+
+JsValueEncoder::Frame &JsValueEncoder::push_frame(Frame::Kind kind) noexcept {
+    FIBER_ASSERT(depth_ < Generator::MAX_STACK);
+    Frame &frame = frames_[depth_];
+    depth_ += 1;
+    frame.index = 0;
+    frame.cursor = -1;
+    frame.kind = kind;
+    frame.key_written = false;
+    return frame;
+}
+
+Generator::Result encode_js_value(Generator &gen, const JsValue &value) {
+    JsValueEncoder encoder(gen, value);
+    return encoder.run(std::numeric_limits<std::size_t>::max()) == JsValueEncoder::Status::Done ? Generator::Result::OK
+                                                                                                : encoder.error();
 }
 
 } // namespace fiber::script::json

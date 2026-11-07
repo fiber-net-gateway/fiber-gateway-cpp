@@ -133,11 +133,15 @@ public:
     // exchange, bypassing the ctx state machine). Prevents run_script from emitting a fallback 500.
     void mark_response_sent() noexcept { header_sent_ = true; }
 
+    // Encodes body as JSON and sends it with Content-Type application/json. A short body goes out
+    // like write_raw_bytes. A longer one is sent as it is encoded, with no Content-Length: if
+    // encoding then fails, the response is aborted and the client sees a broken body. body and
+    // everything it reaches must stay unchanged until this completes.
+    fiber::async::Task<fiber::common::IoResult<void>> write_json(int status,
+                                                                 const fiber::script::JsValue &body) noexcept;
     // Flush the pending headers (status + body of known length) then write the body in a
     // single end-of-stream chunk. content-type is the caller's responsibility (set via the
     // set/add helpers above). Empty-body variants send a terminating empty chunk.
-    fiber::async::Task<fiber::common::IoResult<void>> write_json(int status,
-                                                                 const fiber::script::JsValue &body) noexcept;
     fiber::async::Task<fiber::common::IoResult<void>> write_raw_bytes(int status, const std::uint8_t *data,
                                                                       std::size_t len) noexcept;
     fiber::async::Task<fiber::common::IoResult<void>> write_empty(int status) noexcept;
@@ -188,6 +192,8 @@ private:
     [[nodiscard]] bool resolve_from_request(ConstType type, std::string_view name,
                                             fiber::script::JsValue &out) noexcept;
 
+    [[nodiscard]] fiber::http::OutgoingHeaderBlockView final_header(int status,
+                                                                    fiber::http::HttpBodySpec body) const noexcept;
     fiber::async::Task<fiber::common::IoResult<void>> send_final_with_body(int status, std::size_t content_length,
                                                                            const std::uint8_t *data) noexcept;
     // Chain-body variant: encodes straight into the transport buffer (no staging copy);

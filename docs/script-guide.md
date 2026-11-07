@@ -771,8 +771,8 @@ function JSON.parse(text: string): ScriptValue;
 function JSON.stringify(value: ScriptValue): string | undefined;
 ```
 
-- Parameters/return: top-level `undefined` returns `undefined`. Top-level `NaN` and either infinity return the string `"null"`. Other values produce compact JSON. Nested `undefined` becomes JSON null, `Binary` becomes a Base64 string, an exception becomes an object with `position`, `name`, `message`, and `meta`, and ordinary object properties retain insertion order.
-- Exceptions: an invalid string, nested non-finite number, iterator, or other unencodable value throws `TypeError`.
+- Parameters/return: top-level `undefined` returns `undefined`. Other values produce compact JSON. `NaN`, `Infinity`, and `-Infinity` become JSON strings of the same name at any depth; this differs from JS, which writes `null`. Nested `undefined` becomes JSON null, `Binary` becomes a Base64 string, an exception becomes an object with `position`, `name`, `message`, and `meta`, and ordinary object properties retain insertion order.
+- Exceptions: an invalid string, iterator, or other unencodable value throws `TypeError`.
 - Side effects: none.
 
 ### 5.8 Object functions
@@ -1020,9 +1020,11 @@ All three send overloads honor only an integer status and otherwise use 200. The
 #### `resp.sendJson(status, body)`
 
 - Parameters: asynchronous. Only an integer `status` is honored; another type falls back to 200. `body` may be any JSON-encodable script value.
-- Return: `null` after a successful send. `undefined` encodes as JSON null, `Binary` as a Base64 string, and an exception value as an object with `position`, `name`, `message`, and `meta`.
-- Exceptions: an invalid string, non-finite float, iterator, or other encode failure, and header/body I/O failures, throw `Error`.
-- Side effects: replaces Content-Type with `application/json`, commits all pending headers, writes a fixed-Content-Length body, and ends the response stream.
+- Return: `null` after a successful send. `undefined` encodes as JSON null, `NaN`, `Infinity`, and `-Infinity` as JSON strings of the same name, `Binary` as a Base64 string, and an exception value as an object with `position`, `name`, `message`, and `meta`.
+- Exceptions: an invalid string, iterator, or other encode failure, and header/body I/O failures, throw `Error`.
+- Side effects: replaces Content-Type with `application/json`, commits all pending headers, writes the body, and ends the response stream.
+- Large responses: a body that encodes within 64 KiB is sent with a fixed Content-Length. Past that, the body is sent about every 64 KiB as it is encoded, with no Content-Length: HTTP/1.1 uses chunked framing, HTTP/1.0 ends with the connection close, and HTTP/2 and HTTP/3 end with the stream.
+- Failure partway: if a value cannot be encoded after part of the body went out, the status can no longer change, so the response is aborted: HTTP/1 closes the connection, and HTTP/2 and HTTP/3 reset the stream. The client receives only the first part of the JSON, and an HTTP/1.0 client cannot tell this from a normal end. The error remains catchable, but no other response can be sent.
 
 #### `resp.send(status)`
 
@@ -1185,7 +1187,7 @@ Body encoding and automatic Content-Type:
 | Object and explicit Content-Type contains lowercase `application/x-www-form-urlencoded` | Form encoding | Existing value remains |
 | Other object, array, number, or boolean | JSON | `application/json;charset=utf-8` |
 
-The Content-Type substring check is currently case-sensitive. An empty encoded JSON/form body is treated as no body. A JSON encoding failure also currently degrades to no body instead of throwing, so do not supply an iterator, invalid string, or non-finite number as the request body.
+The Content-Type substring check is currently case-sensitive. An empty encoded JSON/form body is treated as no body. A JSON encoding failure also currently degrades to no body instead of throwing, so do not supply an iterator or invalid string as the request body.
 
 - Return: a new `{status, body}` object after success. `status` is the final non-1xx upstream status and `body` is the complete response as `Binary`. `headers` is present only when `includeHeaders === true`; an exactly repeated response-header key keeps the last value.
 - Exceptions/aborts: a complete URL in `options.url`, pool acquisition, DNS/connect, header/body write, response read, or timeout failure throws `Error`. Missing services aborts with `InvalidState`; result allocation failure aborts with `OutOfMemory`.

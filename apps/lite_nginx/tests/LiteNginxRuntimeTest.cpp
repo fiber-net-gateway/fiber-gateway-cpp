@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -4948,6 +4949,399 @@ http {
     ::unlink(script_path.c_str());
     return response;
 }
+
+// resp.sendJson sends a body in pieces once it passes 64 KiB. kRows of these make a body well past that.
+constexpr std::size_t kLargeJsonRows = 300;
+
+std::string json_row_source() { return "let row = {id: 7, name: strings.repeat(\"n\", 1000), ok: true};\n"; }
+
+std::string json_rows_source(std::size_t rows) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < rows; ++i) {
+        out.append(i == 0 ? "row" : ",row");
+    }
+    out.push_back(']');
+    return out;
+}
+
+std::string expected_json_rows(std::size_t rows) {
+    const std::string row = R"({"id":7,"name":")" + std::string(1000, 'n') + R"(","ok":true})";
+    std::string out = R"({"rows":[)";
+    for (std::size_t i = 0; i < rows; ++i) {
+        if (i != 0) {
+            out.push_back(',');
+        }
+        out.append(row);
+    }
+    out.append(R"(],"tail":"end"})");
+    return out;
+}
+
+std::string send_json_rows_source(std::size_t rows) {
+    return json_row_source() + "resp.sendJson(200, {rows: " + json_rows_source(rows) + ", tail: \"end\"});";
+}
+
+// A body that passes the flush size before the encoder reaches a value it cannot write.
+std::string send_json_failing_late_source() {
+    return json_row_source() + "resp.sendJson(200, {rows: " + json_rows_source(kLargeJsonRows) +
+           ", bad: \"\xF0\x9F\x98\x80\"[0]});";
+}
+
+std::string body_after_headers(std::string_view response) {
+    const std::size_t header_end = response.find("\r\n\r\n");
+    return header_end == std::string_view::npos ? std::string() : std::string(response.substr(header_end + 4));
+}
+
+// Serves source at every path, sends request on one connection and reads until the server closes it.
+std::string script_response_until_close(std::string_view source, std::string_view request,
+                                        std::string_view http_directives = {}) {
+    TestScriptFile script("large_json", source);
+    if (!script.ok()) {
+        ADD_FAILURE() << "cannot write the script";
+        return {};
+    }
+    const std::uint16_t port = reserve_loopback_port();
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    HTTP_DIRECTIVES
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("HTTP_DIRECTIVES"), sizeof("HTTP_DIRECTIVES") - 1, http_directives);
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+
+    auto config = ConfigLoader::load_from_string(config_text, "large_json.conf");
+    if (!config.has_value()) {
+        ADD_FAILURE() << config.error().message;
+        return {};
+    }
+    auto runtime = RuntimeBuilder::build(*config);
+    if (!runtime.has_value()) {
+        ADD_FAILURE() << runtime.error().message;
+        return {};
+    }
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    if (client < 0 || !send_all(client, request)) {
+        ADD_FAILURE() << "cannot send the request";
+        return {};
+    }
+    std::string response = recv_until_close(client);
+    ::close(client);
+    return response;
+}
+
+constexpr std::string_view kCloseRequest = "GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+TEST(LiteNginxRuntimeTest, LargeSendJsonGoesOutInChunks) {
+    const std::string response = script_response_until_close(send_json_rows_source(kLargeJsonRows), kCloseRequest);
+    const std::string expected = expected_json_rows(kLargeJsonRows);
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_NE(response.find("Content-Type: application/json\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(decode_chunked_body(response), expected);
+
+    // The first chunk is one flush, not the whole body.
+    const std::string body = body_after_headers(response);
+    std::size_t first_chunk = 0;
+    const auto parsed = std::from_chars(body.data(), body.data() + body.size(), first_chunk, 16);
+    ASSERT_EQ(parsed.ec, std::errc());
+    EXPECT_GE(first_chunk, std::size_t{64} * 1024);
+    EXPECT_LT(first_chunk, std::size_t{70} * 1024);
+}
+
+TEST(LiteNginxRuntimeTest, SmallSendJsonKeepsContentLength) {
+    const std::string response = script_response_until_close(send_json_rows_source(10), kCloseRequest);
+    const std::string expected = expected_json_rows(10);
+
+    EXPECT_NE(response.find("Content-Length: " + std::to_string(expected.size()) + "\r\n"), std::string::npos)
+            << response.substr(0, 300);
+    EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(body_after_headers(response), expected);
+}
+
+TEST(LiteNginxRuntimeTest, LargeScriptReturnValueGoesOutInChunks) {
+    const std::string source =
+            json_row_source() + "return {rows: " + json_rows_source(kLargeJsonRows) + ", tail: \"end\"};";
+    const std::string response = script_response_until_close(source, kCloseRequest);
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(decode_chunked_body(response), expected_json_rows(kLargeJsonRows));
+}
+
+TEST(LiteNginxRuntimeTest, LargeSendJsonOfOneStringGoesOutInChunks) {
+    const std::string response =
+            script_response_until_close(R"(resp.sendJson(200, strings.repeat("\n", 1000000));)", kCloseRequest);
+    std::string expected = "\"";
+    for (int i = 0; i < 1000000; ++i) {
+        expected.append("\\n");
+    }
+    expected.push_back('"');
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(decode_chunked_body(response), expected);
+}
+
+TEST(LiteNginxRuntimeTest, LargeSendJsonToHttp10EndsWithTheConnection) {
+    const std::string response = script_response_until_close(send_json_rows_source(kLargeJsonRows),
+                                                             "GET /x HTTP/1.0\r\nHost: localhost\r\n\r\n");
+    EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(body_after_headers(response), expected_json_rows(kLargeJsonRows));
+}
+
+TEST(LiteNginxRuntimeTest, LargeSendJsonIsCompressed) {
+    const std::string response = script_response_until_close(send_json_rows_source(kLargeJsonRows),
+                                                             "GET /x HTTP/1.1\r\n"
+                                                             "Host: localhost\r\n"
+                                                             "Accept-Encoding: gzip\r\n"
+                                                             "Connection: close\r\n\r\n",
+                                                             "gzip on;\n    gzip_types application/json;");
+    EXPECT_NE(response.find("Content-Encoding: gzip\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(gunzip_body(decode_chunked_body(response)), expected_json_rows(kLargeJsonRows));
+}
+
+TEST(LiteNginxRuntimeTest, ConnectionServesAnotherRequestAfterLargeSendJson) {
+    TestScriptFile script("large_json_keepalive", send_json_rows_source(kLargeJsonRows));
+    ASSERT_TRUE(script.ok());
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    auto config = ConfigLoader::load_from_string(config_text, "large_json_keepalive.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const std::string expected = expected_json_rows(kLargeJsonRows);
+    for (int i = 0; i < 2; ++i) {
+        ASSERT_TRUE(send_all(client, "GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+        const std::string response = recv_until_contains(client, "\r\n0\r\n\r\n");
+        EXPECT_EQ(decode_chunked_body(response), expected) << i;
+    }
+    ::close(client);
+}
+
+TEST(LiteNginxRuntimeTest, SendJsonEncodesNonFiniteNumbersAsStrings) {
+    const std::string response = script_response_until_close(
+            "let inf = 1e308 * 10; resp.sendJson(200, {nan: inf - inf, inf: inf, neg: 0 - inf});", kCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response), "{\"nan\":\"NaN\",\"inf\":\"Infinity\",\"neg\":\"-Infinity\"}");
+}
+
+TEST(LiteNginxRuntimeTest, SendJsonFailureBeforeTheFlushIsStillCatchable) {
+    const std::string response =
+            script_response_until_close("try { resp.sendJson(200, {bad: \"\xF0\x9F\x98\x80\"[0]}); } "
+                                        "catch (e) { resp.sendJson(503, {handled: true}); }",
+                                        kCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 503 "), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response), "{\"handled\":true}");
+}
+
+TEST(LiteNginxRuntimeTest, SendJsonFailureAfterTheFlushCutsTheResponse) {
+    // The catch cannot change a response that is on its way, and must not disturb it either.
+    const std::string uncaught = script_response_until_close(send_json_failing_late_source(), kCloseRequest);
+    const std::string caught = script_response_until_close(
+            "try {\n" + send_json_failing_late_source() + "\n} catch (e) { resp.sendJson(503, {handled: true}); }",
+            kCloseRequest);
+
+    for (const std::string *response: {&uncaught, &caught}) {
+        EXPECT_NE(response->find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response->substr(0, 300);
+        EXPECT_NE(response->find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response->substr(0, 300);
+        EXPECT_GT(response->size(), std::size_t{64} * 1024);
+        EXPECT_EQ(response->find("\r\n0\r\n\r\n"), std::string::npos);
+        EXPECT_TRUE(decode_chunked_body(*response).empty());
+        EXPECT_EQ(response->find("handled"), std::string::npos);
+    }
+}
+
+TEST(LiteNginxRuntimeTest, SendJsonFailureAfterTheFlushDoesNotWaitForTheScript) {
+    // The script goes on after the failure, waiting for a body that never arrives. The client must
+    // not wait with it: nothing else ends the response until the script does.
+    TestScriptFile script("large_json_abort",
+                          "try {\n" + send_json_failing_late_source() + "\n} catch (e) { req.discardBody(); }");
+    ASSERT_TRUE(script.ok());
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    auto config = ConfigLoader::load_from_string(config_text, "large_json_abort.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const timeval timeout{.tv_sec = 5, .tv_usec = 0};
+    ASSERT_EQ(::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+    ASSERT_TRUE(send_all(client, "POST /x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc"));
+    errno = 0;
+    const std::string response = recv_until_close(client);
+    const bool timed_out = errno == EAGAIN || errno == EWOULDBLOCK;
+    ::close(client);
+    EXPECT_FALSE(timed_out);
+    EXPECT_GT(response.size(), std::size_t{64} * 1024);
+}
+
+struct LargeJsonOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    int status_code = 0;
+    std::string content_length;
+    std::string body;
+    bool body_complete = false;
+};
+
+enum class LargeJsonProtocol { Http2, Http3 };
+
+// Runs one request to a TLS listener serving source, over HTTP/2 or HTTP/3.
+LargeJsonOutcome fetch_large_json(LargeJsonProtocol protocol, const std::string &source) {
+    TestPemFile cert("large-json-cert", kSelfSignedCertPem);
+    TestPemFile key("large-json-key", kSelfSignedKeyPem);
+    TestScriptFile script("large_json_tls", source);
+    if (!cert.ok() || !key.ok() || !script.ok()) {
+        ADD_FAILURE() << "cannot write the test files";
+        return {};
+    }
+    const bool http3 = protocol == LargeJsonProtocol::Http3;
+    const std::uint16_t port = reserve_loopback_port();
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT ssl HTTP3;
+    server {
+        server_name localhost;
+        certificate CERT_FILE;
+        certificate_key KEY_FILE;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("HTTP3"), sizeof("HTTP3") - 1, http3 ? "http3" : "");
+    config_text.replace(config_text.find("CERT_FILE"), sizeof("CERT_FILE") - 1, cert.path());
+    config_text.replace(config_text.find("KEY_FILE"), sizeof("KEY_FILE") - 1, key.path());
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    auto config = ConfigLoader::load_from_string(config_text, "large_json_tls.conf");
+    if (!config.has_value()) {
+        ADD_FAILURE() << config.error().message;
+        return {};
+    }
+    auto runtime = RuntimeBuilder::build(*config);
+    if (!runtime.has_value()) {
+        ADD_FAILURE() << runtime.error().message;
+        return {};
+    }
+    RuntimeHarness harness(*runtime);
+
+    LargeJsonOutcome outcome;
+    fiber::event::EventLoopGroup group(1);
+    if (http3) {
+        fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
+        fiber::quic::QuicUdpEndpoint::EndpointOptions options;
+        options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+        if (!endpoint.init(options)) {
+            ADD_FAILURE() << "cannot bind the client endpoint";
+            return {};
+        }
+        group.start();
+        const fiber::net::SocketAddress server_addr{fiber::net::IpAddress::loopback_v4(), harness.port()};
+        const std::string &cert_path = cert.path();
+        std::promise<Http3GzipOutcome> promise;
+        auto future = promise.get_future();
+        fiber::async::spawn(group.at(0),
+                            [&]() { return run_http3_gzip_client(&endpoint, &server_addr, &cert_path, &promise); });
+        if (future.wait_for(8s) == std::future_status::ready) {
+            Http3GzipOutcome result = future.get();
+            outcome = {.error = result.error,
+                       .status_code = result.status_code,
+                       .content_length = std::move(result.content_length),
+                       .body = std::move(result.body),
+                       .body_complete = result.body_complete};
+        } else {
+            ADD_FAILURE() << "HTTP/3 client timed out";
+        }
+        group.stop();
+        group.join();
+        return outcome;
+    }
+    group.start();
+    std::promise<Http2GzipOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return run_http2_gzip_client(&group.at(0), harness.port(), &promise); });
+    if (future.wait_for(8s) == std::future_status::ready) {
+        Http2GzipOutcome result = future.get();
+        outcome = {.error = result.error,
+                   .status_code = result.status_code,
+                   .content_length = std::move(result.content_length),
+                   .body = std::move(result.body),
+                   .body_complete = result.body_complete};
+    } else {
+        ADD_FAILURE() << "HTTP/2 client timed out";
+    }
+    group.stop();
+    group.join();
+    return outcome;
+}
+
+class LiteNginxLargeJsonTest : public testing::TestWithParam<LargeJsonProtocol> {};
+
+TEST_P(LiteNginxLargeJsonTest, LargeSendJsonArrivesWhole) {
+    const LargeJsonOutcome outcome = fetch_large_json(GetParam(), send_json_rows_source(kLargeJsonRows));
+    EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.status_code, 200);
+    EXPECT_TRUE(outcome.content_length.empty()) << outcome.content_length;
+    EXPECT_TRUE(outcome.body_complete);
+    EXPECT_EQ(outcome.body, expected_json_rows(kLargeJsonRows));
+}
+
+TEST_P(LiteNginxLargeJsonTest, SendJsonFailureAfterTheFlushFailsTheStream) {
+    const LargeJsonOutcome outcome = fetch_large_json(GetParam(), send_json_failing_late_source());
+    EXPECT_EQ(outcome.status_code, 200);
+    EXPECT_NE(outcome.error, fiber::common::IoErr::None);
+    EXPECT_FALSE(outcome.body_complete);
+}
+
+INSTANTIATE_TEST_SUITE_P(Protocols, LiteNginxLargeJsonTest,
+                         testing::Values(LargeJsonProtocol::Http2, LargeJsonProtocol::Http3),
+                         [](const testing::TestParamInfo<LargeJsonProtocol> &info) {
+                             return info.param == LargeJsonProtocol::Http3 ? "Http3" : "Http2";
+                         });
 
 // A script that returns a Value is served as 200 + a JSON body encoding that value.
 TEST(LiteNginxRuntimeTest, ScriptReturnValueServes200Json) {

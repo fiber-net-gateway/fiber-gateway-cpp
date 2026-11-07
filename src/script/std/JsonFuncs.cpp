@@ -12,7 +12,6 @@
 #include <fiber/script/json/JsValueDecode.h>
 #include <fiber/script/json/JsValueEncode.h>
 
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -92,28 +91,18 @@ AbiResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Lib
 
 // ---- JSON.stringify(value) ----
 // Serializes value to a JSON text string via the Generator + encode_js_value bridge
-// (mirrors Jackson's writeValueAsString). Top-level undefined -> returns undefined
-// (matches JS); top-level NaN/+/-Inf -> "null" (matches JS; the Generator rejects
-// non-finite doubles, which would otherwise surface as an encode failure). Any other
-// encode failure (InvalidValue/InvalidString/MaxDepthExceeded) raises a catchable
+// (mirrors Jackson's writeValueAsString, including "NaN", "Infinity" and "-Infinity" as
+// strings for non-finite numbers). Top-level undefined -> returns undefined (matches JS).
+// Any encode failure (InvalidValue/InvalidString/MaxDepthExceeded) raises a catchable
 // TypeError. OOM on the result string aborts.
 
 AbiResult stringify_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     GcHeap &heap = frame.runtime;
 
     JsValue value = (args.args && args.argc >= 1) ? args.args[0] : JsValue::make_undefined();
-    JsNodeType type = js_value_type(value);
 
-    if (type == JsNodeType::Undefined) {
+    if (js_value_type(value) == JsNodeType::Undefined) {
         return AbiResult::success(JsValue::make_undefined());
-    }
-
-    if (type == JsNodeType::Float) {
-        double d = js_value_double(value);
-        if (std::isnan(d) || std::isinf(d)) {
-            // Matches JS JSON.stringify: NaN/Infinity serialize as "null".
-            return make_string_result(heap, std::string_view("null", 4));
-        }
     }
 
     std::string out;
