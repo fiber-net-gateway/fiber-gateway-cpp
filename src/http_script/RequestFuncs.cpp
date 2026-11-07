@@ -6,6 +6,8 @@
 #include <fiber/common/IoError.h>
 #include <fiber/common/json/JsonDecode.h>
 #include <fiber/common/mem/IoBufChain.h>
+#include <fiber/http/HttpBodyPipe.h>
+#include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/script/AsyncTask.h>
 #include <fiber/script/JsGc.h>
@@ -17,9 +19,12 @@
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
 
+#include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace fiber::http_script {
 
@@ -28,7 +33,10 @@ namespace {
 using fiber::script::AbiResult;
 using fiber::script::AsyncTask;
 using fiber::script::ConstValueHandle;
+using fiber::script::GcBinary;
 using fiber::script::GcHeap;
+using fiber::script::GcHeapKind;
+using fiber::script::js_make_heap_ref;
 using fiber::script::js_value_type;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
@@ -37,24 +45,65 @@ using fiber::script::ScriptAbortReason;
 using fiber::script::ValueHandle;
 using fiber::script::std_lib::string_utf8_view;
 
+constexpr std::size_t kBodyReadBytes = 65536;
+// Limits each read's idle wait, not the whole upload, like proxy_read_timeout's default.
+constexpr std::chrono::milliseconds kBodyIdleTimeout{60000};
+// Tighter than the pipe's default: a pipe holds one buffer, a body held for a GC copy can
+// reach the heap limit, so what it pins must stay close to what it counts.
+constexpr std::size_t kHeldBodyCoalesceRatio = 2;
+constexpr std::string_view kBodyConsumedMessage = "request body already consumed";
+
 ScriptExchangeCtx *ctx_of(const Library::HostCallFrame &frame) noexcept {
     return static_cast<ScriptExchangeCtx *>(frame.attach);
 }
 
 // Builds a named+message exception JsValue (mirrors Java ScriptExecException(name, msg)).
 // Falls back to an OutOfMemory abort if the exception itself cannot be allocated.
-AbiResult error_exn(GcHeap &heap, std::string_view message) noexcept {
-    static constexpr char kErrorName[] = "Error";
+AbiResult named_exn(GcHeap &heap, std::string_view name, std::string_view message) noexcept {
     GcHeap::LocalMark mark(heap);
     ValueHandle ex = heap.local_value();
     if (!ex) {
         return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    if (!fiber::script::gc_make_exception(&heap, ex, -1, kErrorName, sizeof(kErrorName) - 1, message.data(),
-                                          message.size())) {
+    if (!fiber::script::gc_make_exception(&heap, ex, -1, name.data(), name.size(), message.data(), message.size())) {
         return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
     return AbiResult::exception(*ex);
+}
+
+AbiResult error_exn(GcHeap &heap, std::string_view message) noexcept { return named_exn(heap, "Error", message); }
+
+// Catchable, unlike the abort of a real allocation failure: the heap is healthy, the body
+// just does not fit, so a script may answer with its own response.
+AbiResult body_too_large(GcHeap &heap) noexcept {
+    return named_exn(heap, "OutOfMemory", "request body exceeds the script heap limit");
+}
+
+AbiResult body_read_failed(GcHeap &heap, fiber::common::IoErr error) noexcept {
+    if (error == fiber::common::IoErr::NoMem) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    return error_exn(heap, "read request body failed");
+}
+
+// Claims the one-shot request body for the caller; false when it is already taken.
+bool claim_request_body(ScriptExchangeCtx &ctx) noexcept {
+    if (ctx.request_body_consumed()) {
+        return false;
+    }
+    ctx.mark_request_body_consumed();
+    return true;
+}
+
+// Allocates a binary of len uninitialized bytes into out. Nothing stays unrooted here, so a
+// collection the allocation asked for would reclaim nothing and is dropped.
+GcBinary *new_body_binary(GcHeap &heap, ValueHandle out, std::size_t len) noexcept {
+    GcHeap::NoGcScope no_gc(heap, /*defer_collect=*/true);
+    GcBinary *bin = fiber::script::gc_new_binary_uninit(&heap, len);
+    if (bin != nullptr) {
+        *out = js_make_heap_ref(&bin->hdr, GcHeapKind::Binary);
+    }
+    return bin;
 }
 
 AbiResult invalid_state() noexcept { return AbiResult::abort(ScriptAbortReason::InvalidState); }
@@ -64,7 +113,7 @@ AbiResult invalid_state() noexcept { return AbiResult::abort(ScriptAbortReason::
 fiber::async::Task<fiber::common::IoResult<void>> read_full_body(ScriptRequestBody request_body,
                                                                  std::string &out) noexcept {
     for (;;) {
-        auto read_result = co_await request_body.read(65536);
+        auto read_result = co_await request_body.read(kBodyReadBytes, kBodyIdleTimeout);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -154,6 +203,9 @@ AsyncTask read_json_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
     if (ctx == nullptr || heap == nullptr) {
         co_return invalid_state();
     }
+    if (!claim_request_body(*ctx)) {
+        co_return error_exn(*heap, kBodyConsumedMessage);
+    }
     std::string body;
     auto read_result = co_await read_full_body(ctx->request_body(), body);
     if (!read_result) {
@@ -184,21 +236,84 @@ AsyncTask read_binary_fn(void * /*userdata*/, const Library::HostCallFrame &fram
     if (ctx == nullptr || heap == nullptr) {
         co_return invalid_state();
     }
-    std::string body;
-    auto read_result = co_await read_full_body(ctx->request_body(), body);
-    if (!read_result) {
-        co_return error_exn(*heap, "read request body failed");
+    if (!claim_request_body(*ctx)) {
+        co_return error_exn(*heap, kBodyConsumedMessage);
     }
-    if (body.empty()) {
+    const ScriptRequestBody request_body = ctx->request_body();
+    fiber::http::HttpExchange &exchange = ctx->exchange();
+
+    const fiber::http::HttpBodySpec spec = exchange.request_body_spec();
+    const std::size_t declared = spec.is_content_length() ? spec.content_length() : 0;
+    if (declared != 0 && !heap->ensure_can_alloc(declared)) {
+        // Nothing was read, and a client waiting on 100-continue has sent nothing: reading
+        // would answer it with an invitation to upload the body being refused.
+        if (exchange.expect_header() == nullptr) {
+            (void) co_await request_body.discard(kBodyIdleTimeout);
+        }
+        co_return body_too_large(*heap);
+    }
+
+    // A declared length lets each read go straight to the binary: one copy, and nothing held
+    // between reads. The heap cannot change while the script waits here, so the check above
+    // stays true.
+    if (declared != 0) {
+        GcHeap::LocalMark mark(*heap);
+        ValueHandle out = heap->local_value();
+        if (!out) {
+            co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+        }
+        GcBinary *bin = new_body_binary(*heap, out, declared);
+        if (bin == nullptr) {
+            co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+        }
+        auto read_result = co_await read_body_into(request_body, bin->data, declared, kBodyIdleTimeout);
+        if (!read_result) {
+            co_return body_read_failed(*heap, read_result.error());
+        }
+        co_return AbiResult::success(*out);
+    }
+
+    // Length unknown: hold the reads, stopping as soon as the body cannot fit.
+    fiber::mem::IoBufChain body;
+    for (;;) {
+        auto read_result = co_await request_body.read(kBodyReadBytes, kBodyIdleTimeout);
+        if (!read_result) {
+            co_return body_read_failed(*heap, read_result.error());
+        }
+        const bool complete = read_result->complete();
+        const std::size_t total = body.readable_bytes() + read_result->readable_bytes();
+        if (total != 0 && !heap->ensure_can_alloc(total)) {
+            body.clear();
+            read_result->clear();
+            // The script may catch this and carry on, so leave no half-read body behind.
+            (void) co_await request_body.discard(kBodyIdleTimeout);
+            co_return body_too_large(*heap);
+        }
+        if (!fiber::http::append_coalescing(body, std::move(*read_result), fiber::http::kBodyCoalesceCapacity,
+                                            kHeldBodyCoalesceRatio)) {
+            co_return body_read_failed(*heap, fiber::common::IoErr::Invalid);
+        }
+        if (complete) {
+            break;
+        }
+    }
+
+    const std::size_t len = body.readable_bytes();
+    if (len == 0) {
         // Java: empty/absent body -> BinaryNode of EMPTY_BYTE_ARR (not an error).
-        JsValue empty = JsValue::make_binary(*heap, nullptr, 0);
-        co_return AbiResult::success(empty);
+        co_return AbiResult::success(JsValue::make_binary(*heap, nullptr, 0));
     }
-    JsValue bin = JsValue::make_binary(*heap, reinterpret_cast<const std::uint8_t *>(body.data()), body.size());
-    if (js_value_type(bin) != JsNodeType::Binary) {
+    GcHeap::LocalMark mark(*heap);
+    ValueHandle out = heap->local_value();
+    if (!out) {
         co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
-    co_return AbiResult::success(bin);
+    GcBinary *bin = new_body_binary(*heap, out, len);
+    if (bin == nullptr) {
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    drain_chain_into(body, bin->data);
+    co_return AbiResult::success(*out);
 }
 
 // ---- req.discardBody() [async] ----
@@ -209,7 +324,8 @@ AsyncTask discard_body_fn(void * /*userdata*/, const Library::HostCallFrame &fra
     if (ctx == nullptr) {
         co_return invalid_state();
     }
-    auto result = co_await ctx->request_body().discard();
+    ctx->mark_request_body_consumed();
+    auto result = co_await ctx->request_body().discard(kBodyIdleTimeout);
     (void) result; // Java fire-and-forget ignores drain errors
     co_return AbiResult::success(JsValue::make_null());
 }

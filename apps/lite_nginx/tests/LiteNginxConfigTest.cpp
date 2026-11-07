@@ -421,6 +421,78 @@ TEST(LiteNginxConfigTest, ClientMaxBodySizeDefaultsToUnlimited) {
     EXPECT_EQ(config_result->http.servers[0].locations[0].client_max_body_size, 0U);
 }
 
+TEST(LiteNginxConfigTest, ScriptMaxHeapSizeInheritsAndOverrides) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            script_max_heap_size 1m;
+
+            server {
+                server_name localhost;
+                script_max_heap_size 2m;
+
+                location /inherits { proxy_pass http://127.0.0.1:9001; }
+                location /unlimited {
+                    proxy_pass http://127.0.0.1:9001;
+                    script_max_heap_size 0;
+                }
+            }
+
+            server {
+                server_name fallback.local;
+                location / { proxy_pass http://127.0.0.1:9001; }
+            }
+        }
+    )",
+                                                        "script_max_heap_size.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    EXPECT_EQ(config_result->http.script_max_heap_size, 1024U * 1024U);
+    const auto &overridden = config_result->http.servers[0];
+    EXPECT_EQ(overridden.script_max_heap_size, 2U * 1024U * 1024U);
+    EXPECT_EQ(overridden.locations[0].script_max_heap_size, 2U * 1024U * 1024U);
+    EXPECT_EQ(overridden.locations[1].script_max_heap_size, 0U);
+    const auto &inherited = config_result->http.servers[1];
+    EXPECT_EQ(inherited.script_max_heap_size, 1024U * 1024U);
+    EXPECT_EQ(inherited.locations[0].script_max_heap_size, 1024U * 1024U);
+}
+
+TEST(LiteNginxConfigTest, ScriptMaxHeapSizeDefaultsTo64MiB) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / { proxy_pass http://127.0.0.1:9001; }
+            }
+        }
+    )",
+                                                        "default_script_max_heap_size.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    constexpr std::size_t kDefault = std::size_t{64} * 1024 * 1024;
+    EXPECT_EQ(config_result->http.script_max_heap_size, kDefault);
+    EXPECT_EQ(config_result->http.servers[0].script_max_heap_size, kDefault);
+    EXPECT_EQ(config_result->http.servers[0].locations[0].script_max_heap_size, kDefault);
+}
+
+TEST(LiteNginxConfigTest, RejectsInvalidScriptMaxHeapSizeSettings) {
+    static constexpr std::string_view kDirectives[] = {
+            "script_max_heap_size;",
+            "script_max_heap_size 1m 2m;",
+            "script_max_heap_size lots;",
+            "script_max_heap_size $size;",
+            "script_max_heap_size 1m; script_max_heap_size 2m;",
+    };
+    for (std::string_view directive: kDirectives) {
+        std::string text = "http { listen 8080; ";
+        text.append(directive);
+        text.append(" server { server_name localhost; location / { proxy_pass http://127.0.0.1:9001; } } }");
+        auto config_result = ConfigLoader::load_from_string(text, "bad_script_max_heap_size.conf");
+        EXPECT_FALSE(config_result.has_value()) << directive;
+    }
+}
+
 TEST(LiteNginxConfigTest, RejectsInvalidClientMaxBodySizeSettings) {
     static constexpr std::string_view kDirectives[] = {
             "client_max_body_size;",

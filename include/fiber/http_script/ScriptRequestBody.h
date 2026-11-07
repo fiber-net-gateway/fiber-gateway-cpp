@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -52,6 +53,15 @@ ScriptRequestBody make_script_request_body(T &source) noexcept {
             },
     };
 }
+
+// Moves every readable byte of chain to dst, which must hold chain.readable_bytes().
+void drain_chain_into(mem::IoBufChain &chain, std::uint8_t *dst) noexcept;
+
+// Reads a body of exactly len bytes (len > 0) into dst, releasing each read as it lands so
+// at most one is held. dst is never written past len, whatever the source delivers: a source
+// that overruns len, or completes short of it, fails with IoErr::Invalid.
+async::Task<common::IoResult<void>> read_body_into(ScriptRequestBody body, std::uint8_t *dst, std::size_t len,
+                                                   std::chrono::milliseconds timeout) noexcept;
 
 } // namespace fiber::http_script
 

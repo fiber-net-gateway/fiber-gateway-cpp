@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <netinet/in.h>
+#include <optional>
 #include <poll.h>
 #include <string>
 #include <string_view>
@@ -4439,6 +4440,375 @@ http {
     EXPECT_NE(response.find("\"path\":\"/hello\""), std::string::npos) << response;
 
     ::unlink(script_path.c_str());
+}
+
+// One lite_nginx with a 1 KiB script heap limit. Plain listeners are driven over raw sockets so
+// the tests can pin exactly what reaches the wire; TLS ones serve the HTTP/2 client.
+class ScriptHeapLimitServer {
+public:
+    explicit ScriptHeapLimitServer(std::string_view script_source, bool tls = false) :
+        script_("script_heap_limit", script_source) {
+        const std::uint16_t port = reserve_loopback_port();
+        std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT TLS_FLAG;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    upstream backend { server 127.0.0.1:1; }
+    server {
+        server_name localhost;
+        TLS_FILES
+        location /* {
+            script_max_heap_size 1k;
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+        std::string tls_files;
+        if (tls) {
+            tls_files = "certificate " + cert_.path() + "; certificate_key " + key_.path() + ";";
+        }
+        config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+        config_text.replace(config_text.find("TLS_FLAG"), sizeof("TLS_FLAG") - 1, tls ? "ssl" : "");
+        config_text.replace(config_text.find("TLS_FILES"), sizeof("TLS_FILES") - 1, tls_files);
+        config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_.path());
+        auto config = ConfigLoader::load_from_string(config_text, "script_heap_limit.conf");
+        EXPECT_TRUE(config.has_value()) << (config ? "" : config.error().message);
+        if (config) {
+            auto runtime = RuntimeBuilder::build(*config);
+            EXPECT_TRUE(runtime.has_value()) << (runtime ? "" : runtime.error().message);
+            if (runtime) {
+                harness_ = std::make_unique<RuntimeHarness>(*runtime);
+            }
+        }
+    }
+
+    [[nodiscard]] std::uint16_t port() const { return harness_->port(); }
+
+private:
+    TestPemFile cert_{"script-heap-cert", kSelfSignedCertPem};
+    TestPemFile key_{"script-heap-key", kSelfSignedKeyPem};
+    TestScriptFile script_;
+    std::unique_ptr<RuntimeHarness> harness_;
+};
+
+struct Http2PostOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    int status_code = 0;
+    std::string body;
+};
+
+// Posts body over HTTP/2, announcing declared_length as its Content-Length when set, whether
+// or not that is the truth.
+fiber::async::DetachedTask run_http2_post(fiber::event::EventLoop *loop, std::uint16_t port,
+                                          std::optional<std::size_t> declared_length, const std::string *body,
+                                          std::promise<Http2PostOutcome> *promise) {
+    Http2PostOutcome outcome;
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
+
+    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop);
+    auto connect_result = co_await connection->connect(
+            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s, tls);
+    if (!connect_result) {
+        outcome.error = connect_result.error();
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+    auto run_state = std::make_shared<Http2RunState>();
+    fiber::async::spawn(*loop, [connection, run_state]() { return run_http2_connection(connection, run_state); });
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    if (declared_length) {
+        headers.set("content-length", std::to_string(*declared_length));
+    }
+    fiber::http::ClientHttp2Exchange exchange(*connection, pool);
+    auto send_result = co_await exchange.send_request_header(
+            {
+                    .method = fiber::http::HttpMethod::Post,
+                    .scheme = "https",
+                    .authority = "localhost",
+                    .path = "/x",
+                    .headers = &headers,
+            },
+            false, 2s);
+    if (!send_result) {
+        outcome.error = send_result.error();
+    } else {
+        auto write_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body->data()),
+                                                        body->size(), true, 2s);
+        if (!write_result) {
+            outcome.error = write_result.error();
+        }
+    }
+    if (outcome.error == fiber::common::IoErr::None) {
+        auto header_result = co_await exchange.read_header(2s);
+        if (!header_result) {
+            outcome.error = header_result.error();
+        } else {
+            outcome.status_code = (*header_result)->status_code;
+            for (bool complete = false; !complete;) {
+                auto body_result = co_await exchange.read_body(std::size_t{64} * 1024, 2s);
+                if (!body_result) {
+                    outcome.error = body_result.error();
+                    break;
+                }
+                complete = body_result->complete();
+                outcome.body.append(chain_to_string(std::move(*body_result)));
+            }
+        }
+    }
+
+    connection->shutdown();
+    for (int i = 0; i < 500 && !run_state->done.load(std::memory_order_acquire); ++i) {
+        co_await fiber::async::sleep(1ms);
+    }
+    promise->set_value(std::move(outcome));
+}
+
+Http2PostOutcome http2_post(std::uint16_t port, std::optional<std::size_t> declared_length, const std::string &body) {
+    fiber::event::EventLoopGroup client_group(1);
+    client_group.start();
+    std::promise<Http2PostOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(client_group.at(0),
+                        [&]() { return run_http2_post(&client_group.at(0), port, declared_length, &body, &promise); });
+    Http2PostOutcome outcome;
+    const std::future_status status = future.wait_for(5s);
+    if (status == std::future_status::ready) {
+        outcome = future.get();
+    } else {
+        outcome.error = fiber::common::IoErr::TimedOut;
+    }
+    client_group.stop();
+    client_group.join();
+    return outcome;
+}
+
+std::string post_with_length(std::string_view body) {
+    std::string request = "POST /x HTTP/1.1\r\nHost: localhost\r\nContent-Length: ";
+    request.append(std::to_string(body.size()));
+    request.append("\r\n\r\n");
+    request.append(body);
+    return request;
+}
+
+std::string chunked_post(std::size_t chunks, std::size_t chunk_bytes, char fill) {
+    std::string request = "POST /x HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
+    char size[32];
+    char *const end = std::to_chars(size, size + sizeof(size), chunk_bytes, 16).ptr;
+    for (std::size_t i = 0; i < chunks; ++i) {
+        request.append(size, end);
+        request.append("\r\n");
+        request.append(chunk_bytes, fill);
+        request.append("\r\n");
+    }
+    request.append("0\r\n\r\n");
+    return request;
+}
+
+constexpr std::string_view kEchoBody = "resp.send(200, req.readBinary());";
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitRefusesKnownLengthBodyAndKeepsTheConnection) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, post_with_length(std::string(4096, 'a'))));
+    const std::string refused = recv_http_response(client);
+    EXPECT_NE(refused.find("HTTP/1.1 500"), std::string::npos) << refused;
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+
+    // The discarded body left the stream at the next request's boundary.
+    ASSERT_TRUE(send_all(client, post_with_length("abc")));
+    const std::string next = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(next.find("HTTP/1.1 200"), std::string::npos) << next;
+    EXPECT_TRUE(next.ends_with("\r\n\r\nabc")) << next;
+}
+
+// The script only continues once the refused body is gone, so nothing may answer early.
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitReadsARefusedBodyToTheEnd) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    const std::string request = post_with_length(std::string(4096, 'a'));
+    const std::string_view all(request);
+    const std::size_t held_back = 1024;
+    ASSERT_TRUE(send_all(client, all.substr(0, all.size() - held_back)));
+    pollfd readable{.fd = client, .events = POLLIN, .revents = 0};
+    EXPECT_EQ(::poll(&readable, 1, 200), 0);
+
+    ASSERT_TRUE(send_all(client, all.substr(all.size() - held_back)));
+    const std::string refused = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+}
+
+// Part of this body was already read when it stopped fitting, so the rest must go too.
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitDiscardsThePartOfAChunkedBodyNotYetRead) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    const std::string request = chunked_post(8, 512, 'a');
+    const std::string_view all(request);
+    // Cut inside the last chunk: at a chunk boundary the read itself would wait for more, and
+    // this test would pass without any discard.
+    const std::size_t held_back = 100 + sizeof("\r\n0\r\n\r\n") - 1;
+    ASSERT_TRUE(send_all(client, all.substr(0, all.size() - held_back)));
+    pollfd readable{.fd = client, .events = POLLIN, .revents = 0};
+    EXPECT_EQ(::poll(&readable, 1, 200), 0);
+
+    ASSERT_TRUE(send_all(client, all.substr(all.size() - held_back)));
+    const std::string refused = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitRefusesChunkedBodyPartWayThrough) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, chunked_post(8, 512, 'a')));
+    const std::string refused = recv_http_response(client);
+    EXPECT_NE(refused.find("HTTP/1.1 500"), std::string::npos) << refused;
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+
+    ASSERT_TRUE(send_all(client, post_with_length("abc")));
+    const std::string next = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(next.find("HTTP/1.1 200"), std::string::npos) << next;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitAcceptsChunkedBodyThatFits) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, chunked_post(100, 5, 'c')));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\n" + std::string(500, 'c'))) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitDoesNotInviteARefusedUpload) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, "POST /x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4096\r\n"
+                                 "Expect: 100-continue\r\n\r\n"));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_EQ(response.find("100 Continue"), std::string::npos) << response;
+    EXPECT_NE(response.find("HTTP/1.1 500"), std::string::npos) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitStillContinuesABodyThatFits) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, "POST /x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n"
+                                 "Expect: 100-continue\r\n\r\n"));
+    std::array<char, 256> interim{};
+    const ssize_t got = ::recv(client, interim.data(), interim.size(), 0);
+    ASSERT_GT(got, 0);
+    EXPECT_NE(std::string_view(interim.data(), static_cast<std::size_t>(got)).find("100 Continue"), std::string::npos);
+
+    ASSERT_TRUE(send_all(client, "abc"));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\nabc")) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptReadsABodyOverHttp2WithAndWithoutALength) {
+    ScriptHeapLimitServer server(kEchoBody, /*tls=*/true);
+    const std::string body(500, 'h');
+
+    const Http2PostOutcome declared = http2_post(server.port(), body.size(), body);
+    EXPECT_EQ(declared.error, fiber::common::IoErr::None);
+    EXPECT_EQ(declared.status_code, 200);
+    EXPECT_EQ(declared.body, body);
+
+    const Http2PostOutcome undeclared = http2_post(server.port(), std::nullopt, body);
+    EXPECT_EQ(undeclared.error, fiber::common::IoErr::None);
+    EXPECT_EQ(undeclared.status_code, 200);
+    EXPECT_EQ(undeclared.body, body);
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitRefusesHttp2BodiesWithAndWithoutALength) {
+    ScriptHeapLimitServer server(kEchoBody, /*tls=*/true);
+    const std::string body(4096, 'h');
+
+    const Http2PostOutcome declared = http2_post(server.port(), body.size(), body);
+    EXPECT_EQ(declared.status_code, 500);
+    EXPECT_NE(declared.body.find("OutOfMemory"), std::string::npos) << declared.body;
+
+    const Http2PostOutcome undeclared = http2_post(server.port(), std::nullopt, body);
+    EXPECT_EQ(undeclared.status_code, 500);
+    EXPECT_NE(undeclared.body.find("OutOfMemory"), std::string::npos) << undeclared.body;
+}
+
+// HTTP/2 does not bind DATA to Content-Length yet, so a dishonest length reaches readBinary.
+// However that gets rejected, the body must not come back as a success.
+TEST(LiteNginxRuntimeTest, Http2BodyDisagreeingWithContentLengthIsNeverEchoed) {
+    ScriptHeapLimitServer server(kEchoBody, /*tls=*/true);
+    const std::string body(800, 'h');
+
+    const Http2PostOutcome overrun = http2_post(server.port(), 3, body);
+    EXPECT_NE(overrun.status_code, 200) << overrun.body;
+
+    const Http2PostOutcome short_of_it = http2_post(server.port(), 900, body);
+    EXPECT_NE(short_of_it.status_code, 200) << short_of_it.body;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptCanAnswerAHeapLimitRefusalItself) {
+    ScriptHeapLimitServer server("try { req.readBinary(); } catch (e) { resp.send(413, \"too big\"); }");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, post_with_length(std::string(4096, 'a'))));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 413"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("too big")) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ProxyPassRefusesABodyAlreadyConsumed) {
+    ScriptHeapLimitServer server("directive svc = http \"@backend\";"
+                                 "req.readBinary();"
+                                 "try { svc.proxyPass(); resp.send(200, \"forwarded\"); }"
+                                 "catch (e) { resp.sendJson(200, {caught: e}); }");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, post_with_length("abc")));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("already consumed"), std::string::npos) << response;
+}
+
+// A proxyPass that never reached the upstream has not touched the body.
+TEST(LiteNginxRuntimeTest, FailedProxyConnectLeavesTheBodyReadable) {
+    ScriptHeapLimitServer server("directive svc = http \"@backend\";"
+                                 "try { svc.proxyPass(); } catch (e) { }"
+                                 "resp.send(200, req.readBinary());");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, post_with_length("abc")));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\nabc")) << response;
 }
 
 TEST(LiteNginxRuntimeTest, ScriptBodyConsumersMapIncrementalLimitFailureTo413) {

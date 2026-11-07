@@ -157,6 +157,25 @@ void GcHeap::maybe_collect_for_alloc(std::size_t alloc_bytes) {
     collect();
 }
 
+bool GcHeap::ensure_can_alloc(std::size_t size) noexcept {
+    FIBER_ASSERT(!no_gc_active());
+    if (max_bytes_ == 0 || saturating_add(bytes, size) <= max_bytes_) {
+        return true;
+    }
+    if (size > max_bytes_) {
+        return false; // no collection can make room
+    }
+    // Two passes: an object survives the first collection after it is linked, so garbage
+    // the script made just before this call is only reclaimed by the second.
+    for (int pass = 0; pass < 2; ++pass) {
+        collect();
+        if (saturating_add(bytes, size) <= max_bytes_) {
+            return true;
+        }
+    }
+    return false;
+}
+
 GcHeap::LocalState GcHeap::mark_local() const noexcept {
     return LocalState{.block = local_current_, .top = local_top_};
 }

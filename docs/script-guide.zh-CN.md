@@ -937,15 +937,15 @@ declare namespace req {
 
 - 参数：无；异步函数。
 - 返回：读取完整请求体并构造对应 `ScriptValue`。
-- 异常：空请求体、body 读取失败或非法 JSON 分别抛出带固定消息的 `Error`；解析错误的具体 offset 不会暴露给脚本。
+- 异常：空请求体、body 已被消费、body 读取失败或非法 JSON 分别抛出带固定消息的 `Error`；解析错误的具体 offset 不会暴露给脚本。
 - 副作用：消费请求体，并把完整 body 和解码结果置于内存；函数自身不限制大小。
 
 #### `req.readBinary()`
 
 - 参数：无；异步函数。
 - 返回：包含完整请求体的新 `Binary`；空 body 返回长度为 0 的 `Binary`。
-- 异常：读取失败抛 `Error`；分配失败为 `OutOfMemory` abort。
-- 副作用：消费请求体，并把完整 body 连续化到内存；函数自身不限制大小。
+- 异常：body 超出宿主配置的堆上限时，抛名为 `OutOfMemory` 的可捕获异常；body 已被消费或读取失败抛 `Error`；分配失败为 `OutOfMemory` abort。
+- 副作用：消费请求体，并把完整 body 连续化到内存，上限由宿主配置的堆上限决定。被拒绝的 body 会先读完并丢弃（客户端还在等 `Expect: 100-continue` 时除外），这样脚本可以从确定的状态继续执行。
 
 #### `req.discardBody()`
 
@@ -954,7 +954,7 @@ declare namespace req {
 - 异常：当前会忽略底层排空错误，不抛可捕获异常；缺少 context 为 `InvalidState` abort。
 - 副作用：消费并丢弃剩余请求体。
 
-请求体是一次性的流式资源。不要把这三个函数相互组合，也不要先读取 body 再调用会转发入站 body 的 `service.proxyPass()`。公网服务还应在 HTTP 层设置请求体大小限制。
+请求体是一次性的流式资源。这三个函数或 `service.proxyPass()` 中任何一个开始处理它之后，`readJson()`、`readBinary()` 以及需要转发它的 `proxyPass()` 都会抛 `Error`，即使第一次失败了也一样；`discardBody()` 此时什么也不做。读取和丢弃 body 时，60 秒没有进展就会放弃。公网服务还应在 HTTP 层设置请求体大小限制。
 
 ### 6.2 响应函数 `resp.*`
 

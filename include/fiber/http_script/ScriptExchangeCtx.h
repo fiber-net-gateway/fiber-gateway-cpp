@@ -73,6 +73,10 @@ public:
     }
     [[nodiscard]] fiber::script::GcHeap &heap() const noexcept { return heap_; }
     [[nodiscard]] ScriptRequestBody request_body() const noexcept { return request_body_; }
+    // The body is a one-shot stream: set as soon as a consumer starts on it, whatever the
+    // outcome, so a later consumer fails instead of seeing the tail of a half-read body.
+    [[nodiscard]] bool request_body_consumed() const noexcept { return request_body_consumed_; }
+    void mark_request_body_consumed() noexcept { request_body_consumed_ = true; }
 
     // App-provided upstream-connection services (global pool + DNS). Set per request by the host
     // before the script runs; null => http.request / http.proxyPass fail with InvalidState.
@@ -214,6 +218,7 @@ private:
 
     fiber::http::HttpHeaders pending_headers_;
     bool header_sent_ = false;
+    bool request_body_consumed_ = false;
 };
 
 } // namespace fiber::http_script
