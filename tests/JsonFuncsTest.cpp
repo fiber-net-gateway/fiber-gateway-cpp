@@ -201,6 +201,15 @@ TEST(JsonFuncsTest, RoundTripObject) {
     expect_script_bool(R"(return JSON.stringify(JSON.parse('{"a":1,"b":[2,3]}')) === '{"a":1,"b":[2,3]}';)", true);
 }
 
+TEST(JsonFuncsTest, ParseRejectsAnUnfinishedTokenAfterTheValue) {
+    for (std::string_view text: {"1 2", "{} 3", "[] tru"}) {
+        SCOPED_TRACE(text);
+        expect_script_string("try { JSON.parse('" + std::string(text) +
+                                     R"('); return "parsed"; } catch (e) { return "caught"; })",
+                             "caught");
+    }
+}
+
 // A failed allocation says nothing about the text, so it must not reach the script as a
 // SyntaxError it could catch and misreport.
 TEST(JsonFuncsTest, ParseOutOfMemoryAbortsInsteadOfThrowingSyntaxError) {

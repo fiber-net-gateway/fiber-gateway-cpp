@@ -401,6 +401,30 @@ TEST(JsValueDecodeTest, ReportsARefusedAllocationAsOutOfMemory) {
     EXPECT_TRUE(error.out_of_memory);
 }
 
+TEST(JsValueDecodeTest, RejectsAnUnfinishedTokenAfterTheValue) {
+    for (std::string_view text: {"1 2", "{} 3", "[] \"abc", "null tru", "true -", "1 1.5"}) {
+        GcHeap heap;
+        GcHeap::LocalMark mark(heap);
+        ValueHandle out = heap.local_value();
+        ParseError error;
+        EXPECT_EQ(fiber::script::json::decode_js_value(heap, text.data(), text.size(), out, &error),
+                  DecodeStatus::Error)
+                << text;
+        EXPECT_FALSE(error.out_of_memory) << text;
+        EXPECT_EQ(js_value_type(*out), JsNodeType::Undefined) << text;
+    }
+}
+
+TEST(JsValueDecodeTest, AValueEndingAtTheEndOfInputIsComplete) {
+    for (std::string_view text: {"12", "-1.5e3", "true", "null", "\"s\"", "{}", "[]", "7 ", "{}\n", " [] \t"}) {
+        GcHeap heap;
+        GcHeap::LocalMark mark(heap);
+        ValueHandle out = heap.local_value();
+        EXPECT_EQ(fiber::script::json::decode_js_value(heap, text.data(), text.size(), out), DecodeStatus::Complete)
+                << text;
+    }
+}
+
 TEST(JsValueDecodeTest, BadJsonIsNotOutOfMemory) {
     GcHeap heap;
     GcHeap::LocalMark mark(heap);
