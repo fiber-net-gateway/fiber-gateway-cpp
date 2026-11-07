@@ -7,7 +7,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
 #include <string_view>
 
 namespace fiber::json {
@@ -24,13 +23,13 @@ struct Utf8ScanResult {
 [[nodiscard]] bool utf8_write_bytes(const char *data, std::size_t len, std::uint8_t *dst, std::size_t dst_len) noexcept;
 [[nodiscard]] bool utf8_write_utf16(const char *data, std::size_t len, char16_t *dst, std::size_t dst_len) noexcept;
 
-// Appends src to out, copying valid UTF-8 sequences verbatim and replacing each
-// malformed sequence with U+FFFD (EF BF BD). Used to repair percent-decoded bytes
-// before they are stored in a GcString (which rejects invalid UTF-8). out is not
-// cleared; callers may pre-clear. A single U+FFFD is emitted per ill-formed byte
-// (skip-one policy), matching the common REPLACE decoder behaviour.
-// Allocation failure is fatal by house policy (no-exceptions; bad_alloc would terminate).
-void utf8_repair(std::string_view src, std::string &out) noexcept;
+// Two-phase repair of percent-decoded bytes before they are stored in a GcString (which
+// rejects invalid UTF-8): valid UTF-8 sequences are copied verbatim and each ill-formed
+// byte becomes one U+FFFD (EF BF BD), the skip-one policy of the common REPLACE decoder.
+// utf8_repaired_size gives the exact output size; utf8_repair_into writes that many bytes
+// to dst, which must not overlap src. Neither allocates.
+[[nodiscard]] std::size_t utf8_repaired_size(std::string_view src) noexcept;
+void utf8_repair_into(std::string_view src, char *dst) noexcept;
 
 } // namespace fiber::json
 

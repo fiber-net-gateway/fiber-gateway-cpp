@@ -418,8 +418,8 @@ TEST(HttpScriptFuncsTest, RequestViewsAndSendJson) {
 TEST(HttpScriptFuncsTest, SendJsonMultiNodeBody) {
     ServerFixture s;
     constexpr int kRepeats = 4200; // 4200 * 8 = 33600 bytes > two sink nodes
-    auto script = compile_http_script(
-            R"(resp.sendJson(200, strings.repeat("abcdefgh", )" + std::to_string(kRepeats) + "));");
+    auto script =
+            compile_http_script(R"(resp.sendJson(200, strings.repeat("abcdefgh", )" + std::to_string(kRepeats) + "));");
     ASSERT_NE(script, nullptr);
     s.start(make_script_handler(script));
 
@@ -812,6 +812,47 @@ TEST(RouteVarTest, DuplicateKeysKeepPerTypeFirstLastSemantics) {
     EXPECT_TRUE(contains(result.body, "\"h\":\"first\"")) << result.body;
     EXPECT_TRUE(contains(result.body, "\"q\":\"two\"")) << result.body;
     EXPECT_TRUE(contains(result.body, "\"c\":\"first\"")) << result.body;
+    s.stop();
+}
+
+TEST(RouteVarTest, QueryDecodeRepairsMalformedUtf8) {
+    ServerFixture s;
+    auto compiled = compile_route_script(
+            "let q = req.getQuery(); resp.sendJson(200, {ca: $query.a, cb: $query.b, oa: q.a, ob: q.b});", {});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(compiled, "/*"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/?a=x%FFy&b=%E4%BD%A0";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    // The constant channel and the query object decode through separate calls: both repair.
+    EXPECT_TRUE(contains(result.body, "\"ca\":\"x\xef\xbf\xbdy\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"oa\":\"x\xef\xbf\xbdy\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"cb\":\"\xe4\xbd\xa0\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"ob\":\"\xe4\xbd\xa0\"")) << result.body;
+    s.stop();
+}
+
+TEST(RouteVarTest, MalformedQueryEscapeKeepsEarlierPairs) {
+    ServerFixture s;
+    auto compiled = compile_route_script(
+            "let q = req.getQuery(); resp.sendJson(200, {ca: $query.a, cc: $query.c, oa: q.a, oc: q.c});", {});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(compiled, "/*"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/?a=1&b=%ZZ&c=3";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"ca\":\"1\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"oa\":\"1\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"cc\":null")) << result.body;
+    EXPECT_FALSE(contains(result.body, "\"oc\":\"3\"")) << result.body;
     s.stop();
 }
 

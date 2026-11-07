@@ -87,6 +87,11 @@ bool put_string(fiber::script::GcHeap &heap, fiber::script::ValueHandle obj_root
     return fiber::script::gc_object_set_key(&heap, obj_root, key.data(), key.size(), *item);
 }
 
+// form_decode_query's buffer source: exchange pool memory, released when the request ends.
+auto query_alloc(fiber::mem::BufPool &pool) noexcept {
+    return [&pool](std::size_t size) noexcept { return pool.alloc<char>(size); };
+}
+
 std::string_view copy_to_pool(fiber::mem::BufPool &pool, std::string_view value) noexcept {
     if (value.empty()) {
         // Non-null empty: the pool copy path requires a dereferenceable base.
@@ -186,10 +191,14 @@ fiber::script::JsValue ScriptExchangeCtx::query() noexcept {
         return fiber::script::JsValue::make_undefined(); // OOM; slot stays undefined, retries next call
     }
     std::string_view q = exchange_.uri().query;
-    auto query_io = fiber::util::form_decode_query(
-            q, [&](std::string_view k, std::string_view v) -> bool { return put_string(heap_, query_root_, k, v); });
-    (void) query_io; // malformed percent escapes leave the partial object (lenient)
-    return *query_root_;
+    auto query_io = fiber::util::form_decode_query(q, query_alloc(exchange_.pool()),
+                                                   [&](std::string_view k, std::string_view v) noexcept -> bool {
+                                                       return put_string(heap_, query_root_, k, v);
+                                                   });
+    if (!query_io && query_io.error() == fiber::common::IoErr::NoMem) {
+        *query_root_ = fiber::script::JsValue::make_undefined(); // OOM; drop the partial object, retry next call
+    }
+    return *query_root_; // malformed percent escapes leave the partial object (lenient)
 }
 
 fiber::script::JsValue ScriptExchangeCtx::headers() noexcept {
@@ -314,7 +323,8 @@ bool ScriptExchangeCtx::resolve_from_request(ConstType type, std::string_view na
             // the pairs decoded before the error (lenient, as before).
             std::string_view matched{};
             auto decoded = fiber::util::form_decode_query(
-                    exchange_.uri().query, [&](std::string_view key, std::string_view value) -> bool {
+                    exchange_.uri().query, query_alloc(exchange_.pool()),
+                    [&](std::string_view key, std::string_view value) noexcept -> bool {
                         if (!const_name_equal(name, key)) {
                             return true;
                         }

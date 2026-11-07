@@ -5,9 +5,11 @@
 #include <expected>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "../IoError.h"
+#include "../json/Utf.h"
 
 namespace fiber::util {
 
@@ -33,10 +35,15 @@ void form_encode(std::string_view in, std::string &out);
 // Decodes a single component. Returns IoErr::Invalid on a malformed percent escape.
 [[nodiscard]] fiber::common::IoResult<std::string> form_decode(std::string_view in);
 
-// Decodes a single component into out (cleared first). Returns false on a malformed
-// percent escape; true on success (out is valid UTF-8 after repair). Shared core used
-// by form_decode and form_decode_query.
+// Decodes a single component into out (replaced). Returns false on a malformed percent
+// escape, leaving out empty; true on success (out is valid UTF-8 after repair).
 [[nodiscard]] bool form_decode_into(std::string_view in, std::string &out);
+
+// First phase of a decode: percent-decodes in into dst, which must hold in.size() bytes
+// (decoding never grows the input), and stores the decoded size in len. Returns false on a
+// malformed percent escape. The result may still be malformed UTF-8; repairing it is the
+// second phase (utf8_repaired_size, utf8_repair_into).
+[[nodiscard]] bool form_percent_decode(std::string_view in, char *dst, std::size_t &len) noexcept;
 
 // Decodes a query string into (key, value) pairs, invoking sink(key, value) per pair.
 // sink returns true to continue, false to abort (yields IoErr::NoMem). A malformed
@@ -45,8 +52,15 @@ void form_encode(std::string_view in, std::string &out);
 // (segment, "") when non-empty and is skipped when empty, and '=' after the first is a
 // literal part of the value. key/value are string_views into scratch buffers valid only
 // for the duration of the sink call.
-template<typename Sink>
-[[nodiscard]] fiber::common::IoResult<void> form_decode_query(std::string_view in, Sink &&sink);
+//
+// alloc is called as alloc(size), with size > 0, and returns a writable buffer of that
+// many bytes that stays valid until this call returns, or nullptr to refuse (yields
+// IoErr::NoMem). One in.size() buffer serves every pair; a component that needs UTF-8
+// repair takes one more, of its exact repaired size. Nothing else allocates, so noexcept
+// holds exactly when calling alloc and sink does.
+template<typename Alloc, typename Sink>
+[[nodiscard]] fiber::common::IoResult<void> form_decode_query(std::string_view in, Alloc &&alloc, Sink &&sink) noexcept(
+        noexcept(alloc(std::size_t{})) && noexcept(sink(std::string_view{}, std::string_view{})));
 
 // Builds a query string by pulling pairs from source. source(key, value) fills the two
 // strings and returns true when a pair was produced, false when exhausted. Pairs are
@@ -56,10 +70,45 @@ void form_build_query(std::string &out, Source &&source);
 
 // ---- template implementations ----
 
-template<typename Sink>
-fiber::common::IoResult<void> form_decode_query(std::string_view in, Sink &&sink) {
-    std::string key_buf;
-    std::string val_buf;
+namespace detail {
+
+// Decodes one component into dst, which must hold in.size() bytes, moving it to an alloc
+// buffer only when UTF-8 repair is needed.
+template<typename Alloc>
+[[nodiscard]] fiber::common::IoResult<std::string_view>
+form_decode_component(std::string_view in, char *dst, Alloc &alloc) noexcept(noexcept(alloc(std::size_t{}))) {
+    std::size_t len = 0;
+    if (!form_percent_decode(in, dst, len)) {
+        return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    const std::string_view decoded(dst, len);
+    if (fiber::json::utf8_validate(dst, len)) {
+        return decoded;
+    }
+    const std::size_t repaired_size = fiber::json::utf8_repaired_size(decoded);
+    char *repaired = alloc(repaired_size);
+    if (repaired == nullptr) {
+        return std::unexpected(fiber::common::IoErr::NoMem);
+    }
+    fiber::json::utf8_repair_into(decoded, repaired);
+    return std::string_view(repaired, repaired_size);
+}
+
+} // namespace detail
+
+template<typename Alloc, typename Sink>
+fiber::common::IoResult<void> form_decode_query(std::string_view in, Alloc &&alloc, Sink &&sink) noexcept(
+        noexcept(alloc(std::size_t{})) && noexcept(sink(std::string_view{}, std::string_view{}))) {
+    static_assert(std::is_convertible_v<decltype(alloc(std::size_t{})), char *>,
+                  "alloc must be callable as char *(std::size_t)");
+    if (in.empty()) {
+        return {};
+    }
+    // A pair's key and value are disjoint parts of in, so one buffer holds both.
+    char *scratch = alloc(in.size());
+    if (scratch == nullptr) {
+        return std::unexpected(fiber::common::IoErr::NoMem);
+    }
     const std::size_t len = in.size();
     std::size_t pos = 0;
     while (pos <= len) {
@@ -67,25 +116,32 @@ fiber::common::IoResult<void> form_decode_query(std::string_view in, Sink &&sink
         while (seg_end < len && in[seg_end] != '&') {
             ++seg_end;
         }
-        std::string_view seg = in.substr(pos, seg_end - pos);
-        std::size_t eq = seg.find('=');
+        const std::string_view seg(in.data() + pos, seg_end - pos);
+        const std::size_t eq = seg.find('=');
         if (eq != std::string_view::npos) {
-            if (!form_decode_into(seg.substr(0, eq), key_buf)) {
-                return std::unexpected(fiber::common::IoErr::Invalid);
+            std::string_view raw_key = seg;
+            raw_key.remove_suffix(seg.size() - eq);
+            std::string_view raw_value = seg;
+            raw_value.remove_prefix(eq + 1);
+            auto key = detail::form_decode_component(raw_key, scratch, alloc);
+            if (!key) {
+                return std::unexpected(key.error());
             }
-            if (!form_decode_into(seg.substr(eq + 1), val_buf)) {
-                return std::unexpected(fiber::common::IoErr::Invalid);
+            auto value = detail::form_decode_component(raw_value, scratch + raw_key.size(), alloc);
+            if (!value) {
+                return std::unexpected(value.error());
             }
-            if (!sink(std::string_view(key_buf), std::string_view(val_buf))) {
+            if (!sink(*key, *value)) {
                 return std::unexpected(fiber::common::IoErr::NoMem);
             }
         } else {
             // No '=': the segment is a key with an empty value, but only when non-empty.
-            if (!form_decode_into(seg, key_buf)) {
-                return std::unexpected(fiber::common::IoErr::Invalid);
+            auto key = detail::form_decode_component(seg, scratch, alloc);
+            if (!key) {
+                return std::unexpected(key.error());
             }
-            if (!key_buf.empty()) {
-                if (!sink(std::string_view(key_buf), std::string_view{})) {
+            if (!key->empty()) {
+                if (!sink(*key, std::string_view{})) {
                     return std::unexpected(fiber::common::IoErr::NoMem);
                 }
             }

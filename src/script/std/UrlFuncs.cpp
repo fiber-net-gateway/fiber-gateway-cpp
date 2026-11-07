@@ -8,8 +8,11 @@
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/OomGuard.h>
 
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/BufPool.h>
 #include <fiber/common/util/UrlForm.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -190,50 +193,42 @@ AbiResult url_decode_component_fn(void * /*userdata*/, const Library::HostCallFr
 
 AbiResult url_parse_query_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
                              Library::Arguments args) noexcept {
-    // The decode-query template stages key/value in std::string buffers (throws on
-    // OOM); the guard maps it to a graceful abort.
-    return oom_guard([&] {
-        if (!args.args || args.argc < 1) {
-            return type_error();
-        }
-        std::string_view input;
-        if (!string_utf8_view(args.args[0], input)) {
-            return type_error();
-        }
-        GcHeap *heap = &frame.runtime;
-        if (heap == nullptr) {
-            return AbiResult::abort(ScriptAbortReason::InvalidState);
-        }
+    if (!args.args || args.argc < 1) {
+        return type_error();
+    }
+    std::string_view input;
+    if (!string_utf8_view(args.args[0], input)) {
+        return type_error();
+    }
+    GcHeap *heap = &frame.runtime;
+    if (heap == nullptr) {
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
+    }
 
-        // Root the result object for the whole parse: aggregate_pair allocates (make_string,
-        // make_array) on each pair, and the object must survive those collections.
-        GcHeap::LocalMark mark(*heap);
-        ValueHandle obj_root = heap->local_value();
-        if (!obj_root) {
-            return AbiResult::abort(ScriptAbortReason::InvalidState);
-        }
-        *obj_root = JsValue::make_object(*heap, 0);
-        if (js_value_type(*obj_root) != JsNodeType::Object) {
+    // Root the result object for the whole parse: aggregate_pair allocates (make_string,
+    // make_array) on each pair, and the object must survive those collections.
+    GcHeap::LocalMark mark(*heap);
+    ValueHandle obj_root = heap->local_value();
+    if (!obj_root) {
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
+    }
+    *obj_root = JsValue::make_object(*heap, 0);
+    if (js_value_type(*obj_root) != JsNodeType::Object) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+
+    fiber::mem::BufPool decode_pool;
+    auto io = fiber::util::form_decode_query(
+            input, [&](std::size_t size) noexcept { return decode_pool.alloc<char>(size); },
+            [&](std::string_view k, std::string_view v) noexcept { return aggregate_pair(heap, obj_root, k, v); });
+    if (!io) {
+        if (io.error() == fiber::common::IoErr::NoMem) {
             return AbiResult::abort(ScriptAbortReason::OutOfMemory);
         }
-
-        bool oom = false;
-        auto io = fiber::util::form_decode_query(input, [&](std::string_view k, std::string_view v) -> bool {
-            if (!aggregate_pair(heap, obj_root, k, v)) {
-                oom = true;
-                return false;
-            }
-            return true;
-        });
-        if (oom) {
-            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
-        }
-        if (!io) {
-            // Malformed percent escape (Java IllegalArgumentException, caught + rethrown).
-            return AbiResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
-        }
-        return AbiResult::success(*obj_root);
-    });
+        // Malformed percent escape (Java IllegalArgumentException, caught + rethrown).
+        return AbiResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
+    }
+    return AbiResult::success(*obj_root);
 }
 
 // ---- URL.buildQuery(value) ----
