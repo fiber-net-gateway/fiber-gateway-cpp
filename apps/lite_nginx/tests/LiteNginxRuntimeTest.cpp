@@ -14,10 +14,12 @@
 #include <memory>
 #include <mutex>
 #include <netinet/in.h>
+#include <optional>
 #include <poll.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -509,7 +511,9 @@ std::string websocket_accept(std::string_view key) {
     if (SHA1(reinterpret_cast<const std::uint8_t *>(source.data()), source.size(), digest.data()) == nullptr) {
         return {};
     }
-    return fiber::util::base64_encode(digest.data(), digest.size());
+    std::string accept(fiber::util::base64_encoded_size(digest.size()), '\0');
+    fiber::util::base64_encode_into(digest.data(), digest.size(), accept.data());
+    return accept;
 }
 
 class WebSocketUpstream {
@@ -1494,7 +1498,8 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
 }
 
 fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, std::uint16_t port,
-                                                 std::promise<Http2GzipOutcome> *promise) {
+                                                 std::promise<Http2GzipOutcome> *promise,
+                                                 fiber::http::HttpMethod method = fiber::http::HttpMethod::Get) {
     Http2GzipOutcome outcome;
     fiber::http::HttpClientTlsOptions tls;
     tls.server_name = "localhost";
@@ -1517,7 +1522,7 @@ fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, 
     fiber::http::ClientHttp2Exchange exchange(*connection, pool);
     auto send_result = co_await exchange.send_request_header(
             {
-                    .method = fiber::http::HttpMethod::Get,
+                    .method = method,
                     .scheme = "https",
                     .authority = "localhost",
                     .path = "/gzip",
@@ -1568,8 +1573,8 @@ struct Http3GzipOutcome {
 
 fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *endpoint,
                                                  const fiber::net::SocketAddress *server_addr,
-                                                 const std::string *cert_path,
-                                                 std::promise<Http3GzipOutcome> *promise) {
+                                                 const std::string *cert_path, std::promise<Http3GzipOutcome> *promise,
+                                                 fiber::http::HttpMethod method = fiber::http::HttpMethod::Get) {
     Http3GzipOutcome outcome;
     auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(*cert_path));
     if (!trust_store) {
@@ -1608,7 +1613,7 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
         fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         auto send_result = co_await exchange.send_request_header(
                 {
-                        .method = fiber::http::HttpMethod::Get,
+                        .method = method,
                         .scheme = "https",
                         .authority = "localhost",
                         .path = "/gzip",
@@ -4439,6 +4444,416 @@ http {
     ::unlink(script_path.c_str());
 }
 
+// One lite_nginx with a 1 KiB script heap limit. Plain listeners are driven over raw sockets so
+// the tests can pin exactly what reaches the wire; TLS ones serve the HTTP/2 client.
+class ScriptHeapLimitServer {
+public:
+    explicit ScriptHeapLimitServer(std::string_view script_source, bool tls = false) :
+        script_("script_heap_limit", script_source) {
+        const std::uint16_t port = reserve_loopback_port();
+        std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT TLS_FLAG;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    upstream backend { server 127.0.0.1:1; }
+    server {
+        server_name localhost;
+        TLS_FILES
+        location /* {
+            script_max_heap_size 1k;
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+        std::string tls_files;
+        if (tls) {
+            tls_files = "certificate " + cert_.path() + "; certificate_key " + key_.path() + ";";
+        }
+        config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+        config_text.replace(config_text.find("TLS_FLAG"), sizeof("TLS_FLAG") - 1, tls ? "ssl" : "");
+        config_text.replace(config_text.find("TLS_FILES"), sizeof("TLS_FILES") - 1, tls_files);
+        config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_.path());
+        auto config = ConfigLoader::load_from_string(config_text, "script_heap_limit.conf");
+        EXPECT_TRUE(config.has_value()) << (config ? "" : config.error().message);
+        if (config) {
+            auto runtime = RuntimeBuilder::build(*config);
+            EXPECT_TRUE(runtime.has_value()) << (runtime ? "" : runtime.error().message);
+            if (runtime) {
+                harness_ = std::make_unique<RuntimeHarness>(*runtime);
+            }
+        }
+    }
+
+    [[nodiscard]] std::uint16_t port() const { return harness_->port(); }
+
+private:
+    TestPemFile cert_{"script-heap-cert", kSelfSignedCertPem};
+    TestPemFile key_{"script-heap-key", kSelfSignedKeyPem};
+    TestScriptFile script_;
+    std::unique_ptr<RuntimeHarness> harness_;
+};
+
+struct Http2PostOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    int status_code = 0;
+    std::string body;
+};
+
+// Posts body over HTTP/2, announcing declared_length as its Content-Length when set, whether
+// or not that is the truth.
+fiber::async::DetachedTask run_http2_post(fiber::event::EventLoop *loop, std::uint16_t port,
+                                          std::optional<std::size_t> declared_length, const std::string *body,
+                                          std::promise<Http2PostOutcome> *promise) {
+    Http2PostOutcome outcome;
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
+
+    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop);
+    auto connect_result = co_await connection->connect(
+            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s, tls);
+    if (!connect_result) {
+        outcome.error = connect_result.error();
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+    auto run_state = std::make_shared<Http2RunState>();
+    fiber::async::spawn(*loop, [connection, run_state]() { return run_http2_connection(connection, run_state); });
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    if (declared_length) {
+        headers.set("content-length", std::to_string(*declared_length));
+    }
+    fiber::http::ClientHttp2Exchange exchange(*connection, pool);
+    auto send_result = co_await exchange.send_request_header(
+            {
+                    .method = fiber::http::HttpMethod::Post,
+                    .scheme = "https",
+                    .authority = "localhost",
+                    .path = "/x",
+                    .headers = &headers,
+            },
+            false, 2s);
+    if (!send_result) {
+        outcome.error = send_result.error();
+    } else {
+        auto write_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body->data()),
+                                                        body->size(), true, 2s);
+        if (!write_result) {
+            outcome.error = write_result.error();
+        }
+    }
+    if (outcome.error == fiber::common::IoErr::None) {
+        auto header_result = co_await exchange.read_header(2s);
+        if (!header_result) {
+            outcome.error = header_result.error();
+        } else {
+            outcome.status_code = (*header_result)->status_code;
+            for (bool complete = false; !complete;) {
+                auto body_result = co_await exchange.read_body(std::size_t{64} * 1024, 2s);
+                if (!body_result) {
+                    outcome.error = body_result.error();
+                    break;
+                }
+                complete = body_result->complete();
+                outcome.body.append(chain_to_string(std::move(*body_result)));
+            }
+        }
+    }
+
+    connection->shutdown();
+    for (int i = 0; i < 500 && !run_state->done.load(std::memory_order_acquire); ++i) {
+        co_await fiber::async::sleep(1ms);
+    }
+    promise->set_value(std::move(outcome));
+}
+
+Http2PostOutcome http2_post(std::uint16_t port, std::optional<std::size_t> declared_length, const std::string &body) {
+    fiber::event::EventLoopGroup client_group(1);
+    client_group.start();
+    std::promise<Http2PostOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(client_group.at(0),
+                        [&]() { return run_http2_post(&client_group.at(0), port, declared_length, &body, &promise); });
+    Http2PostOutcome outcome;
+    const std::future_status status = future.wait_for(5s);
+    if (status == std::future_status::ready) {
+        outcome = future.get();
+    } else {
+        outcome.error = fiber::common::IoErr::TimedOut;
+    }
+    client_group.stop();
+    client_group.join();
+    return outcome;
+}
+
+std::string post_with_length(std::string_view body) {
+    std::string request = "POST /x HTTP/1.1\r\nHost: localhost\r\nContent-Length: ";
+    request.append(std::to_string(body.size()));
+    request.append("\r\n\r\n");
+    request.append(body);
+    return request;
+}
+
+std::string chunked_post(std::size_t chunks, std::size_t chunk_bytes, char fill) {
+    std::string request = "POST /x HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
+    char size[32];
+    char *const end = std::to_chars(size, size + sizeof(size), chunk_bytes, 16).ptr;
+    for (std::size_t i = 0; i < chunks; ++i) {
+        request.append(size, end);
+        request.append("\r\n");
+        request.append(chunk_bytes, fill);
+        request.append("\r\n");
+    }
+    request.append("0\r\n\r\n");
+    return request;
+}
+
+constexpr std::string_view kEchoBody = "resp.send(200, req.readBinary());";
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitRefusesKnownLengthBodyAndKeepsTheConnection) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, post_with_length(std::string(4096, 'a'))));
+    const std::string refused = recv_http_response(client);
+    EXPECT_NE(refused.find("HTTP/1.1 500"), std::string::npos) << refused;
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+
+    // The discarded body left the stream at the next request's boundary.
+    ASSERT_TRUE(send_all(client, post_with_length("abc")));
+    const std::string next = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(next.find("HTTP/1.1 200"), std::string::npos) << next;
+    EXPECT_TRUE(next.ends_with("\r\n\r\nabc")) << next;
+}
+
+// The script only continues once the refused body is gone, so nothing may answer early.
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitReadsARefusedBodyToTheEnd) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    const std::string request = post_with_length(std::string(4096, 'a'));
+    const std::string_view all(request);
+    const std::size_t held_back = 1024;
+    ASSERT_TRUE(send_all(client, all.substr(0, all.size() - held_back)));
+    pollfd readable{.fd = client, .events = POLLIN, .revents = 0};
+    EXPECT_EQ(::poll(&readable, 1, 200), 0);
+
+    ASSERT_TRUE(send_all(client, all.substr(all.size() - held_back)));
+    const std::string refused = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+}
+
+// Part of this body was already read when it stopped fitting, so the rest must go too.
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitDiscardsThePartOfAChunkedBodyNotYetRead) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    const std::string request = chunked_post(8, 512, 'a');
+    const std::string_view all(request);
+    // Cut inside the last chunk: at a chunk boundary the read itself would wait for more, and
+    // this test would pass without any discard.
+    const std::size_t held_back = 100 + sizeof("\r\n0\r\n\r\n") - 1;
+    ASSERT_TRUE(send_all(client, all.substr(0, all.size() - held_back)));
+    pollfd readable{.fd = client, .events = POLLIN, .revents = 0};
+    EXPECT_EQ(::poll(&readable, 1, 200), 0);
+
+    ASSERT_TRUE(send_all(client, all.substr(all.size() - held_back)));
+    const std::string refused = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitRefusesChunkedBodyPartWayThrough) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, chunked_post(8, 512, 'a')));
+    const std::string refused = recv_http_response(client);
+    EXPECT_NE(refused.find("HTTP/1.1 500"), std::string::npos) << refused;
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+
+    ASSERT_TRUE(send_all(client, post_with_length("abc")));
+    const std::string next = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(next.find("HTTP/1.1 200"), std::string::npos) << next;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitAcceptsChunkedBodyThatFits) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, chunked_post(100, 5, 'c')));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\n" + std::string(500, 'c'))) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitDoesNotInviteARefusedUpload) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, "POST /x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4096\r\n"
+                                 "Expect: 100-continue\r\n\r\n"));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_EQ(response.find("100 Continue"), std::string::npos) << response;
+    EXPECT_NE(response.find("HTTP/1.1 500"), std::string::npos) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitStillContinuesABodyThatFits) {
+    ScriptHeapLimitServer server(kEchoBody);
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, "POST /x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n"
+                                 "Expect: 100-continue\r\n\r\n"));
+    std::array<char, 256> interim{};
+    const ssize_t got = ::recv(client, interim.data(), interim.size(), 0);
+    ASSERT_GT(got, 0);
+    EXPECT_NE(std::string_view(interim.data(), static_cast<std::size_t>(got)).find("100 Continue"), std::string::npos);
+
+    ASSERT_TRUE(send_all(client, "abc"));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\nabc")) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptReadsABodyOverHttp2WithAndWithoutALength) {
+    ScriptHeapLimitServer server(kEchoBody, /*tls=*/true);
+    const std::string body(500, 'h');
+
+    const Http2PostOutcome declared = http2_post(server.port(), body.size(), body);
+    EXPECT_EQ(declared.error, fiber::common::IoErr::None);
+    EXPECT_EQ(declared.status_code, 200);
+    EXPECT_EQ(declared.body, body);
+
+    const Http2PostOutcome undeclared = http2_post(server.port(), std::nullopt, body);
+    EXPECT_EQ(undeclared.error, fiber::common::IoErr::None);
+    EXPECT_EQ(undeclared.status_code, 200);
+    EXPECT_EQ(undeclared.body, body);
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitRefusesHttp2BodiesWithAndWithoutALength) {
+    ScriptHeapLimitServer server(kEchoBody, /*tls=*/true);
+    const std::string body(4096, 'h');
+
+    const Http2PostOutcome declared = http2_post(server.port(), body.size(), body);
+    EXPECT_EQ(declared.status_code, 500);
+    EXPECT_NE(declared.body.find("OutOfMemory"), std::string::npos) << declared.body;
+
+    const Http2PostOutcome undeclared = http2_post(server.port(), std::nullopt, body);
+    EXPECT_EQ(undeclared.status_code, 500);
+    EXPECT_NE(undeclared.body.find("OutOfMemory"), std::string::npos) << undeclared.body;
+}
+
+// HTTP/2 does not bind DATA to Content-Length yet, so a dishonest length reaches readBinary.
+// However that gets rejected, the body must not come back as a success.
+TEST(LiteNginxRuntimeTest, Http2BodyDisagreeingWithContentLengthIsNeverEchoed) {
+    ScriptHeapLimitServer server(kEchoBody, /*tls=*/true);
+    const std::string body(800, 'h');
+
+    const Http2PostOutcome overrun = http2_post(server.port(), 3, body);
+    EXPECT_NE(overrun.status_code, 200) << overrun.body;
+
+    const Http2PostOutcome short_of_it = http2_post(server.port(), 900, body);
+    EXPECT_NE(short_of_it.status_code, 200) << short_of_it.body;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptHeapLimitBoundsWhatJsonExpandsInto) {
+    ScriptHeapLimitServer server("req.readJson(); resp.send(200, \"parsed\");");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    std::string body = "[";
+    for (int i = 0; i < 300; ++i) {
+        body += "[],";
+    }
+    body.back() = ']';
+    ASSERT_LT(body.size(), 1024U); // the text alone would fit the limit
+    ASSERT_TRUE(send_all(client, post_with_length(body)));
+    const std::string refused = recv_http_response(client);
+    EXPECT_NE(refused.find("HTTP/1.1 500"), std::string::npos) << refused;
+    EXPECT_NE(refused.find("OutOfMemory"), std::string::npos) << refused;
+
+    ASSERT_TRUE(send_all(client, post_with_length("[1,2]")));
+    const std::string next = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(next.find("HTTP/1.1 200"), std::string::npos) << next;
+}
+
+// The first bytes already rule the body out, but the script resumes with it consumed.
+TEST(LiteNginxRuntimeTest, ReadJsonReadsAnInvalidBodyToTheEnd) {
+    ScriptHeapLimitServer server("req.readJson();");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    const std::string request = post_with_length("{bad" + std::string(4096, 'x'));
+    const std::string_view all(request);
+    const std::size_t held_back = 1024;
+    ASSERT_TRUE(send_all(client, all.substr(0, all.size() - held_back)));
+    pollfd readable{.fd = client, .events = POLLIN, .revents = 0};
+    EXPECT_EQ(::poll(&readable, 1, 200), 0);
+
+    ASSERT_TRUE(send_all(client, all.substr(all.size() - held_back)));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("invalid json body"), std::string::npos) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ScriptCanAnswerAHeapLimitRefusalItself) {
+    ScriptHeapLimitServer server("try { req.readBinary(); } catch (e) { resp.send(413, \"too big\"); }");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, post_with_length(std::string(4096, 'a'))));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 413"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("too big")) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ProxyPassRefusesABodyAlreadyConsumed) {
+    ScriptHeapLimitServer server("directive svc = http \"@backend\";"
+                                 "req.readBinary();"
+                                 "try { svc.proxyPass(); resp.send(200, \"forwarded\"); }"
+                                 "catch (e) { resp.sendJson(200, {caught: e}); }");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, post_with_length("abc")));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("already consumed"), std::string::npos) << response;
+}
+
+// A proxyPass that never reached the upstream has not touched the body.
+TEST(LiteNginxRuntimeTest, FailedProxyConnectLeavesTheBodyReadable) {
+    ScriptHeapLimitServer server("directive svc = http \"@backend\";"
+                                 "try { svc.proxyPass(); } catch (e) { }"
+                                 "resp.send(200, req.readBinary());");
+    const int client = connect_client(server.port());
+    ASSERT_GE(client, 0);
+
+    ASSERT_TRUE(send_all(client, post_with_length("abc")));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\nabc")) << response;
+}
+
 TEST(LiteNginxRuntimeTest, ScriptBodyConsumersMapIncrementalLimitFailureTo413) {
     TestScriptFile script("body_limit", "req.discardBody(); return req.readBinary();");
     ASSERT_TRUE(script.ok());
@@ -4535,6 +4950,592 @@ http {
     ::unlink(script_path.c_str());
     return response;
 }
+
+// resp.sendJson sends a body in pieces once it passes 64 KiB. kRows of these make a body well past that.
+constexpr std::size_t kLargeJsonRows = 300;
+
+std::string json_row_source() { return "let row = {id: 7, name: strings.repeat(\"n\", 1000), ok: true};\n"; }
+
+std::string json_rows_source(std::size_t rows) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < rows; ++i) {
+        out.append(i == 0 ? "row" : ",row");
+    }
+    out.push_back(']');
+    return out;
+}
+
+std::string expected_json_rows(std::size_t rows) {
+    const std::string row = R"({"id":7,"name":")" + std::string(1000, 'n') + R"(","ok":true})";
+    std::string out = R"({"rows":[)";
+    for (std::size_t i = 0; i < rows; ++i) {
+        if (i != 0) {
+            out.push_back(',');
+        }
+        out.append(row);
+    }
+    out.append(R"(],"tail":"end"})");
+    return out;
+}
+
+std::string send_json_rows_source(std::size_t rows) {
+    return json_row_source() + "resp.sendJson(200, {rows: " + json_rows_source(rows) + ", tail: \"end\"});";
+}
+
+// A body that passes the flush size before the encoder reaches a value it cannot write.
+std::string send_json_failing_late_source() {
+    return json_row_source() + "resp.sendJson(200, {rows: " + json_rows_source(kLargeJsonRows) +
+           ", bad: \"\xF0\x9F\x98\x80\"[0]});";
+}
+
+std::string body_after_headers(std::string_view response) {
+    const std::size_t header_end = response.find("\r\n\r\n");
+    return header_end == std::string_view::npos ? std::string() : std::string(response.substr(header_end + 4));
+}
+
+// Serves source at every path, sends request on one connection and reads until the server closes it.
+std::string script_response_until_close(std::string_view source, std::string_view request,
+                                        std::string_view http_directives = {},
+                                        std::string_view locations = "location /* { script_file SCRIPT_PATH; }") {
+    TestScriptFile script("large_json", source);
+    if (!script.ok()) {
+        ADD_FAILURE() << "cannot write the script";
+        return {};
+    }
+    const std::uint16_t port = reserve_loopback_port();
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    HTTP_DIRECTIVES
+    server {
+        server_name localhost;
+        LOCATIONS
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("HTTP_DIRECTIVES"), sizeof("HTTP_DIRECTIVES") - 1, http_directives);
+    config_text.replace(config_text.find("LOCATIONS"), sizeof("LOCATIONS") - 1, locations);
+    if (const std::size_t pos = config_text.find("SCRIPT_PATH"); pos != std::string::npos) {
+        config_text.replace(pos, sizeof("SCRIPT_PATH") - 1, script.path());
+    }
+
+    auto config = ConfigLoader::load_from_string(config_text, "large_json.conf");
+    if (!config.has_value()) {
+        ADD_FAILURE() << config.error().message;
+        return {};
+    }
+    auto runtime = RuntimeBuilder::build(*config);
+    if (!runtime.has_value()) {
+        ADD_FAILURE() << runtime.error().message;
+        return {};
+    }
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    if (client < 0 || !send_all(client, request)) {
+        ADD_FAILURE() << "cannot send the request";
+        return {};
+    }
+    std::string response = recv_until_close(client);
+    ::close(client);
+    return response;
+}
+
+constexpr std::string_view kCloseRequest = "GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+TEST(LiteNginxRuntimeTest, LargeSendJsonGoesOutInChunks) {
+    const std::string response = script_response_until_close(send_json_rows_source(kLargeJsonRows), kCloseRequest);
+    const std::string expected = expected_json_rows(kLargeJsonRows);
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_NE(response.find("Content-Type: application/json\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(decode_chunked_body(response), expected);
+
+    // The first chunk is one flush, not the whole body.
+    const std::string body = body_after_headers(response);
+    std::size_t first_chunk = 0;
+    const auto parsed = std::from_chars(body.data(), body.data() + body.size(), first_chunk, 16);
+    ASSERT_EQ(parsed.ec, std::errc());
+    EXPECT_GE(first_chunk, std::size_t{64} * 1024);
+    EXPECT_LT(first_chunk, std::size_t{70} * 1024);
+}
+
+TEST(LiteNginxRuntimeTest, SmallSendJsonKeepsContentLength) {
+    const std::string response = script_response_until_close(send_json_rows_source(10), kCloseRequest);
+    const std::string expected = expected_json_rows(10);
+
+    EXPECT_NE(response.find("Content-Length: " + std::to_string(expected.size()) + "\r\n"), std::string::npos)
+            << response.substr(0, 300);
+    EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(body_after_headers(response), expected);
+}
+
+TEST(LiteNginxRuntimeTest, LargeScriptReturnValueGoesOutInChunks) {
+    const std::string source =
+            json_row_source() + "return {rows: " + json_rows_source(kLargeJsonRows) + ", tail: \"end\"};";
+    const std::string response = script_response_until_close(source, kCloseRequest);
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(decode_chunked_body(response), expected_json_rows(kLargeJsonRows));
+}
+
+TEST(LiteNginxRuntimeTest, LargeSendJsonOfOneStringGoesOutInChunks) {
+    const std::string response =
+            script_response_until_close(R"(resp.sendJson(200, strings.repeat("\n", 1000000));)", kCloseRequest);
+    std::string expected = "\"";
+    for (int i = 0; i < 1000000; ++i) {
+        expected.append("\\n");
+    }
+    expected.push_back('"');
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(decode_chunked_body(response), expected);
+}
+
+TEST(LiteNginxRuntimeTest, LargeSendJsonToHttp10EndsWithTheConnection) {
+    const std::string response = script_response_until_close(send_json_rows_source(kLargeJsonRows),
+                                                             "GET /x HTTP/1.0\r\nHost: localhost\r\n\r\n");
+    EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(body_after_headers(response), expected_json_rows(kLargeJsonRows));
+}
+
+TEST(LiteNginxRuntimeTest, LargeSendJsonIsCompressed) {
+    const std::string response = script_response_until_close(send_json_rows_source(kLargeJsonRows),
+                                                             "GET /x HTTP/1.1\r\n"
+                                                             "Host: localhost\r\n"
+                                                             "Accept-Encoding: gzip\r\n"
+                                                             "Connection: close\r\n\r\n",
+                                                             "gzip on;\n    gzip_types application/json;");
+    EXPECT_NE(response.find("Content-Encoding: gzip\r\n"), std::string::npos) << response.substr(0, 300);
+    EXPECT_EQ(gunzip_body(decode_chunked_body(response)), expected_json_rows(kLargeJsonRows));
+}
+
+TEST(LiteNginxRuntimeTest, ConnectionServesAnotherRequestAfterLargeSendJson) {
+    TestScriptFile script("large_json_keepalive", send_json_rows_source(kLargeJsonRows));
+    ASSERT_TRUE(script.ok());
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    auto config = ConfigLoader::load_from_string(config_text, "large_json_keepalive.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const std::string expected = expected_json_rows(kLargeJsonRows);
+    for (int i = 0; i < 2; ++i) {
+        ASSERT_TRUE(send_all(client, "GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+        const std::string response = recv_until_contains(client, "\r\n0\r\n\r\n");
+        EXPECT_EQ(decode_chunked_body(response), expected) << i;
+    }
+    ::close(client);
+}
+
+TEST(LiteNginxRuntimeTest, SendJsonEncodesNonFiniteNumbersAsStrings) {
+    const std::string response = script_response_until_close(
+            "let inf = 1e308 * 10; resp.sendJson(200, {nan: inf - inf, inf: inf, neg: 0 - inf});", kCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response), "{\"nan\":\"NaN\",\"inf\":\"Infinity\",\"neg\":\"-Infinity\"}");
+}
+
+TEST(LiteNginxRuntimeTest, SendJsonFailureBeforeTheFlushIsStillCatchable) {
+    const std::string response =
+            script_response_until_close("try { resp.sendJson(200, {bad: \"\xF0\x9F\x98\x80\"[0]}); } "
+                                        "catch (e) { resp.sendJson(503, {handled: true}); }",
+                                        kCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 503 "), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response), "{\"handled\":true}");
+}
+
+TEST(LiteNginxRuntimeTest, SendJsonFailureAfterTheFlushCutsTheResponse) {
+    // The catch cannot change a response that is on its way, and must not disturb it either.
+    const std::string uncaught = script_response_until_close(send_json_failing_late_source(), kCloseRequest);
+    const std::string caught = script_response_until_close(
+            "try {\n" + send_json_failing_late_source() + "\n} catch (e) { resp.sendJson(503, {handled: true}); }",
+            kCloseRequest);
+
+    for (const std::string *response: {&uncaught, &caught}) {
+        EXPECT_NE(response->find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response->substr(0, 300);
+        EXPECT_NE(response->find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response->substr(0, 300);
+        EXPECT_GT(response->size(), std::size_t{64} * 1024);
+        EXPECT_EQ(response->find("\r\n0\r\n\r\n"), std::string::npos);
+        EXPECT_TRUE(decode_chunked_body(*response).empty());
+        EXPECT_EQ(response->find("handled"), std::string::npos);
+    }
+}
+
+TEST(LiteNginxRuntimeTest, SendJsonFailureAfterTheFlushDoesNotWaitForTheScript) {
+    // The script goes on after the failure, waiting for a body that never arrives. The client must
+    // not wait with it: nothing else ends the response until the script does.
+    TestScriptFile script("large_json_abort",
+                          "try {\n" + send_json_failing_late_source() + "\n} catch (e) { req.discardBody(); }");
+    ASSERT_TRUE(script.ok());
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    auto config = ConfigLoader::load_from_string(config_text, "large_json_abort.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const timeval timeout{.tv_sec = 5, .tv_usec = 0};
+    ASSERT_EQ(::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+    ASSERT_TRUE(send_all(client, "POST /x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc"));
+    errno = 0;
+    const std::string response = recv_until_close(client);
+    const bool timed_out = errno == EAGAIN || errno == EWOULDBLOCK;
+    ::close(client);
+    EXPECT_FALSE(timed_out);
+    EXPECT_GT(response.size(), std::size_t{64} * 1024);
+}
+
+TEST(LiteNginxRuntimeTest, CaughtBuiltInErrorCanBeSentAsJson) {
+    const std::string response = script_response_until_close(
+            "try { let x = 1 / 0; } catch (e) { resp.sendJson(200, {caught: e}); }", kCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response),
+              R"({"caught":{"position":-1,"name":"RangeError","message":null,"meta":null}})");
+}
+
+TEST(LiteNginxRuntimeTest, ReturnValueThatCannotBeEncodedServes500) {
+    const std::string response = script_response_until_close("return {bad: \"\xF0\x9F\x98\x80\"[0]};", kCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 500 "), std::string::npos) << response;
+    EXPECT_NE(response.find("Content-Type: application/json\r\n"), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response), R"({"error":"TypeError"})");
+}
+
+constexpr std::string_view kHeadCloseRequest = "HEAD /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+TEST(LiteNginxRuntimeTest, HeadRequestToScriptGetsHeadersWithNoBody) {
+    const std::pair<std::string, std::string_view> cases[] = {
+            {"resp.sendJson(200, {a: 1});", "Content-Type: application/json\r\n"},
+            {send_json_rows_source(kLargeJsonRows), "Content-Type: application/json\r\n"},
+            {"return {a: 1};", "Content-Type: application/json\r\n"},
+            {"resp.send(200, \"text\");", "Content-Type: text/plain;charset=utf-8\r\n"},
+    };
+    for (const auto &[source, content_type]: cases) {
+        const std::string response = script_response_until_close(source, kHeadCloseRequest);
+        EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response.substr(0, 300);
+        EXPECT_NE(response.find(content_type), std::string::npos) << response.substr(0, 300);
+        EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response.substr(0, 300);
+        EXPECT_TRUE(body_after_headers(response).empty()) << response.substr(0, 300);
+    }
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestGetsTheHeadersOfGet) {
+    const std::string source = send_json_rows_source(10);
+    const std::string get = script_response_until_close(source, kCloseRequest);
+    const std::string head = script_response_until_close(source, kHeadCloseRequest);
+    EXPECT_NE(http_header_value(get, "Content-Length"), "");
+    EXPECT_EQ(http_header_value(head, "Content-Length"), http_header_value(get, "Content-Length"));
+    EXPECT_EQ(http_header_value(head, "Content-Type"), http_header_value(get, "Content-Type"));
+    EXPECT_TRUE(body_after_headers(head).empty()) << head.substr(0, 300);
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestFailsLikeGetWhileTheBodyIsShort) {
+    const std::string source = "resp.sendJson(200, {bad: \"\xF0\x9F\x98\x80\"[0]});";
+    const std::string get = script_response_until_close(source, kCloseRequest);
+    const std::string head = script_response_until_close(source, kHeadCloseRequest);
+    EXPECT_NE(get.find("HTTP/1.1 500 "), std::string::npos) << get;
+    EXPECT_NE(head.find("HTTP/1.1 500 "), std::string::npos) << head;
+    EXPECT_TRUE(body_after_headers(head).empty()) << head;
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestStopsEncodingALongBody) {
+    // GET would be aborted by the value at the end. HEAD never reaches it, so the connection stays up.
+    const std::string response =
+            script_response_until_close(send_json_failing_late_source(),
+                                        "HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n" + std::string(kHeadCloseRequest));
+    const std::size_t first = response.find("HTTP/1.1 200 OK\r\n");
+    ASSERT_NE(first, std::string::npos) << response;
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n", first + 1), std::string::npos) << response;
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\n")) << response;
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestToErrorPageGetsHeadersWithNoBody) {
+    const std::string closed_upstream =
+            "location /* { proxy_pass http://127.0.0.1:" + std::to_string(reserve_loopback_port()) + "; }";
+    const std::pair<std::string_view, std::string_view> cases[] = {
+            {"location /known { script_file SCRIPT_PATH; }", "HTTP/1.1 404 "},
+            {closed_upstream, "HTTP/1.1 502 "},
+    };
+    for (const auto &[locations, status_line]: cases) {
+        const std::string get = script_response_until_close("return 1;", kCloseRequest, {}, locations);
+        const std::string head = script_response_until_close("return 1;", kHeadCloseRequest, {}, locations);
+        EXPECT_NE(get.find(status_line), std::string::npos) << get;
+        EXPECT_NE(head.find(status_line), std::string::npos) << head;
+        EXPECT_FALSE(body_after_headers(get).empty()) << get;
+        EXPECT_TRUE(body_after_headers(head).empty()) << head;
+        EXPECT_EQ(http_header_value(head, "Content-Length"), http_header_value(get, "Content-Length"));
+    }
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestToFailingScriptKeepsTheStatus) {
+    const std::string response = script_response_until_close("let x = 1 / 0;", kHeadCloseRequest);
+    EXPECT_NE(response.find("HTTP/1.1 500 "), std::string::npos) << response;
+    EXPECT_TRUE(body_after_headers(response).empty()) << response;
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestToGzipLocationIsNotCompressed) {
+    const std::string response =
+            script_response_until_close("resp.sendJson(200, {a: 1});",
+                                        "HEAD /x HTTP/1.1\r\n"
+                                        "Host: localhost\r\n"
+                                        "Accept-Encoding: gzip\r\n"
+                                        "Connection: close\r\n\r\n",
+                                        "gzip on;\n    gzip_types application/json;\n    gzip_min_length 1;");
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Content-Encoding:"), std::string::npos) << response;
+    EXPECT_TRUE(body_after_headers(response).empty()) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ConnectionServesAnotherRequestAfterHead) {
+    TestScriptFile script("head_keepalive", "resp.sendJson(200, {a: 1});");
+    ASSERT_TRUE(script.ok());
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    auto config = ConfigLoader::load_from_string(config_text, "head_keepalive.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    ASSERT_TRUE(send_all(client, "HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    const std::string head = recv_until_contains(client, "\r\n\r\n");
+    EXPECT_NE(head.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << head;
+    ASSERT_TRUE(send_all(client, kCloseRequest));
+    const std::string response = recv_until_close(client);
+    ::close(client);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(body_after_headers(response), R"({"a":1})");
+}
+
+struct LargeJsonOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    int status_code = 0;
+    std::string content_length;
+    std::string body;
+    bool body_complete = false;
+};
+
+enum class LargeJsonProtocol { Http2, Http3 };
+
+// Runs one request to a TLS listener serving source, over HTTP/2 or HTTP/3.
+LargeJsonOutcome fetch_large_json(LargeJsonProtocol protocol, const std::string &source,
+                                  fiber::http::HttpMethod method = fiber::http::HttpMethod::Get,
+                                  std::string_view locations = "location /* { script_file SCRIPT_PATH; }") {
+    TestPemFile cert("large-json-cert", kSelfSignedCertPem);
+    TestPemFile key("large-json-key", kSelfSignedKeyPem);
+    TestScriptFile script("large_json_tls", source);
+    if (!cert.ok() || !key.ok() || !script.ok()) {
+        ADD_FAILURE() << "cannot write the test files";
+        return {};
+    }
+    const bool http3 = protocol == LargeJsonProtocol::Http3;
+    const std::uint16_t port = reserve_loopback_port();
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT ssl HTTP3;
+    server {
+        server_name localhost;
+        certificate CERT_FILE;
+        certificate_key KEY_FILE;
+        LOCATIONS
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("HTTP3"), sizeof("HTTP3") - 1, http3 ? "http3" : "");
+    config_text.replace(config_text.find("CERT_FILE"), sizeof("CERT_FILE") - 1, cert.path());
+    config_text.replace(config_text.find("KEY_FILE"), sizeof("KEY_FILE") - 1, key.path());
+    config_text.replace(config_text.find("LOCATIONS"), sizeof("LOCATIONS") - 1, locations);
+    if (const std::size_t pos = config_text.find("SCRIPT_PATH"); pos != std::string::npos) {
+        config_text.replace(pos, sizeof("SCRIPT_PATH") - 1, script.path());
+    }
+    auto config = ConfigLoader::load_from_string(config_text, "large_json_tls.conf");
+    if (!config.has_value()) {
+        ADD_FAILURE() << config.error().message;
+        return {};
+    }
+    auto runtime = RuntimeBuilder::build(*config);
+    if (!runtime.has_value()) {
+        ADD_FAILURE() << runtime.error().message;
+        return {};
+    }
+    RuntimeHarness harness(*runtime);
+
+    LargeJsonOutcome outcome;
+    fiber::event::EventLoopGroup group(1);
+    if (http3) {
+        fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
+        fiber::quic::QuicUdpEndpoint::EndpointOptions options;
+        options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+        if (!endpoint.init(options)) {
+            ADD_FAILURE() << "cannot bind the client endpoint";
+            return {};
+        }
+        group.start();
+        const fiber::net::SocketAddress server_addr{fiber::net::IpAddress::loopback_v4(), harness.port()};
+        const std::string &cert_path = cert.path();
+        std::promise<Http3GzipOutcome> promise;
+        auto future = promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_http3_gzip_client(&endpoint, &server_addr, &cert_path, &promise, method);
+        });
+        if (future.wait_for(8s) == std::future_status::ready) {
+            Http3GzipOutcome result = future.get();
+            outcome = {.error = result.error,
+                       .status_code = result.status_code,
+                       .content_length = std::move(result.content_length),
+                       .body = std::move(result.body),
+                       .body_complete = result.body_complete};
+        } else {
+            ADD_FAILURE() << "HTTP/3 client timed out";
+        }
+        group.stop();
+        group.join();
+        return outcome;
+    }
+    group.start();
+    std::promise<Http2GzipOutcome> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_http2_gzip_client(&group.at(0), harness.port(), &promise, method); });
+    if (future.wait_for(8s) == std::future_status::ready) {
+        Http2GzipOutcome result = future.get();
+        outcome = {.error = result.error,
+                   .status_code = result.status_code,
+                   .content_length = std::move(result.content_length),
+                   .body = std::move(result.body),
+                   .body_complete = result.body_complete};
+    } else {
+        ADD_FAILURE() << "HTTP/2 client timed out";
+    }
+    group.stop();
+    group.join();
+    return outcome;
+}
+
+class LiteNginxLargeJsonTest : public testing::TestWithParam<LargeJsonProtocol> {};
+
+TEST_P(LiteNginxLargeJsonTest, LargeSendJsonArrivesWhole) {
+    const LargeJsonOutcome outcome = fetch_large_json(GetParam(), send_json_rows_source(kLargeJsonRows));
+    EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.status_code, 200);
+    EXPECT_TRUE(outcome.content_length.empty()) << outcome.content_length;
+    EXPECT_TRUE(outcome.body_complete);
+    EXPECT_EQ(outcome.body, expected_json_rows(kLargeJsonRows));
+}
+
+TEST_P(LiteNginxLargeJsonTest, SendJsonFailureAfterTheFlushFailsTheStream) {
+    const LargeJsonOutcome outcome = fetch_large_json(GetParam(), send_json_failing_late_source());
+    EXPECT_EQ(outcome.status_code, 200);
+    EXPECT_NE(outcome.error, fiber::common::IoErr::None);
+    EXPECT_FALSE(outcome.body_complete);
+}
+
+TEST_P(LiteNginxLargeJsonTest, HeadRequestGetsHeadersWithNoBody) {
+    for (const std::string &source: {std::string("resp.sendJson(200, {a: 1});"), std::string("return {a: 1};"),
+                                     std::string("resp.send(200, \"text\");"), send_json_rows_source(kLargeJsonRows)}) {
+        const LargeJsonOutcome outcome = fetch_large_json(GetParam(), source, fiber::http::HttpMethod::Head);
+        EXPECT_EQ(outcome.error, fiber::common::IoErr::None) << source.substr(0, 60);
+        EXPECT_EQ(outcome.status_code, 200) << source.substr(0, 60);
+        EXPECT_TRUE(outcome.body.empty()) << source.substr(0, 60);
+        EXPECT_TRUE(outcome.body_complete) << source.substr(0, 60);
+    }
+}
+
+TEST_P(LiteNginxLargeJsonTest, ResponseWithoutContentDropsTheBody) {
+    const std::pair<std::string, int> cases[] = {
+            {"let x = 1;", 204},
+            {"resp.send(204);", 204},
+            {"resp.send(304);", 304},
+            {"resp.sendJson(204, {a: 1});", 204},
+            {"resp.sendJson(304, {a: 1});", 304},
+    };
+    for (const auto &[source, status]: cases) {
+        const LargeJsonOutcome outcome = fetch_large_json(GetParam(), source);
+        EXPECT_EQ(outcome.error, fiber::common::IoErr::None) << source;
+        EXPECT_EQ(outcome.status_code, status) << source;
+        EXPECT_TRUE(outcome.body.empty()) << source;
+        EXPECT_TRUE(outcome.body_complete) << source;
+    }
+}
+
+TEST_P(LiteNginxLargeJsonTest, HeadRequestToErrorPageGetsHeadersWithNoBody) {
+    const std::string closed_upstream =
+            "location /* { proxy_pass http://127.0.0.1:" + std::to_string(reserve_loopback_port()) + "; }";
+    const std::pair<std::string_view, int> cases[] = {
+            {"location /known { script_file SCRIPT_PATH; }", 404},
+            {closed_upstream, 502},
+    };
+    for (const auto &[locations, status]: cases) {
+        const LargeJsonOutcome outcome =
+                fetch_large_json(GetParam(), "return 1;", fiber::http::HttpMethod::Head, locations);
+        EXPECT_EQ(outcome.error, fiber::common::IoErr::None) << locations;
+        EXPECT_EQ(outcome.status_code, status) << locations;
+        EXPECT_TRUE(outcome.body.empty()) << locations;
+        EXPECT_TRUE(outcome.body_complete) << locations;
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(Protocols, LiteNginxLargeJsonTest,
+                         testing::Values(LargeJsonProtocol::Http2, LargeJsonProtocol::Http3),
+                         [](const testing::TestParamInfo<LargeJsonProtocol> &info) {
+                             return info.param == LargeJsonProtocol::Http3 ? "Http3" : "Http2";
+                         });
 
 // A script that returns a Value is served as 200 + a JSON body encoding that value.
 TEST(LiteNginxRuntimeTest, ScriptReturnValueServes200Json) {
@@ -5318,6 +6319,15 @@ TEST(LiteNginxRuntimeTest, HttpProxyPassFlushControlsResponseBodyBuffering) {
         EXPECT_NE(outcome.response.find("first"), std::string::npos) << outcome.response;
         EXPECT_NE(outcome.response.find("second"), std::string::npos) << outcome.response;
     }
+}
+
+// The staged upstream pauses mid-body for 500 ms, well past the timeout given here. A body may
+// pause longer than it took to reach the upstream, so that timeout does not bound it.
+TEST(LiteNginxRuntimeTest, HttpProxyPassResponseBodyMayPausePastAShortTimeout) {
+    StagedProxyPassOutcome outcome = run_staged_proxy_pass("{timeout: 100}");
+    EXPECT_TRUE(outcome.error.empty()) << outcome.error;
+    EXPECT_NE(outcome.response.find("HTTP/1.1 200"), std::string::npos) << outcome.response;
+    EXPECT_NE(outcome.response.find("firstsecond"), std::string::npos) << outcome.response;
 }
 
 TEST(LiteNginxRuntimeTest, HttpProxyPassFlushControlsGzipSyncFlush) {

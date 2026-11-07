@@ -8,6 +8,7 @@
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
+#include "../common/mem/IoBufChain.h"
 #include "../http/HttpExchange.h"
 #include "../http/HttpHeaders.h"
 #include "../http/HttpResponseWriter.h"
@@ -72,6 +73,10 @@ public:
     }
     [[nodiscard]] fiber::script::GcHeap &heap() const noexcept { return heap_; }
     [[nodiscard]] ScriptRequestBody request_body() const noexcept { return request_body_; }
+    // The body is a one-shot stream: set as soon as a consumer starts on it, whatever the
+    // outcome, so a later consumer fails instead of seeing the tail of a half-read body.
+    [[nodiscard]] bool request_body_consumed() const noexcept { return request_body_consumed_; }
+    void mark_request_body_consumed() noexcept { request_body_consumed_ = true; }
 
     // App-provided upstream-connection services (global pool + DNS). Set per request by the host
     // before the script runs; null => http.request / http.proxyPass fail with InvalidState.
@@ -128,11 +133,16 @@ public:
     // exchange, bypassing the ctx state machine). Prevents run_script from emitting a fallback 500.
     void mark_response_sent() noexcept { header_sent_ = true; }
 
+    // Encodes body as JSON and sends it with Content-Type application/json. A short body goes out
+    // like write_raw_bytes. A longer one is sent as it is encoded, with no Content-Length: if
+    // encoding then fails, the response is aborted and the client sees a broken body. body and
+    // everything it reaches must stay unchanged until this completes. When the response has no
+    // content, as for HEAD, a longer body is not encoded past the point of knowing it is longer.
+    fiber::async::Task<fiber::common::IoResult<void>> write_json(int status,
+                                                                 const fiber::script::JsValue &body) noexcept;
     // Flush the pending headers (status + body of known length) then write the body in a
     // single end-of-stream chunk. content-type is the caller's responsibility (set via the
     // set/add helpers above). Empty-body variants send a terminating empty chunk.
-    fiber::async::Task<fiber::common::IoResult<void>> write_json(int status,
-                                                                 const fiber::script::JsValue &body) noexcept;
     fiber::async::Task<fiber::common::IoResult<void>> write_raw_bytes(int status, const std::uint8_t *data,
                                                                       std::size_t len) noexcept;
     fiber::async::Task<fiber::common::IoResult<void>> write_empty(int status) noexcept;
@@ -183,8 +193,14 @@ private:
     [[nodiscard]] bool resolve_from_request(ConstType type, std::string_view name,
                                             fiber::script::JsValue &out) noexcept;
 
+    [[nodiscard]] fiber::http::OutgoingHeaderBlockView final_header(int status,
+                                                                    fiber::http::HttpBodySpec body) const noexcept;
     fiber::async::Task<fiber::common::IoResult<void>> send_final_with_body(int status, std::size_t content_length,
                                                                            const std::uint8_t *data) noexcept;
+    // Chain-body variant: encodes straight into the transport buffer (no staging copy);
+    // end-of-stream comes from body.complete(), set by the implementation before write_all.
+    fiber::async::Task<fiber::common::IoResult<void>> send_final_with_body(int status,
+                                                                           fiber::mem::IoBufChain body) noexcept;
 
     fiber::http::HttpExchange &exchange_;
     fiber::http::HttpResponseWriter response_writer_;
@@ -209,6 +225,7 @@ private:
 
     fiber::http::HttpHeaders pending_headers_;
     bool header_sent_ = false;
+    bool request_body_consumed_ = false;
 };
 
 } // namespace fiber::http_script

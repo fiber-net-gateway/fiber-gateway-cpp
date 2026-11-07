@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -32,9 +33,11 @@
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 
+#include <fiber/common/json/JsonEncode.h>
 #include <fiber/common/util/RoutePathMatcher.h>
 #include <fiber/http_script/ExchangeConstExtension.h>
 #include <fiber/http_script/HttpScriptLib.h>
+#include <fiber/http_script/HttpScriptServices.h>
 #include <fiber/http_script/RouteScriptExtension.h>
 #include <fiber/http_script/ScriptExchangeCtx.h>
 #include <fiber/script/JsGc.h>
@@ -42,6 +45,7 @@
 #include <fiber/script/Script.h>
 #include <fiber/script/ScriptCompiler.h>
 #include <fiber/script/ScriptResult.h>
+#include <fiber/script/json/JsValueEncode.h>
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
 
@@ -138,9 +142,11 @@ std::shared_ptr<fiber::script::Script> compile_http_script(std::string_view sour
     return std::make_shared<fiber::script::Script>(std::move(*compiled));
 }
 
-fiber::http::HttpHandler make_script_handler(const std::shared_ptr<fiber::script::Script> &script) {
-    return [script](fiber::http::HttpExchange &exchange) -> Task<void> {
+fiber::http::HttpHandler make_script_handler(const std::shared_ptr<fiber::script::Script> &script,
+                                             std::size_t max_heap_bytes = 0) {
+    return [script, max_heap_bytes](fiber::http::HttpExchange &exchange) -> Task<void> {
         fiber::script::GcHeap heap;
+        heap.set_max_bytes(max_heap_bytes);
         fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
         fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
         auto result = co_await script->exec_async(root, &ctx, heap);
@@ -408,6 +414,521 @@ TEST(HttpScriptFuncsTest, RequestViewsAndSendJson) {
     EXPECT_TRUE(contains(result.body, "\"session\":\"abc\"")) << result.body;
     EXPECT_TRUE(contains(result.body, "\"theme\":\"dark\"")) << result.body;
     EXPECT_TRUE(contains(result.body, "\"host\":\"localhost\"")) << result.body;
+
+    s.stop();
+}
+
+// The request body is a one-shot stream: a second consumer must fail loudly, not see an
+// empty body it could mistake for what the client sent.
+TEST(HttpScriptFuncsTest, RequestBodyCanOnlyBeConsumedOnce) {
+    constexpr std::string_view kProbe = "try { %s; resp.sendJson(200, {second: \"returned\"}); }"
+                                        "catch (e) { resp.sendJson(200, {second: \"threw\"}); }";
+    const std::pair<std::string, std::string> cases[] = {
+            {"req.readBinary();", "req.readBinary()"}, {"req.discardBody();", "req.readBinary()"},
+            {"req.readBinary();", "req.readJson()"},   {"req.discardBody();", "req.readJson()"},
+            {"req.readJson();", "req.readBinary()"},
+    };
+    for (const auto &[first, second]: cases) {
+        std::string source = first;
+        std::string probe(kProbe);
+        probe.replace(probe.find("%s"), 2, second);
+        source += probe;
+
+        ServerFixture s;
+        auto script = compile_http_script(source);
+        ASSERT_NE(script, nullptr);
+        s.start(make_script_handler(script));
+
+        ClientRequest req;
+        req.method = fiber::http::HttpMethod::Post;
+        req.target = "/script";
+        req.body = "{\"a\":1}";
+        ClientResult result = s.request(std::move(req));
+
+        EXPECT_EQ(result.status_code, 200) << source;
+        EXPECT_TRUE(contains(result.body, "\"second\":\"threw\"")) << source << " -> " << result.body;
+        s.stop();
+    }
+}
+
+std::string patterned_body(std::size_t len) {
+    std::string body(len, '\0');
+    for (std::size_t i = 0; i < len; ++i) {
+        body[i] = static_cast<char>(((i * 31U) + (i >> 8)) & 0xFFU);
+    }
+    return body;
+}
+
+ClientResult post_to_script(std::string_view source, std::size_t max_heap_bytes, std::string body) {
+    ServerFixture s;
+    auto script = compile_http_script(source);
+    EXPECT_NE(script, nullptr);
+    s.start(make_script_handler(script, max_heap_bytes));
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Post;
+    req.target = "/script";
+    req.body = std::move(body);
+    ClientResult result = s.request(std::move(req));
+    s.stop();
+    return result;
+}
+
+// Larger than one 64 KiB read, so the binary stays rooted across several suspensions.
+TEST(HttpScriptFuncsTest, ReadBinaryCopiesAKnownLengthBodyAcrossReads) {
+    const std::string body = patterned_body(std::size_t{300} * 1024);
+    ClientResult result = post_to_script("resp.send(200, req.readBinary());", std::size_t{1024} * 1024, body);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_EQ(result.body.size(), body.size());
+    EXPECT_TRUE(result.body == body);
+}
+
+TEST(HttpScriptFuncsTest, ReadBinarySurvivesLaterCollections) {
+    const std::string body = patterned_body(std::size_t{100} * 1024);
+    ClientResult result = post_to_script("let b = req.readBinary();"
+                                         "let g = strings.repeat(\"x\", 8000000);"
+                                         "g = strings.repeat(\"y\", 8000000);"
+                                         "g = strings.repeat(\"z\", 8000000);"
+                                         "resp.send(200, b);",
+                                         0, body);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(result.body == body);
+}
+
+TEST(HttpScriptFuncsTest, ReadBinaryOfAnEmptyBodyIsEmpty) {
+    ClientResult result = post_to_script("resp.sendJson(200, {size: length(req.readBinary())});", 1024, "");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"size\":0")) << result.body;
+}
+
+// A heap close to its limit must not turn "no body" into a refusal.
+TEST(HttpScriptFuncsTest, ReadBinaryOfAnEmptyBodyIgnoresAFullHeap) {
+    ClientResult result = post_to_script("let keep = strings.repeat(\"x\", 3000);"
+                                         "resp.sendJson(200, {size: length(req.readBinary()), keep: length(keep)});",
+                                         4096, "");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"size\":0")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"keep\":3000")) << result.body;
+}
+
+std::string json_array_of_arrays(std::size_t count) {
+    std::string body = "[";
+    for (std::size_t i = 0; i < count; ++i) {
+        body += "[],";
+    }
+    body.back() = ']';
+    return body;
+}
+
+constexpr std::string_view kReadJsonProbe = "try { let v = req.readJson(); resp.sendJson(200, {n: length(v)}); }"
+                                            "catch (e) { resp.sendJson(200, {caught: e}); }";
+
+TEST(HttpScriptFuncsTest, ReadJsonDecodesABodySpanningReads) {
+    ClientResult result = post_to_script(kReadJsonProbe, 0, json_array_of_arrays(100000));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"n\":100000")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonDecodesAStringSpanningReads) {
+    ClientResult result = post_to_script(kReadJsonProbe, 0, "\"" + std::string(std::size_t{300} * 1024, 'a') + "\"");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"n\":307200")) << result.body;
+}
+
+// The text is not what the limit protects: only what it decodes to counts.
+TEST(HttpScriptFuncsTest, ReadJsonOfMostlyWhitespaceFitsAFarSmallerHeap) {
+    ClientResult result = post_to_script("resp.sendJson(200, {v: req.readJson()});", 8192,
+                                         std::string(std::size_t{200} * 1024, ' ') + "7");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"v\":7")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonThatOutgrowsTheHeapThrowsCatchably) {
+    ClientResult result = post_to_script(kReadJsonProbe, std::size_t{64} * 1024, json_array_of_arrays(20000));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonRefusesAStringThatCannotFit) {
+    ClientResult result = post_to_script(kReadJsonProbe, std::size_t{16} * 1024,
+                                         "\"" + std::string(std::size_t{300} * 1024, 'a') + "\"");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
+}
+
+// Decoding cannot collect, so garbage has to be reclaimed before a chunk that may not fit.
+TEST(HttpScriptFuncsTest, ReadJsonReclaimsWhatTheScriptLeftBehind) {
+    ClientResult result = post_to_script("strings.repeat(\"x\", 40000);"
+                                         "strings.repeat(\"y\", 10000);"
+                                         "resp.sendJson(200, {n: length(req.readJson())});",
+                                         std::size_t{64} * 1024, json_array_of_arrays(500));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"n\":500")) << result.body;
+}
+
+// Counts what is read before the body is given up. The response cannot show this: without a
+// limit on a token spanning reads, the outcome is the same, after holding the whole token.
+class WatchedBody {
+public:
+    explicit WatchedBody(fiber::http::HttpExchange &exchange) noexcept : exchange_(exchange) {}
+
+    Task<fiber::common::IoResult<fiber::mem::IoBufChain>> read_body(std::size_t max_bytes,
+                                                                    std::chrono::milliseconds timeout) noexcept {
+        read_timeout_ = timeout;
+        auto result = co_await exchange_.read_body(max_bytes, timeout);
+        if (result) {
+            bytes_read_ += result->readable_bytes();
+        }
+        co_return result;
+    }
+
+    Task<fiber::common::IoResult<void>> discard_body(std::chrono::milliseconds timeout) noexcept {
+        discarded_after_ = bytes_read_;
+        co_return co_await exchange_.discard_body(timeout);
+    }
+
+    fiber::common::IoResult<void> abort(fiber::common::IoErr reason) noexcept { return exchange_.abort(reason); }
+
+    [[nodiscard]] std::size_t discarded_after() const noexcept { return discarded_after_; }
+    [[nodiscard]] std::chrono::milliseconds read_timeout() const noexcept { return read_timeout_; }
+
+private:
+    fiber::http::HttpExchange &exchange_;
+    std::size_t bytes_read_ = 0;
+    std::size_t discarded_after_ = 0;
+    std::chrono::milliseconds read_timeout_{0};
+};
+
+TEST(HttpScriptFuncsTest, ReadJsonGivesUpOnALongTokenAsSoonAsItCannotFit) {
+    constexpr std::size_t kHeapLimit = std::size_t{16} * 1024;
+    constexpr std::size_t kTokenBytes = std::size_t{1024} * 1024;
+    ServerFixture s;
+    auto script = compile_http_script(kReadJsonProbe);
+    ASSERT_NE(script, nullptr);
+    auto discarded_after = std::make_shared<std::atomic<std::size_t>>(0);
+    s.start([script, discarded_after](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        heap.set_max_bytes(kHeapLimit);
+        WatchedBody body(exchange);
+        fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, fiber::http_script::ScriptConnectionInfo{},
+                                                  fiber::http_script::make_script_request_body(body)};
+        fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
+        auto result = co_await script->exec_async(root, &ctx, heap);
+        (void) result;
+        discarded_after->store(body.discarded_after());
+        co_return;
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Post;
+    req.target = "/script";
+    req.body = "\"" + std::string(kTokenBytes, 'a') + "\"";
+    ClientResult result = s.request(std::move(req));
+    s.stop();
+
+    EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
+    EXPECT_GT(discarded_after->load(), 0U);
+    EXPECT_LT(discarded_after->load(), kTokenBytes / 2);
+}
+
+class LoopbackUpstream final : public fiber::http_script::HttpUpstreamConnection {
+public:
+    explicit LoopbackUpstream(fiber::event::EventLoop &loop) : connection_(loop) {}
+
+    [[nodiscard]] fiber::http::Http1ClientConnection &connection() noexcept override { return connection_; }
+    [[nodiscard]] std::string_view host_header() const noexcept override { return "upstream"; }
+
+private:
+    fiber::http::Http1ClientConnection connection_;
+};
+
+class LoopbackServices final : public fiber::http_script::HttpScriptServices {
+public:
+    explicit LoopbackServices(std::uint16_t port) noexcept : port_(port) {}
+
+    [[nodiscard]] Task<fiber::common::IoResult<std::unique_ptr<fiber::http_script::HttpUpstreamConnection>>>
+    acquire(const fiber::http_script::HttpTargetSpec & /*target*/,
+            std::chrono::milliseconds timeout) noexcept override {
+        auto upstream = std::make_unique<LoopbackUpstream>(fiber::event::EventLoop::current());
+        auto connected = co_await upstream->connection().connect(
+                fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port_), timeout);
+        if (!connected) {
+            co_return std::unexpected(connected.error());
+        }
+        co_return std::unique_ptr<fiber::http_script::HttpUpstreamConnection>(std::move(upstream));
+    }
+
+private:
+    std::uint16_t port_;
+};
+
+// Forwards to the exchange, noting the timeout of the last body write.
+class WatchedResponse {
+public:
+    explicit WatchedResponse(fiber::http::HttpExchange &exchange) noexcept :
+        inner_(fiber::http::make_http_response_writer(exchange)) {}
+
+    [[nodiscard]] fiber::http::HttpResponseWriter writer() noexcept { return {this, kOps}; }
+    [[nodiscard]] std::chrono::milliseconds write_timeout() const noexcept { return write_timeout_; }
+
+private:
+    using Written = Task<fiber::common::IoResult<std::size_t>>;
+
+    static WatchedResponse *self(void *ctx) noexcept { return static_cast<WatchedResponse *>(ctx); }
+    static Task<fiber::common::IoResult<void>>
+    send_header(void *ctx, const fiber::http::OutgoingHeaderBlockView &header, std::chrono::milliseconds timeout) {
+        return self(ctx)->inner_.send_header(header, timeout);
+    }
+    static Written write_all_chain(void *ctx, fiber::mem::IoBufChain chunk,
+                                   std::chrono::milliseconds timeout) noexcept {
+        return self(ctx)->inner_.write_all(std::move(chunk), timeout);
+    }
+    static Written write_all_bytes(void *ctx, const std::uint8_t *buf, std::size_t len, bool end,
+                                   std::chrono::milliseconds timeout) noexcept {
+        return self(ctx)->inner_.write_all(buf, len, end, timeout);
+    }
+    static Written write_chain(void *ctx, fiber::mem::IoBufChain &chunk, std::chrono::milliseconds timeout) noexcept {
+        self(ctx)->write_timeout_ = timeout;
+        return self(ctx)->inner_.write(chunk, timeout);
+    }
+    static Written write_bytes(void *ctx, const std::uint8_t *buf, std::size_t len, bool end,
+                               std::chrono::milliseconds timeout) noexcept {
+        self(ctx)->write_timeout_ = timeout;
+        return self(ctx)->inner_.write(buf, len, end, timeout);
+    }
+    static Task<fiber::common::IoResult<void>> flush(void *ctx, std::chrono::milliseconds timeout) noexcept {
+        return self(ctx)->inner_.flush(timeout);
+    }
+    static fiber::common::IoResult<void> abort(void *ctx, fiber::common::IoErr reason) noexcept {
+        return self(ctx)->inner_.abort(reason);
+    }
+
+    static constexpr fiber::http::HttpResponseWriter::Ops kOps{
+            .send_header = &send_header,
+            .write_all_chain = &write_all_chain,
+            .write_all_bytes = &write_all_bytes,
+            .write_chain = &write_chain,
+            .write_bytes = &write_bytes,
+            .flush = &flush,
+            .abort = &abort,
+    };
+
+    fiber::http::HttpResponseWriter inner_;
+    std::chrono::milliseconds write_timeout_{0};
+};
+
+struct ProxyPassBodyTimeouts {
+    std::chrono::milliseconds read{0};
+    std::chrono::milliseconds write{0};
+};
+
+// What proxyPass passes when it moves a body. No test can wait out the real timeouts, and with
+// none at all a stalled client would hold the upstream connection forever.
+ProxyPassBodyTimeouts proxy_pass_body_timeouts(std::string_view options) {
+    ServerFixture upstream;
+    auto echo = compile_http_script("resp.send(200, req.readBinary());");
+    EXPECT_NE(echo, nullptr);
+    upstream.start(make_script_handler(echo));
+
+    std::string source = "directive svc = http \"@backend\"; svc.proxyPass(";
+    source.append(options);
+    source.append(");");
+    auto compiled = compile_route_script(source, {});
+    EXPECT_TRUE(compiled.ok) << compiled.error;
+
+    LoopbackServices services(upstream.port);
+    auto read_timeout = std::make_shared<std::atomic<std::int64_t>>(0);
+    auto write_timeout = std::make_shared<std::atomic<std::int64_t>>(0);
+    ServerFixture front;
+    front.start([&compiled, &services, read_timeout, write_timeout](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        WatchedBody body(exchange);
+        WatchedResponse response(exchange);
+        fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, fiber::http_script::ScriptConnectionInfo{},
+                                                  fiber::http_script::make_script_request_body(body)};
+        ctx.set_response_writer(response.writer());
+        ctx.set_services(&services);
+        fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
+        auto result = co_await compiled.script->exec_async(root, &ctx, heap);
+        (void) result;
+        read_timeout->store(body.read_timeout().count());
+        write_timeout->store(response.write_timeout().count());
+        co_return;
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Post;
+    req.target = "/x";
+    req.body = "payload";
+    ClientResult result = front.request(std::move(req));
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_EQ(result.body, "payload");
+    front.stop();
+    upstream.stop();
+    return {.read = std::chrono::milliseconds(read_timeout->load()),
+            .write = std::chrono::milliseconds(write_timeout->load())};
+}
+
+TEST(HttpScriptFuncsTest, ProxyPassBodyReadsWaitAtLeastAMinute) {
+    EXPECT_EQ(proxy_pass_body_timeouts("").read, std::chrono::seconds(60));
+    EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 500}").read, std::chrono::seconds(60));
+    EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 90000}").read, std::chrono::seconds(90));
+}
+
+TEST(HttpScriptFuncsTest, ProxyPassResponseBodyWritesWaitThirtySecondsWhateverTheTimeout) {
+    EXPECT_EQ(proxy_pass_body_timeouts("").write, std::chrono::seconds(30));
+    EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 500}").write, std::chrono::seconds(30));
+    EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 90000}").write, std::chrono::seconds(30));
+}
+
+std::string json_of(const fiber::script::JsValue &value) {
+    std::string out;
+    fiber::json::StringSink sink(out);
+    fiber::json::Generator gen(sink);
+    (void) fiber::script::json::encode_js_value(gen, value);
+    return out;
+}
+
+// The heap limit makes the second pair fail while the first fits. The view is cached once built,
+// so keeping that half-built object would hide the second pair for the rest of the request.
+TEST(HttpScriptFuncsTest, QueryOutOfMemoryLeavesNoPartialObjectAndRetries) {
+    const std::string large(4096, 'b');
+    struct Views {
+        fiber::script::JsNodeType refused = fiber::script::JsNodeType::Null;
+        std::string retried;
+    };
+    auto views = std::make_shared<Views>();
+    ServerFixture s;
+    s.start([views](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+        heap.set_max_bytes(2048);
+        views->refused = fiber::script::js_value_type(ctx.query());
+        heap.set_max_bytes(0);
+        views->retried = json_of(ctx.query());
+        (void) co_await ctx.write_empty(204);
+        co_return;
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/x?a=1&b=" + large;
+    ClientResult result = s.request(std::move(req));
+    s.stop();
+
+    EXPECT_EQ(result.status_code, 204);
+    EXPECT_EQ(views->refused, fiber::script::JsNodeType::Undefined);
+    EXPECT_EQ(views->retried, "{\"a\":\"1\",\"b\":\"" + large + "\"}");
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonReportsBadJsonAsIt) {
+    for (std::string_view body: {"{bad", "1 2", "[1,", "\"open"}) {
+        ClientResult result = post_to_script(kReadJsonProbe, 0, std::string(body));
+        EXPECT_EQ(result.status_code, 200);
+        EXPECT_TRUE(contains(result.body, "invalid json body")) << body << " -> " << result.body;
+    }
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonOfAnEmptyBodySaysSo) {
+    ClientResult result = post_to_script(kReadJsonProbe, 0, "");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "client did not sent body")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, BodyRefusedByReadJsonIsConsumed) {
+    ClientResult result = post_to_script("try { req.readJson(); } catch (e) { }"
+                                         "try { req.readBinary(); resp.sendJson(200, {second: \"returned\"}); }"
+                                         "catch (e) { resp.sendJson(200, {second: e}); }",
+                                         0, "{bad" + std::string(100000, 'x'));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "already consumed")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, ReadBinaryOverTheHeapLimitThrowsCatchably) {
+    ClientResult result = post_to_script("try { req.readBinary(); resp.sendJson(200, {read: true}); }"
+                                         "catch (e) { resp.sendJson(200, {caught: e}); }",
+                                         1024, patterned_body(4096));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
+    EXPECT_FALSE(contains(result.body, "\"read\":true")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, RefusedBodyIsConsumedForLaterReads) {
+    ClientResult result = post_to_script("try { req.readBinary(); } catch (e) { }"
+                                         "try { req.readBinary(); resp.sendJson(200, {second: \"returned\"}); }"
+                                         "catch (e) { resp.sendJson(200, {second: e}); }",
+                                         1024, patterned_body(4096));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "already consumed")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, HeapLimitCollectsGarbageBeforeRefusingABody) {
+    const std::string body = patterned_body(std::size_t{500} * 1024);
+    ClientResult result = post_to_script("strings.repeat(\"x\", 900000); resp.send(200, req.readBinary());",
+                                         std::size_t{1024} * 1024, body);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(result.body == body);
+}
+
+// A >16KiB JSON body spans multiple sink nodes: the chain-encoded response must arrive
+// byte-exact with a correct Content-Length (regression for the IoBufChain write_json path,
+// including the node-boundary case where a generator token exceeds the tail's tailroom).
+TEST(HttpScriptFuncsTest, SendJsonMultiNodeBody) {
+    ServerFixture s;
+    constexpr int kRepeats = 4200; // 4200 * 8 = 33600 bytes > two sink nodes
+    auto script =
+            compile_http_script(R"(resp.sendJson(200, strings.repeat("abcdefgh", )" + std::to_string(kRepeats) + "));");
+    ASSERT_NE(script, nullptr);
+    s.start(make_script_handler(script));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/script";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_EQ(result.content_type, "application/json");
+
+    std::string expected = "\"";
+    for (int i = 0; i < kRepeats; ++i) {
+        expected += "abcdefgh";
+    }
+    expected += "\"";
+    EXPECT_EQ(result.body.size(), expected.size());
+    EXPECT_EQ(result.body, expected);
+
+    s.stop();
+}
+
+// Companion to SendJsonMultiNodeBody: an array of 2100 small elements encodes as ~2100
+// short generator tokens, exercising the progressive tail-fill path (tokens too large for
+// the current tail's tailroom roll to a fresh node) instead of one large-token allocation.
+TEST(HttpScriptFuncsTest, SendJsonMultiNodeArrayBody) {
+    ServerFixture s;
+    constexpr int kElements = 2100; // 2100 * 10 + separators > two sink nodes
+    auto script = compile_http_script(R"(resp.sendJson(200, strings.split(strings.repeat("abcdefgh,", )" +
+                                      std::to_string(kElements - 1) + R"js() + "abcdefgh", ","));)js");
+    ASSERT_NE(script, nullptr);
+    s.start(make_script_handler(script));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/script";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_EQ(result.status_code, 200);
+
+    std::string expected = "[";
+    for (int i = 0; i < kElements; ++i) {
+        if (i > 0) {
+            expected += ",";
+        }
+        expected += "\"abcdefgh\"";
+    }
+    expected += "]";
+    EXPECT_EQ(result.body.size(), expected.size());
+    EXPECT_EQ(result.body, expected);
 
     s.stop();
 }
@@ -748,6 +1269,47 @@ TEST(RouteVarTest, DuplicateKeysKeepPerTypeFirstLastSemantics) {
     EXPECT_TRUE(contains(result.body, "\"h\":\"first\"")) << result.body;
     EXPECT_TRUE(contains(result.body, "\"q\":\"two\"")) << result.body;
     EXPECT_TRUE(contains(result.body, "\"c\":\"first\"")) << result.body;
+    s.stop();
+}
+
+TEST(RouteVarTest, QueryDecodeRepairsMalformedUtf8) {
+    ServerFixture s;
+    auto compiled = compile_route_script(
+            "let q = req.getQuery(); resp.sendJson(200, {ca: $query.a, cb: $query.b, oa: q.a, ob: q.b});", {});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(compiled, "/*"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/?a=x%FFy&b=%E4%BD%A0";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    // The constant channel and the query object decode through separate calls: both repair.
+    EXPECT_TRUE(contains(result.body, "\"ca\":\"x\xef\xbf\xbdy\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"oa\":\"x\xef\xbf\xbdy\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"cb\":\"\xe4\xbd\xa0\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"ob\":\"\xe4\xbd\xa0\"")) << result.body;
+    s.stop();
+}
+
+TEST(RouteVarTest, MalformedQueryEscapeKeepsEarlierPairs) {
+    ServerFixture s;
+    auto compiled = compile_route_script(
+            "let q = req.getQuery(); resp.sendJson(200, {ca: $query.a, cc: $query.c, oa: q.a, oc: q.c});", {});
+    ASSERT_TRUE(compiled.ok) << compiled.error;
+    s.start(make_route_script_handler(compiled, "/*"));
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/?a=1&b=%ZZ&c=3";
+    ClientResult result = s.request(std::move(req));
+
+    EXPECT_EQ(result.status_code, 200) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"ca\":\"1\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"oa\":\"1\"")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"cc\":null")) << result.body;
+    EXPECT_FALSE(contains(result.body, "\"oc\":\"3\"")) << result.body;
     s.stop();
 }
 

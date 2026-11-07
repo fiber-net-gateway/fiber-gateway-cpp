@@ -13,10 +13,11 @@
 #include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/json/JsValueEncode.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
-#include <string>
 #include <string_view>
+#include <utility>
 
 namespace fiber::http_script {
 
@@ -25,19 +26,94 @@ namespace {
 // Pre-hashed Cookie header name for per-request cookie parsing.
 constexpr std::uint64_t kCookieHash = fiber::http::http_header_name_hash("cookie");
 
-// Writes generated JSON into a std::string buffer. Used by write_json to materialize a
-// JsValue as bytes before handing them to HttpExchange::write_all.
-class StringSink final : public fiber::json::OutputSink {
+// Sink node payload capacity matching the io-buf node pool's fixed node size (same
+// formula as HttpBodyPipe's coalesce buffers), so every sink allocation is a freelist pop.
+constexpr std::size_t kJsonNodeCapacity = static_cast<std::size_t>(16 * 1024) - fiber::mem::kIoBufControlBlockSize;
+
+// A JSON body goes out each time this much is encoded, so a large response never exists whole.
+constexpr std::size_t kJsonFlushBytes = static_cast<std::size_t>(64 * 1024);
+
+// Writes generated JSON directly into an IoBufChain — the transport buffer write_all
+// consumes — with no staging copy. Bytes land in the tail node at once but join the chain
+// only at commit(), so the many tiny writes of a generator cost a compare and a copy. Call
+// commit() before using the chain; moving the chain away after that is fine, the next write
+// starts a fresh node. The only failure mode is pool allocation failure, reported as
+// write() == false (the OutputSink OOM channel); the Generator surfaces that as ErrorState,
+// indistinguishable from value-shape encode errors at the Result level, so the sink records
+// it in oom_ for the caller's NoMem/Invalid mapping. Every node is allocated and solely
+// owned here (no second handles), so the free region is safe to fill without the unique()
+// guard the pipe paths need.
+class ChainSink final : public fiber::json::OutputSink {
 public:
-    explicit StringSink(std::string &out) noexcept : out_(out) {}
+    explicit ChainSink(fiber::mem::IoBufChain &out) noexcept : out_(out) {}
     [[nodiscard]] bool write(const char *data, std::size_t len) noexcept override {
-        out_.append(data, len);
+        const auto room = static_cast<std::size_t>(end_ - cursor_);
+        if (len == 0 || len > room) {
+            return write_across_nodes(data, len);
+        }
+        if (len == 1) {
+            *cursor_ = *data;
+        } else {
+            std::memcpy(cursor_, data, len);
+        }
+        cursor_ += len;
+        return true;
+    }
+    void commit() noexcept {
+        if (cursor_ != start_) {
+            out_.commit_tailroom(static_cast<std::size_t>(cursor_ - start_));
+        }
+        start_ = nullptr;
+        cursor_ = nullptr;
+        end_ = nullptr;
+    }
+    [[nodiscard]] bool oom() const noexcept { return oom_; }
+
+private:
+    [[nodiscard]] bool write_across_nodes(const char *data, std::size_t len) noexcept {
+        while (len != 0) {
+            if (cursor_ == end_) {
+                commit();
+                if (!open_tail()) {
+                    return false;
+                }
+            }
+            const std::size_t room = std::min(len, static_cast<std::size_t>(end_ - cursor_));
+            std::memcpy(cursor_, data, room);
+            cursor_ += room;
+            data += room;
+            len -= room;
+        }
+        return true;
+    }
+    [[nodiscard]] bool open_tail() noexcept {
+        fiber::mem::IoBuf *tail = out_.back();
+        if (tail == nullptr || tail->tailroom() == 0) {
+            fiber::mem::IoBuf fresh = fiber::mem::IoBuf::allocate(kJsonNodeCapacity);
+            if (!fresh || !out_.append(std::move(fresh))) {
+                oom_ = true;
+                return false;
+            }
+            tail = out_.back();
+        }
+        start_ = reinterpret_cast<char *>(tail->writable_data());
+        cursor_ = start_;
+        end_ = start_ + tail->tailroom();
         return true;
     }
 
-private:
-    std::string &out_;
+    fiber::mem::IoBufChain &out_;
+    char *start_ = nullptr;
+    char *cursor_ = nullptr;
+    char *end_ = nullptr;
+    bool oom_ = false;
 };
+
+// The error a failed JSON encode into sink is reported as: sink allocation failure is the
+// transport-side failure source, value-shape encode errors keep the old Invalid mapping.
+fiber::common::IoErr json_encode_error(const ChainSink &sink) noexcept {
+    return sink.oom() ? fiber::common::IoErr::NoMem : fiber::common::IoErr::Invalid;
+}
 
 // Stores a string value into the object at obj_root under key, overwriting any prior
 // value (mirrors Java ObjectNode.put). Returns false on allocation failure. The new
@@ -54,6 +130,11 @@ bool put_string(fiber::script::GcHeap &heap, fiber::script::ValueHandle obj_root
         return false;
     }
     return fiber::script::gc_object_set_key(&heap, obj_root, key.data(), key.size(), *item);
+}
+
+// form_decode_query's buffer source: exchange pool memory, released when the request ends.
+auto query_alloc(fiber::mem::BufPool &pool) noexcept {
+    return [&pool](std::size_t size) noexcept { return pool.alloc<char>(size); };
 }
 
 std::string_view copy_to_pool(fiber::mem::BufPool &pool, std::string_view value) noexcept {
@@ -155,10 +236,14 @@ fiber::script::JsValue ScriptExchangeCtx::query() noexcept {
         return fiber::script::JsValue::make_undefined(); // OOM; slot stays undefined, retries next call
     }
     std::string_view q = exchange_.uri().query;
-    auto query_io = fiber::util::form_decode_query(
-            q, [&](std::string_view k, std::string_view v) -> bool { return put_string(heap_, query_root_, k, v); });
-    (void) query_io; // malformed percent escapes leave the partial object (lenient)
-    return *query_root_;
+    auto query_io = fiber::util::form_decode_query(q, query_alloc(exchange_.pool()),
+                                                   [&](std::string_view k, std::string_view v) noexcept -> bool {
+                                                       return put_string(heap_, query_root_, k, v);
+                                                   });
+    if (!query_io && query_io.error() == fiber::common::IoErr::NoMem) {
+        *query_root_ = fiber::script::JsValue::make_undefined(); // OOM; drop the partial object, retry next call
+    }
+    return *query_root_; // malformed percent escapes leave the partial object (lenient)
 }
 
 fiber::script::JsValue ScriptExchangeCtx::headers() noexcept {
@@ -227,7 +312,8 @@ const ScriptExchangeCtx::ConstantEntry *ScriptExchangeCtx::cache_find(std::uint6
 bool ScriptExchangeCtx::cache_insert(std::uint64_t hash, ConstType type, std::string_view name,
                                      fiber::script::JsValue value) noexcept {
     if (constant_cache_ == nullptr ||
-        constant_cache_size_ + 1 > constant_cache_capacity_ - constant_cache_capacity_ / kConstantCacheMinFreeQuarter) {
+        constant_cache_size_ + 1 >
+                constant_cache_capacity_ - (constant_cache_capacity_ / kConstantCacheMinFreeQuarter)) {
         const std::size_t new_capacity =
                 constant_cache_capacity_ == 0 ? kInitialConstantCacheCapacity : constant_cache_capacity_ * 2;
         auto *fresh = static_cast<ConstantEntry *>(
@@ -283,7 +369,8 @@ bool ScriptExchangeCtx::resolve_from_request(ConstType type, std::string_view na
             // the pairs decoded before the error (lenient, as before).
             std::string_view matched{};
             auto decoded = fiber::util::form_decode_query(
-                    exchange_.uri().query, [&](std::string_view key, std::string_view value) -> bool {
+                    exchange_.uri().query, query_alloc(exchange_.pool()),
+                    [&](std::string_view key, std::string_view value) noexcept -> bool {
                         if (!const_name_equal(name, key)) {
                             return true;
                         }
@@ -387,16 +474,22 @@ void ScriptExchangeCtx::add_response_header(std::string_view name, std::string_v
     pending_headers_.add(name, value);
 }
 
-fiber::async::Task<fiber::common::IoResult<void>>
-ScriptExchangeCtx::send_final_with_body(int status, std::size_t content_length, const std::uint8_t *data) noexcept {
+fiber::http::OutgoingHeaderBlockView ScriptExchangeCtx::final_header(int status,
+                                                                     fiber::http::HttpBodySpec body) const noexcept {
     fiber::http::OutgoingHeaderBlockView header{};
     header.kind = fiber::http::OutgoingHeaderKind::Final;
     header.status_code = status;
     header.headers = &pending_headers_;
-    header.body = fiber::http::HttpBodySpec::ContentLength(content_length);
+    header.body = body;
     header.connection_mode = fiber::http::ResponseConnectionMode::Auto;
     header.end_stream = false;
+    return header;
+}
 
+fiber::async::Task<fiber::common::IoResult<void>>
+ScriptExchangeCtx::send_final_with_body(int status, std::size_t content_length, const std::uint8_t *data) noexcept {
+    const fiber::http::OutgoingHeaderBlockView header =
+            final_header(status, fiber::http::HttpBodySpec::ContentLength(content_length));
     auto header_result = co_await response_writer_.send_header(header);
     if (!header_result) {
         co_return std::unexpected(header_result.error());
@@ -411,17 +504,78 @@ ScriptExchangeCtx::send_final_with_body(int status, std::size_t content_length, 
 }
 
 fiber::async::Task<fiber::common::IoResult<void>>
-ScriptExchangeCtx::write_json(int status, const fiber::script::JsValue &body) noexcept {
-    std::string json;
-    StringSink sink(json);
-    fiber::json::Generator gen(sink);
-    auto encode_result = fiber::script::json::encode_js_value(gen, body);
-    if (encode_result != fiber::json::Generator::Result::OK &&
-        encode_result != fiber::json::Generator::Result::GenerateComplete) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+ScriptExchangeCtx::send_final_with_body(int status, fiber::mem::IoBufChain body) noexcept {
+    const fiber::http::OutgoingHeaderBlockView header =
+            final_header(status, fiber::http::HttpBodySpec::ContentLength(body.readable_bytes()));
+    auto header_result = co_await response_writer_.send_header(header);
+    if (!header_result) {
+        co_return std::unexpected(header_result.error());
     }
+    header_sent_ = true;
+
+    // complete() is the chain-path end-of-stream marker: HttpExchange::write_all maps it
+    // to the same end flag the pointer overload takes explicitly.
+    body.mark_complete();
+    auto body_result = co_await response_writer_.write_all(std::move(body));
+    if (!body_result) {
+        co_return std::unexpected(body_result.error());
+    }
+    co_return fiber::common::IoResult<void>{};
+}
+
+fiber::async::Task<fiber::common::IoResult<void>>
+ScriptExchangeCtx::write_json(int status, const fiber::script::JsValue &body) noexcept {
+    using Status = fiber::script::json::JsValueEncoder::Status;
+
+    fiber::mem::IoBufChain json;
+    ChainSink sink(json);
+    fiber::json::Generator gen(sink);
+    fiber::script::json::JsValueEncoder encoder(gen, body);
+    Status encode_status = encoder.run(kJsonFlushBytes);
+    if (encode_status == Status::Failed) {
+        co_return std::unexpected(json_encode_error(sink));
+    }
+    sink.commit();
     set_response_header("Content-Type", "application/json");
-    co_return co_await send_final_with_body(status, json.size(), reinterpret_cast<const std::uint8_t *>(json.data()));
+    if (encode_status == Status::Done) {
+        co_return co_await send_final_with_body(status, std::move(json));
+    }
+
+    const fiber::http::OutgoingHeaderBlockView header = final_header(status, fiber::http::HttpBodySpec::Stream());
+    auto header_result = co_await response_writer_.send_header(header);
+    if (!header_result) {
+        co_return std::unexpected(header_result.error());
+    }
+    header_sent_ = true;
+    if (!exchange_.response_has_body(status)) {
+        co_return fiber::common::IoResult<void>{}; // HEAD and the like: the rest would be thrown away.
+    }
+
+    // The encoder walks the heap between writes, which is safe only while nothing collects it.
+    const std::uint64_t gc_count = heap_.stats().gc_count;
+    for (;;) {
+        const bool last = encode_status == Status::Done;
+        if (last) {
+            json.mark_complete();
+        }
+        auto body_result = co_await response_writer_.write_all(std::exchange(json, {}));
+        if (!body_result) {
+            co_return std::unexpected(body_result.error());
+        }
+        if (last) {
+            co_return fiber::common::IoResult<void>{};
+        }
+        FIBER_ASSERT(heap_.stats().gc_count == gc_count);
+        encode_status = encoder.run(kJsonFlushBytes);
+        if (encode_status == Status::Failed) {
+            // The status line is gone, so a broken body is the only way left to tell the client.
+            // Returning from the handler would end the response too, but only once the script does.
+            const fiber::common::IoErr err = json_encode_error(sink);
+            (void) response_writer_.abort(err);
+            co_return std::unexpected(err);
+        }
+        sink.commit();
+    }
 }
 
 fiber::async::Task<fiber::common::IoResult<void>>
@@ -435,25 +589,28 @@ fiber::async::Task<fiber::common::IoResult<void>> ScriptExchangeCtx::write_empty
 
 fiber::async::Task<fiber::common::IoResult<void>>
 ScriptExchangeCtx::write_error_json(int status, std::string_view error_name) noexcept {
-    std::string json;
-    StringSink sink(json);
+    fiber::mem::IoBufChain json;
+    ChainSink sink(json);
     fiber::json::Generator gen(sink);
     using R = fiber::json::Generator::Result;
+    // On this fixed shape the only failure source is the sink; the oom() flag still
+    // separates allocation failure from generator error state for the error value.
     if (gen.map_open() != R::OK) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
     if (gen.string("error", 5) != R::OK) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
     if (gen.string(error_name.data(), error_name.size()) != R::OK) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
     const R close_result = gen.map_close();
     if (close_result != R::OK && close_result != R::GenerateComplete) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(json_encode_error(sink));
     }
+    sink.commit();
     set_response_header("Content-Type", "application/json");
-    co_return co_await send_final_with_body(status, json.size(), reinterpret_cast<const std::uint8_t *>(json.data()));
+    co_return co_await send_final_with_body(status, std::move(json));
 }
 
 } // namespace fiber::http_script

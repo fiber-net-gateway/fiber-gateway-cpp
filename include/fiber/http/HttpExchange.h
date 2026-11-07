@@ -130,6 +130,17 @@ public:
     fiber::async::Task<common::IoResult<void>>
     discard_body(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
+    // Whether a final response with this status carries content: not for a HEAD
+    // request, nor for 1xx, 204 and 304. A handler does not have to ask. When
+    // this is false, send_header ends the stream at the header and every later
+    // body write or trailer succeeds without sending anything, so a handler can
+    // answer HEAD exactly as it answers GET. A HEAD response keeps a Content-Length
+    // body spec as its declared length; any other such response drops it. Ask only
+    // to avoid producing a body that would be thrown away. A Raw tunnel is exempt.
+    [[nodiscard]] bool response_has_body(int status_code) const noexcept {
+        return method_ != HttpMethod::Head && status_code >= 200 && status_code != 204 && status_code != 304;
+    }
+
     // Send operations must be awaited serially. A trailer requires a successful
     // final header and all preceding body bytes to have been accepted without
     // ending the stream. It must set end_stream=true. Violating this ordering
@@ -195,6 +206,7 @@ private:
     net::SocketAddress remote_addr_{};
     HttpResponseStats response_stats_{};
     common::IoErr response_write_error_ = common::IoErr::None;
+    bool response_body_discarded_ = false;
     bool request_close_ = false;
     bool request_keep_alive_ = false;
     HttpExchangeIo *io_ = nullptr;

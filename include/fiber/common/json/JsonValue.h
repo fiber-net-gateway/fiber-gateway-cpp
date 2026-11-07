@@ -59,7 +59,7 @@ public:
         state_ = NullableState::Present;
     }
 
-    [[nodiscard]] std::optional<T> to_optional() const {
+    [[nodiscard]] std::optional<T> to_optional() const noexcept(std::is_nothrow_copy_constructible_v<T>) {
         // std::optional cannot distinguish Absent from an explicit JSON null.
         if (!is_present()) {
             return std::nullopt;

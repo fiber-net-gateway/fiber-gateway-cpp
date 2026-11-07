@@ -287,6 +287,9 @@ void *gc_alloc_storage(GcHeap *heap, std::size_t bytes) noexcept {
     if (bytes == 0) {
         return nullptr;
     }
+    if (heap->max_bytes_ != 0 && saturating_add(heap->bytes, bytes) > heap->max_bytes_) {
+        return nullptr;
+    }
     void *mem = heap->alloc.alloc(bytes);
     if (mem) {
         heap->allocated_bytes_total_ += bytes;

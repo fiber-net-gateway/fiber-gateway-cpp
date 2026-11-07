@@ -20,7 +20,7 @@ using fiber::nacos::dto::resp::NotifySubscriberResponse;
 
 class StringSink final : public OutputSink {
 public:
-    [[nodiscard]] bool write(const char *data, std::size_t len) override {
+    [[nodiscard]] bool write(const char *data, std::size_t len) noexcept override {
         if (!data && len > 0) {
             return false;
         }
@@ -28,7 +28,7 @@ public:
         return true;
     }
 
-    void reset() override { output.clear(); }
+    void reset() noexcept override { output.clear(); }
 
     std::string output;
 };

@@ -142,11 +142,6 @@ bool is_forbidden_request_stream_frame(std::uint64_t type) noexcept {
     return false;
 }
 
-bool response_must_not_have_body(const HttpExchange &exchange, int status_code) noexcept {
-    return exchange.method() == HttpMethod::Head || (status_code >= 100 && status_code < 200) || status_code == 204 ||
-           status_code == 304;
-}
-
 // RFC 9114 section 4.4: only a 2xx answering CONNECT turns the stream into a tunnel.
 bool response_opens_tunnel(const HttpExchange &exchange, int status_code) noexcept {
     return exchange.method() == HttpMethod::Connect && status_code >= 200 && status_code < 300;
@@ -1271,11 +1266,7 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
                 (header.end_stream || !response_opens_tunnel(exchange, header.status_code))) {
                 co_return std::unexpected(common::IoErr::Invalid);
             }
-            if (response_must_not_have_body(exchange, header.status_code)) {
-                if (!header.end_stream || final_body_spec.is_stream() ||
-                    (final_body_spec.is_content_length() && final_body_spec.content_length() != 0)) {
-                    co_return std::unexpected(common::IoErr::Invalid);
-                }
+            if (!final_body_spec.is_raw() && !exchange.response_has_body(header.status_code)) {
                 final_body_spec = HttpBodySpec::None();
             } else {
                 if (final_body_spec.is_none()) {

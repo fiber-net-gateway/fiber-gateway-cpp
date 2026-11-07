@@ -7,33 +7,63 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace fiber::json {
 
 class OutputSink {
 public:
     virtual ~OutputSink() = default;
-    [[nodiscard]] virtual bool write(const char *data, size_t len) = 0;
-    virtual void reset() {}
+    [[nodiscard]] virtual bool write(const char *data, size_t len) noexcept = 0;
+    virtual void reset() noexcept {}
 };
 
 class CallbackSink final : public OutputSink {
 public:
-    using PrintCallback = int (*)(void *ctx, const char *str, size_t len);
+    using PrintCallback = int (*)(void *ctx, const char *str, size_t len) noexcept;
 
-    CallbackSink(PrintCallback cb, void *ctx);
-    [[nodiscard]] bool write(const char *data, size_t len) override;
+    CallbackSink(PrintCallback cb, void *ctx) noexcept;
+    [[nodiscard]] bool write(const char *data, size_t len) noexcept override;
 
 private:
     PrintCallback callback_;
     void *ctx_;
 };
 
+// Appends to a caller-owned std::string. An allocation failure fails the write, so the
+// generator stops with ErrorState; out_of_memory() tells that apart from an encoding error.
+class StringSink final : public OutputSink {
+public:
+    explicit StringSink(std::string &out) noexcept : out_(out) {}
+    [[nodiscard]] bool write(const char *data, size_t len) noexcept override;
+    [[nodiscard]] bool out_of_memory() const noexcept { return out_of_memory_; }
+
+private:
+    std::string &out_;
+    bool out_of_memory_ = false;
+};
+
 class Generator {
 public:
-    using StringChunkProducer = bool (*)(void *ctx, const char *&data, size_t &len, bool &done) noexcept;
+    // Nesting bound: at most MAX_STACK - 1 containers can be open at once.
+    static constexpr size_t MAX_STACK = 128;
 
-    enum class State { Start, MapStart, MapKey, MapValue, ArrayStart, InArray, Complete, Error };
+    enum class State {
+        Start,
+        MapStart,
+        MapKey,
+        MapValue,
+        ArrayStart,
+        InArray,
+        Complete,
+        Error,
+        // Between string_begin() and string_end().
+        InKeyString,
+        InValueString,
+        // Between binary_begin() and binary_end(); InBinaryTail once a piece has closed the base64 groups.
+        InBinary,
+        InBinaryTail
+    };
     enum class Result {
         /** no error */
         OK = 0,
@@ -81,56 +111,71 @@ public:
         EscapeSolidus = 0x10
     };
 
-    explicit Generator(OutputSink &sink);
+    explicit Generator(OutputSink &sink) noexcept;
     Generator(const Generator &) = delete;
     Generator &operator=(const Generator &) = delete;
     Generator(Generator &&) = delete;
     Generator &operator=(Generator &&) = delete;
 
-    void clear();
-    void set_option(Option opt, bool enabled = true);
-    void set_indent_string(const std::string &indent);
+    void clear() noexcept;
+    void set_option(Option opt, bool enabled = true) noexcept;
+    // Returns false, keeping the current indent, when the copy cannot be allocated.
+    [[nodiscard]] bool set_indent_string(std::string_view indent) noexcept;
 
-    [[nodiscard]] State get_state() const;
+    [[nodiscard]] State get_state() const noexcept;
+    // Total bytes given to the sink since construction or clear().
+    [[nodiscard]] size_t bytes_written() const noexcept { return bytes_written_; }
 
-    Result map_open();
-    Result map_close();
-    Result array_open();
-    Result array_close();
+    Result map_open() noexcept;
+    Result map_close() noexcept;
+    Result array_open() noexcept;
+    Result array_close() noexcept;
 
-    Result string(const char *str, size_t len);
-    Result string(const std::string &str);
-    Result string_from_chunks(StringChunkProducer producer, void *ctx);
+    Result string(const char *str, size_t len) noexcept;
+    Result string(const std::string &str) noexcept;
+    // One string written in pieces, so a caller can stop between them. Works as a value or a map
+    // key, like string(). Anything else called before string_end() is an error. With ValidateUtf8
+    // each piece is validated alone, so pieces must split on code point boundaries.
+    Result string_begin() noexcept;
+    Result string_append(const char *str, size_t len) noexcept;
+    Result string_end() noexcept;
     // Binary values are encoded as base64 JSON strings.
-    Result binary(const std::uint8_t *data, size_t len);
-    Result integer(int64_t value);
-    Result double_value(double value);
-    Result bool_value(bool value);
-    Result null_value();
+    Result binary(const std::uint8_t *data, size_t len) noexcept;
+    // One binary value written in pieces. Every piece but the last must be a multiple of 3 bytes,
+    // because a shorter group is padded; appending after such a piece is an error.
+    Result binary_begin() noexcept;
+    Result binary_append(const std::uint8_t *data, size_t len) noexcept;
+    Result binary_end() noexcept;
+    Result integer(int64_t value) noexcept;
+    Result double_value(double value) noexcept;
+    Result bool_value(bool value) noexcept;
+    Result null_value() noexcept;
 
 
 private:
-    static constexpr size_t MAX_STACK = 128;
-
-    [[nodiscard]] bool has_option(Option opt) const;
-    [[nodiscard]] Result append(const char *data, size_t len);
-    [[nodiscard]] Result append(char ch);
-    [[nodiscard]] Result append_indent(size_t level);
-    [[nodiscard]] Result prefix_for_value();
-    [[nodiscard]] Result prefix_for_key();
-    [[nodiscard]] Result write_string(const char *str, size_t len);
-    [[nodiscard]] Result write_string_content(const char *str, size_t len);
-    [[nodiscard]] Result write_string_from_chunks(StringChunkProducer producer, void *ctx);
-    [[nodiscard]] Result finish_value();
-    [[nodiscard]] Result push(State state);
-    [[nodiscard]] Result pop();
-    [[nodiscard]] Result set_error(Result result);
-    [[nodiscard]] State &current_state();
-    [[nodiscard]] const State &current_state() const;
+    [[nodiscard]] bool has_option(Option opt) const noexcept;
+    [[nodiscard]] Result append(const char *data, size_t len) noexcept;
+    [[nodiscard]] Result append(char ch) noexcept;
+    [[nodiscard]] Result append_indent(size_t level) noexcept;
+    [[nodiscard]] Result prefix_for_value() noexcept;
+    [[nodiscard]] Result prefix_for_key() noexcept;
+    [[nodiscard]] Result write_string(const char *str, size_t len) noexcept;
+    [[nodiscard]] Result write_string_content(const char *str, size_t len) noexcept;
+    [[nodiscard]] Result write_escape(unsigned char ch) noexcept;
+    [[nodiscard]] Result finish_key() noexcept;
+    [[nodiscard]] Result finish_value() noexcept;
+    [[nodiscard]] Result push(State state) noexcept;
+    [[nodiscard]] Result pop() noexcept;
+    void enter_piece(State state) noexcept;
+    [[nodiscard]] Result set_error(Result result) noexcept;
+    [[nodiscard]] State &current_state() noexcept;
+    [[nodiscard]] const State &current_state() const noexcept;
 
     OutputSink &sink_;
-    State state_stack_[MAX_STACK] = {};
+    // One slot past the container bound, for the piece state of an open string or binary.
+    State state_stack_[MAX_STACK + 1] = {};
     size_t depth_ = 1;
+    size_t bytes_written_ = 0;
     uint32_t options_ = 0;
     std::string indent_string_ = "    ";
 };

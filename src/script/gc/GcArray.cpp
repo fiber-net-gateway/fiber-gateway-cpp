@@ -40,6 +40,28 @@ GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len)
     return bin;
 }
 
+// Two-phase companion to gc_new_binary (mirrors gc_new_string_wtf8_uninit): the
+// caller fills bin->data afterwards. len == 0 yields a data-less binary.
+GcBinary *gc_new_binary_uninit(GcHeap *heap, std::size_t len) noexcept {
+    FIBER_ASSERT(heap->no_gc_active());
+    auto *hdr = gc_alloc_raw(heap, sizeof(GcBinary), GcHeapKind::Binary);
+    if (!hdr) {
+        return nullptr;
+    }
+    auto *bin = reinterpret_cast<GcBinary *>(hdr);
+    bin->len = len;
+    bin->data = nullptr;
+    if (len > 0) {
+        bin->data = static_cast<std::uint8_t *>(gc_alloc_extra(heap, len));
+        if (!bin->data) {
+            gc_free_storage(heap, bin, sizeof(GcBinary));
+            return nullptr;
+        }
+    }
+    gc_link(heap, hdr);
+    return bin;
+}
+
 GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {
     FIBER_ASSERT(heap->no_gc_active());
     auto *hdr = gc_alloc_raw(heap, sizeof(GcArray), GcHeapKind::Array);

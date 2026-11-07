@@ -759,8 +759,8 @@ function JSON.parse(text: string): ScriptValue;
 function JSON.stringify(value: ScriptValue): string | undefined;
 ```
 
-- 参数/返回：顶层 `undefined` 原样返回 `undefined`；顶层 `NaN`/正负无穷返回字符串 `"null"`；其他值返回紧凑 JSON。嵌套 `undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 字符串，异常值编码为含 `position`、`name`、`message`、`meta` 的对象，普通对象按插入顺序输出。
-- 异常：无效字符串、嵌套非有限数字、迭代器或其他无法编码的值抛 `TypeError`。
+- 参数/返回：顶层 `undefined` 原样返回 `undefined`；其他值返回紧凑 JSON。`NaN`、`Infinity`、`-Infinity` 不论是否嵌套，都编码为同名的 JSON 字符串（JS 编码为 `null`，这里不同）。嵌套 `undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 字符串，异常值编码为含 `position`、`name`、`message`、`meta` 的对象，普通对象按插入顺序输出。
+- 异常：无效字符串、迭代器或其他无法编码的值抛 `TypeError`。
 - 副作用：无。
 
 ### 5.8 对象函数
@@ -937,15 +937,15 @@ declare namespace req {
 
 - 参数：无；异步函数。
 - 返回：读取完整请求体并构造对应 `ScriptValue`。
-- 异常：空请求体、body 读取失败或非法 JSON 分别抛出带固定消息的 `Error`；解析错误的具体 offset 不会暴露给脚本。
-- 副作用：消费请求体，并把完整 body 和解码结果置于内存；函数自身不限制大小。
+- 异常：文档超出宿主配置的堆上限时，抛名为 `OutOfMemory` 的可捕获异常；空请求体、body 已被消费、body 读取失败或非法 JSON 分别抛出带固定消息的 `Error`；解析错误的具体 offset 不会暴露给脚本。
+- 副作用：消费请求体，边接收边解码，内存里只保留解码结果，它计入宿主配置的堆上限；即使被拒绝或内容非法，body 也会读到结尾。
 
 #### `req.readBinary()`
 
 - 参数：无；异步函数。
 - 返回：包含完整请求体的新 `Binary`；空 body 返回长度为 0 的 `Binary`。
-- 异常：读取失败抛 `Error`；分配失败为 `OutOfMemory` abort。
-- 副作用：消费请求体，并把完整 body 连续化到内存；函数自身不限制大小。
+- 异常：body 超出宿主配置的堆上限时，抛名为 `OutOfMemory` 的可捕获异常；body 已被消费或读取失败抛 `Error`；分配失败为 `OutOfMemory` abort。
+- 副作用：消费请求体，并把完整 body 连续化到内存，上限由宿主配置的堆上限决定。被拒绝的 body 会先读完并丢弃（客户端还在等 `Expect: 100-continue` 时除外），这样脚本可以从确定的状态继续执行。
 
 #### `req.discardBody()`
 
@@ -954,7 +954,7 @@ declare namespace req {
 - 异常：当前会忽略底层排空错误，不抛可捕获异常；缺少 context 为 `InvalidState` abort。
 - 副作用：消费并丢弃剩余请求体。
 
-请求体是一次性的流式资源。不要把这三个函数相互组合，也不要先读取 body 再调用会转发入站 body 的 `service.proxyPass()`。公网服务还应在 HTTP 层设置请求体大小限制。
+请求体是一次性的流式资源。这三个函数或 `service.proxyPass()` 中任何一个开始处理它之后，`readJson()`、`readBinary()` 以及需要转发它的 `proxyPass()` 都会抛 `Error`，即使第一次失败了也一样；`discardBody()` 此时什么也不做。读取和丢弃 body 时，60 秒没有进展就会放弃。公网服务还应在 HTTP 层设置请求体大小限制。
 
 ### 6.2 响应函数 `resp.*`
 
@@ -1008,9 +1008,12 @@ declare namespace resp {
 #### `resp.sendJson(status, body)`
 
 - 参数：异步函数。`status` 只有整数才生效，其他类型回退为 200；`body` 接受任意可 JSON 编码的脚本值。
-- 返回：发送成功为 `null`。`undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 字符串，异常值编码为包含 `position`、`name`、`message` 和 `meta` 的对象。
-- 异常：非法字符串、非有限浮点数、迭代器等编码失败，或 header/body I/O 失败时抛 `Error`。
-- 副作用：把 `Content-Type` 替换为 `application/json`，提交全部 pending headers，以固定 Content-Length 写出 body 并结束响应流。
+- 返回：发送成功为 `null`。`undefined` 编码为 JSON `null`，`NaN`、`Infinity`、`-Infinity` 编码为同名的 JSON 字符串，`Binary` 编码为 Base64 字符串，异常值编码为包含 `position`、`name`、`message` 和 `meta` 的对象；内置错误（如 `1 / 0` 的 `RangeError`）没有这些细节，`position` 为 -1，`message` 和 `meta` 为 `null`。
+- 异常：非法字符串、迭代器等编码失败，或 header/body I/O 失败时抛 `Error`。
+- 副作用：把 `Content-Type` 替换为 `application/json`，提交全部 pending headers，写出 body 并结束响应流。
+- 无内容的响应：HEAD 请求和状态码 204、304 只发送 header，body 被丢弃。HEAD 的响应头与 GET 相同：编码结果在 64 KiB 以内时，HTTP/1 带上相同的 Content-Length，编码失败也和 GET 一样抛 `Error`；超过后不再编码其余部分，也不带 Content-Length，所以其中无法编码的值不会被发现。204 和 304 不带 Content-Length。`resp.send()` 同样如此。
+- 大响应：编码结果在 64 KiB 以内时，以固定 Content-Length 发送。超过后每编码约 64 KiB 发送一次，不带 Content-Length：HTTP/1.1 使用 chunked，HTTP/1.0 以关闭连接结束，HTTP/2 和 HTTP/3 以流结束。
+- 中途失败：在已经发送部分 body 之后才遇到无法编码的值时，状态码无法再更改，响应会被中断：HTTP/1 关闭连接，HTTP/2 和 HTTP/3 重置流。客户端只收到 JSON 的前半部分，而 HTTP/1.0 客户端无法把这种情况与正常结束区分开。异常仍可被 `catch`，但不能再发送其他响应。
 
 #### `resp.send(status)`
 
@@ -1174,7 +1177,7 @@ body 编码和自动 Content-Type：
 | 对象，且显式 Content-Type 值包含小写子串 `application/x-www-form-urlencoded` | form-urlencoded | 已有值保持不变 |
 | 其他对象、数组、数字或布尔值 | JSON | `application/json;charset=utf-8` |
 
-Content-Type 子串判断当前区分大小写。JSON/form 编码得到空 body 时按无 body 发送；当前实现的 JSON 编码失败也会退化成无 body，而不是抛异常，因此不要把迭代器、非法字符串或非有限数字作为 request body。
+Content-Type 子串判断当前区分大小写。JSON/form 编码得到空 body 时按无 body 发送；当前实现的 JSON 编码失败也会退化成无 body，而不是抛异常，因此不要把迭代器或非法字符串作为 request body。
 
 - 返回：成功后返回新对象 `{status, body}`；`status` 是最终非 1xx 上游状态，`body` 是完整响应字节的 `Binary`。只有 `includeHeaders === true` 时才有 `headers` 对象；完全相同的重复响应头键以后值覆盖前值。
 - 异常/中止：完整 URL 写入 `options.url`，或连接池获取、DNS/连接、header/body 写入、响应读取/超时失败时抛 `Error`。缺少 services 为 `InvalidState` abort，结果分配失败为 `OutOfMemory` abort。
@@ -1210,7 +1213,7 @@ interface HttpService {
 | `query` | 非空字符串原样替换；对象按 form-urlencoded 替换（空对象会删除入站 query）；其他类型和空字符串继承入站 query |
 | `headers` | 对复制后的上游请求头执行设置/删除；值转换规则与 `request()` 相同。处理完后再次删除请求 framing headers |
 | `responseHeaders` | 对过滤后的下游响应头执行设置/删除；值转换规则与 `headers` 相同 |
-| `timeout` | 只有正整数生效，单位毫秒，默认 30000；用于上游获取、连接、读写和普通响应读取 |
+| `timeout` | 只有正整数生效，单位毫秒，默认 30000；用于上游获取、连接和读写。读取请求 body 和响应 body 时，等待时长取它和 60 秒中较大的值，按没有进展的时间计算。向客户端写响应 body 时固定等待 30 秒 |
 | `flush` | 只有布尔 `true` 启用低延迟 body pipe，默认 `false` |
 | `websocket` | 只有布尔 `true` 启用 WebSocket 代理，默认 `false` |
 

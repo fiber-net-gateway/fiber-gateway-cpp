@@ -7,6 +7,7 @@
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
 #include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/std/OomGuard.h>
 
 #include <openssl/evp.h>
 
@@ -30,16 +31,19 @@ bool digest(const EVP_MD *md, const std::uint8_t *data, std::size_t len, std::ui
 // ---- hash.crc32 ----
 
 AbiResult crc32_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
-    if (!args.args || args.argc < 1) {
-        // No value: Java's asText(null) on missing -> empty -> 0.
-        return AbiResult::success(JsValue::make_integer(0));
-    }
-    std::string text;
-    node_as_text(args.args[0], text);
-    if (text.empty()) {
-        return AbiResult::success(JsValue::make_integer(0));
-    }
-    return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(fiber::util::Crc32::compute(text))));
+    // Staging string throws on OOM; the guard maps it to a graceful abort.
+    return oom_guard([&] {
+        if (!args.args || args.argc < 1) {
+            // No value: Java's asText(null) on missing -> empty -> 0.
+            return AbiResult::success(JsValue::make_integer(0));
+        }
+        std::string text;
+        node_as_text(args.args[0], text);
+        if (text.empty()) {
+            return AbiResult::success(JsValue::make_integer(0));
+        }
+        return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(fiber::util::Crc32::compute(text))));
+    });
 }
 
 // ---- hash.md5 / sha1 / sha256 ----

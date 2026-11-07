@@ -162,12 +162,15 @@ send_plain_response(fiber::http::HttpExchange &exchange, fiber::http::HttpRespon
 //   Abort      -> 500 + JSON {"error": "<AbortReason>"}
 // path_vars are the route captures for this request (name/value pairs borrowing the matcher
 // text and request path buffer).
-fiber::async::Task<void>
-run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter response, fiber::script::Script &script,
-           const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-           fiber::http_script::HttpScriptServices *services, const logging::RequestLogContext &log_context,
-           fiber::http_script::ScriptRequestBody request_body, const RequestBodyLimiter &body_limiter) {
+fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter response,
+                                    fiber::script::Script &script,
+                                    const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+                                    fiber::http_script::HttpScriptServices *services,
+                                    const logging::RequestLogContext &log_context,
+                                    fiber::http_script::ScriptRequestBody request_body,
+                                    const RequestBodyLimiter &body_limiter, std::size_t max_heap_bytes) {
     fiber::script::GcHeap heap;
+    heap.set_max_bytes(max_heap_bytes);
     fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection, request_body, response};
     ctx.set_path_vars(path_vars);
     ctx.set_services(services);
@@ -190,20 +193,21 @@ run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter 
     using fiber::script::JsNodeType;
     using fiber::script::ScriptResultKind;
 
+    fiber::common::IoResult<void> written;
     switch (result.kind) {
         case ScriptResultKind::Void: {
             co_await ctx.write_empty(204);
             break;
         }
         case ScriptResultKind::Value: {
-            co_await ctx.write_json(200, result.value());
+            written = co_await ctx.write_json(200, result.value());
             break;
         }
         case ScriptResultKind::Exception: {
             const fiber::script::JsValue &exc = result.exception();
             if (js_value_is_heap_ref(exc) && js_value_type(exc) == JsNodeType::Exception) {
                 LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script exception kind=heap";
-                co_await ctx.write_json(500, exc);
+                written = co_await ctx.write_json(500, exc);
             } else {
                 LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script exception kind="
                                        << fiber::script::exception_kind_name(js_value_exception_kind(exc));
@@ -217,6 +221,14 @@ run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter 
             co_await ctx.write_error_json(500, fiber::script::abort_reason_name(result.abort().reason));
             break;
         }
+    }
+    // A value that cannot be encoded sends nothing, and the client still needs an answer.
+    if (!written && !ctx.response_header_sent()) {
+        LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script result cannot be encoded";
+        co_await ctx.write_error_json(
+                500, written.error() == fiber::common::IoErr::NoMem
+                             ? fiber::script::abort_reason_name(fiber::script::ScriptAbortReason::OutOfMemory)
+                             : fiber::script::exception_kind_name(fiber::script::ExceptionKind::TypeError));
     }
     co_return;
 }
@@ -413,7 +425,8 @@ private:
         if (location.script) {
             assert(location.const_package != nullptr);
             co_await run_script(exchange, response_scope.writer(), *location.script, log_context.path_vars,
-                                script_services_, log_context, request_body, body_limiter);
+                                script_services_, log_context, request_body, body_limiter,
+                                location.script_max_heap_size);
         } else {
             co_await proxy_.handle(exchange, response_scope.writer(), request_body.pipe_reader(), listener, location,
                                    log_context.path_vars, script_services_, log_context);

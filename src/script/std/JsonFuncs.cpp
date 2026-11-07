@@ -12,7 +12,6 @@
 #include <fiber/script/json/JsValueDecode.h>
 #include <fiber/script/json/JsValueEncode.h>
 
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -22,20 +21,6 @@
 namespace fiber::script::std_lib {
 
 namespace {
-
-// Writes generated JSON into a std::string buffer. Mirrors the StringSink used by
-// http_script/ScriptExchangeCtx and the JsValueEncode tests.
-class StringSink final : public fiber::json::OutputSink {
-public:
-    explicit StringSink(std::string &out) noexcept : out_(out) {}
-    [[nodiscard]] bool write(const char *data, std::size_t len) noexcept override {
-        out_.append(data, len);
-        return true;
-    }
-
-private:
-    std::string &out_;
-};
 
 // Materializes a view as a heap String result, mapping make_string's OOM (returns
 // undefined) to a graceful abort. Mirrors StringsFuncs' make_string_result.
@@ -80,10 +65,15 @@ AbiResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Lib
         data = "";
     }
 
+    // The decode cannot collect once it starts, so make what room garbage is taking first.
+    (void) heap.ensure_can_alloc(text.size());
     fiber::json::ParseError error{};
     fiber::json::DecodeStatus status = fiber::script::json::decode_js_value(heap, data, text.size(), out, &error);
     if (status == fiber::json::DecodeStatus::Complete || status == fiber::json::DecodeStatus::Ok) {
         return AbiResult::success(*out);
+    }
+    if (error.out_of_memory) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
 
     // Parse failure: build a catchable SyntaxError with the decoder's message/offset.
@@ -101,34 +91,27 @@ AbiResult parse_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Lib
 
 // ---- JSON.stringify(value) ----
 // Serializes value to a JSON text string via the Generator + encode_js_value bridge
-// (mirrors Jackson's writeValueAsString). Top-level undefined -> returns undefined
-// (matches JS); top-level NaN/+/-Inf -> "null" (matches JS; the Generator rejects
-// non-finite doubles, which would otherwise surface as an encode failure). Any other
-// encode failure (InvalidValue/InvalidString/MaxDepthExceeded) raises a catchable
+// (mirrors Jackson's writeValueAsString, including "NaN", "Infinity" and "-Infinity" as
+// strings for non-finite numbers). Top-level undefined -> returns undefined (matches JS).
+// Any encode failure (InvalidValue/InvalidString/MaxDepthExceeded) raises a catchable
 // TypeError. OOM on the result string aborts.
 
 AbiResult stringify_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     GcHeap &heap = frame.runtime;
 
     JsValue value = (args.args && args.argc >= 1) ? args.args[0] : JsValue::make_undefined();
-    JsNodeType type = js_value_type(value);
 
-    if (type == JsNodeType::Undefined) {
+    if (js_value_type(value) == JsNodeType::Undefined) {
         return AbiResult::success(JsValue::make_undefined());
     }
 
-    if (type == JsNodeType::Float) {
-        double d = js_value_double(value);
-        if (std::isnan(d) || std::isinf(d)) {
-            // Matches JS JSON.stringify: NaN/Infinity serialize as "null".
-            return make_string_result(heap, std::string_view("null", 4));
-        }
-    }
-
     std::string out;
-    StringSink sink(out);
+    fiber::json::StringSink sink(out);
     fiber::json::Generator gen(sink);
     fiber::json::Generator::Result result = fiber::script::json::encode_js_value(gen, value);
+    if (sink.out_of_memory()) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
     if (result != fiber::json::Generator::Result::OK) {
         return AbiResult::exception(JsValue::make_exception(ExceptionKind::TypeError));
     }

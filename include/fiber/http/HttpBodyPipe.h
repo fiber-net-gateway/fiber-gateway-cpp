@@ -15,6 +15,8 @@ namespace fiber::http {
 inline constexpr std::size_t kDefaultBodyPipeBufferSize = static_cast<const std::size_t>(64 * 1024);
 inline constexpr std::size_t kDefaultBodyPipeLowWater = static_cast<const std::size_t>(48 * 1024);
 inline constexpr std::size_t kUnbufferedBodyPipeLowWater = 0;
+inline constexpr std::size_t kDefaultBodyCoalesceRatio = 8;
+inline constexpr std::size_t kBodyCoalesceCapacity = static_cast<std::size_t>(16 * 1024) - mem::kIoBufControlBlockSize;
 
 struct HttpBodyPipeOptions {
     std::size_t buffer_size = kDefaultBodyPipeBufferSize;
@@ -135,6 +137,19 @@ HttpBodyPipeWriter make_http_body_pipe_writer(T &sink) noexcept {
             },
     };
 }
+
+// Appends src to dst for callers holding reads across a slow source. Sources hand each read
+// over in the buffer it was received into, sized by the read's max_bytes rather than by what
+// arrived, so aggregating trickled reads node for node would pin one read-sized block per few
+// bytes (~400 MB for 5-byte reads under the 48 KiB default low water). A node using at most
+// 1/ratio of its capacity is therefore copied into spare room at dst's tail instead. So is a
+// node that small next to a coalesce buffer, however exactly sized: kept, it would end the run
+// and send the next sparse read to a fresh coalesce buffer. Every node left zero-copy then
+// fills 1/ratio of both its own storage and any coalesce buffer opened after it, keeping
+// pinned storage within 2 * ratio of the held bytes plus one coalesce buffer. Returns false,
+// leaving src untouched, when dst is already complete.
+bool append_coalescing(mem::IoBufChain &dst, mem::IoBufChain &&src, std::size_t coalesce_capacity,
+                       std::size_t ratio = kDefaultBodyCoalesceRatio) noexcept;
 
 // Each sink write may accept a prefix. Success requires end of input, all
 // buffered bytes accepted by the sink, and the completion marker consumed.

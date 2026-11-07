@@ -29,10 +29,12 @@
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -57,6 +59,9 @@ using namespace fiber::http::proxy_core;
 namespace {
 
 constexpr std::chrono::milliseconds kDefaultTimeout{30000};
+// How long a client may leave a proxied response body write waiting. Fixed rather than taken from
+// the script's timeout, which describes the upstream.
+constexpr std::chrono::milliseconds kResponseBodyWriteTimeout{30000};
 
 // Budgets against a hostile upstream: the buffered response body is capped
 // (options.maxResponseSize overrides the default) and only a bounded run of
@@ -305,26 +310,25 @@ void apply_options_response_headers(GcHeap &heap, const JsValue &options, fiber:
     }
 }
 
+enum class JsonBodyStatus : std::uint8_t { Encoded, Invalid, OutOfMemory };
+
 // Serializes a JsValue body to JSON bytes.
-bool json_encode_value(const JsValue &body, std::string &out) noexcept {
-    struct StringSink final : public fiber::json::OutputSink {
-        explicit StringSink(std::string &o) noexcept : out(o) {}
-        bool write(const char *data, std::size_t len) noexcept override {
-            out.append(data, len);
-            return true;
-        }
-        std::string &out;
-    };
-    StringSink sink(out);
+JsonBodyStatus json_encode_value(const JsValue &body, std::string &out) noexcept {
+    fiber::json::StringSink sink(out);
     fiber::json::Generator gen(sink);
-    return fiber::script::json::encode_js_value(gen, body) == fiber::json::Generator::Result::OK ||
-           fiber::script::json::encode_js_value(gen, body) == fiber::json::Generator::Result::GenerateComplete;
+    const fiber::json::Generator::Result result = fiber::script::json::encode_js_value(gen, body);
+    if (result == fiber::json::Generator::Result::OK || result == fiber::json::Generator::Result::GenerateComplete) {
+        return JsonBodyStatus::Encoded;
+    }
+    return sink.out_of_memory() ? JsonBodyStatus::OutOfMemory : JsonBodyStatus::Invalid;
 }
 
 // Resolves options.body to bytes + sets content-type when unset. Returns the body framing;
-// end_stream=true when there is no body (send_header can close the request).
-fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &options, fiber::http::HttpHeaders &headers,
-                                             std::string &body_bytes, bool &end_stream) noexcept {
+// end_stream=true when there is no body (send_header can close the request). nullopt means
+// the JSON body could not be allocated: the request must not go out without it.
+std::optional<fiber::http::HttpBodySpec> build_request_body(GcHeap &heap, const JsValue &options,
+                                                            fiber::http::HttpHeaders &headers, std::string &body_bytes,
+                                                            bool &end_stream) noexcept {
     JsValue body = get_field(heap, options, "body", 4);
     end_stream = true;
     const JsNodeType bt = js_value_type(body);
@@ -367,7 +371,11 @@ fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &option
                 return fiber::http::HttpBodySpec::None();
             }
         } else {
-            if (!json_encode_value(body, body_bytes)) {
+            const JsonBodyStatus status = json_encode_value(body, body_bytes);
+            if (status == JsonBodyStatus::OutOfMemory) {
+                return std::nullopt;
+            }
+            if (status == JsonBodyStatus::Invalid) {
                 return fiber::http::HttpBodySpec::None();
             }
             if (!has_ct) {
@@ -376,7 +384,11 @@ fiber::http::HttpBodySpec build_request_body(GcHeap &heap, const JsValue &option
         }
     } else {
         // number / boolean / array -> JSON
-        if (!json_encode_value(body, body_bytes)) {
+        const JsonBodyStatus status = json_encode_value(body, body_bytes);
+        if (status == JsonBodyStatus::OutOfMemory) {
+            return std::nullopt;
+        }
+        if (status == JsonBodyStatus::Invalid) {
             return fiber::http::HttpBodySpec::None();
         }
         if (!has_ct) {
@@ -553,7 +565,11 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
 
     std::string body_bytes;
     bool end_stream = true;
-    const fiber::http::HttpBodySpec body_spec = build_request_body(*heap, options, req_headers, body_bytes, end_stream);
+    const std::optional<fiber::http::HttpBodySpec> body_spec =
+            build_request_body(*heap, options, req_headers, body_bytes, end_stream);
+    if (!body_spec) {
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
 
     const std::string method_str = std::string(field_string(*heap, options, "method", 6));
     const fiber::http::HttpMethod method = method_str.empty()
@@ -566,7 +582,7 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
     head.method = method;
     head.target = target;
     head.headers = &req_headers;
-    head.body = body_spec;
+    head.body = *body_spec;
 
     auto send_result = co_await upstream.send_header(head, end_stream, timeout);
     if (!send_result) {
@@ -751,6 +767,10 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     if (websocket.active()) {
         req_end_stream = true;
     }
+    // Announcing a body that can no longer be sent would leave the upstream waiting for it.
+    if (!req_end_stream && ctx->request_body_consumed()) {
+        co_return error_exn(*heap, "http.proxyPass: request body already consumed");
+    }
 
     fiber::http::Http1RequestHead head;
     head.method = method;
@@ -769,10 +789,15 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     if (!send_result) {
         co_return error_exn(*heap, "http.proxyPass: send request header failed");
     }
+    // A body may pause for longer than it takes to reach the upstream, so a short timeout does
+    // not bound it, in either direction.
+    const std::chrono::milliseconds body_timeout = std::max(timeout, kBodyIdleTimeout);
+
     if (!req_end_stream) {
+        ctx->mark_request_body_consumed();
         const ScriptRequestBody request_body = ctx->request_body();
         for (;;) {
-            auto body_result = co_await request_body.read(kBodyChunkSize);
+            auto body_result = co_await request_body.read(kBodyChunkSize, body_timeout);
             if (!body_result) {
                 (void) upstream.abort(body_result.error());
                 co_return error_exn(*heap, "http.proxyPass: read request body failed");
@@ -882,8 +907,8 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     const fiber::http::HttpBodyPipeOptions pipe_options{
             .buffer_size = fiber::http::kDefaultBodyPipeBufferSize,
             .low_water = flush ? fiber::http::kUnbufferedBodyPipeLowWater : fiber::http::kDefaultBodyPipeLowWater,
-            .read_timeout = timeout,
-            .write_timeout = std::chrono::milliseconds::max(),
+            .read_timeout = body_timeout,
+            .write_timeout = kResponseBodyWriteTimeout,
     };
     auto pipe_result = co_await fiber::http::pipe_http_body(
             fiber::http::make_http_body_pipe_reader(upstream),

@@ -6,9 +6,13 @@
 #include <fiber/script/Library.h>
 #include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/std/NodeText.h>
+#include <fiber/script/std/OomGuard.h>
 
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/BufPool.h>
 #include <fiber/common/util/UrlForm.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -97,7 +101,9 @@ struct QueryPairSource {
     std::size_t arr_idx;
     std::string key_buf;
 
-    bool operator()(std::string &key, std::string &value) noexcept {
+    // Not noexcept: key_buf/value staging throws on OOM, and an inner noexcept
+    // boundary would terminate before url_build_query_fn's oom_guard can map it.
+    bool operator()(std::string &key, std::string &value) {
         for (;;) {
             if (arr != nullptr) {
                 if (arr_idx < arr->size) {
@@ -138,43 +144,49 @@ struct QueryPairSource {
 
 AbiResult url_encode_component_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
                                   Library::Arguments args) noexcept {
-    if (!args.args || args.argc < 1) {
-        return type_error();
-    }
-    std::string_view input;
-    if (!string_utf8_view(args.args[0], input)) {
-        return type_error();
-    }
-    std::string out;
-    fiber::util::form_encode(input, out);
-    JsValue result = JsValue::make_string(frame.runtime, out.data(), out.size());
-    if (js_value_type(result) != JsNodeType::String) {
-        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
-    }
-    return AbiResult::success(result);
+    // Staging string throws on OOM; the guard maps it to a graceful abort.
+    return oom_guard([&] {
+        if (!args.args || args.argc < 1) {
+            return type_error();
+        }
+        std::string_view input;
+        if (!string_utf8_view(args.args[0], input)) {
+            return type_error();
+        }
+        std::string out;
+        fiber::util::form_encode(input, out);
+        JsValue result = JsValue::make_string(frame.runtime, out.data(), out.size());
+        if (js_value_type(result) != JsNodeType::String) {
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+        }
+        return AbiResult::success(result);
+    });
 }
 
 // ---- URL.decodeComponent(value) ----
 
 AbiResult url_decode_component_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
                                   Library::Arguments args) noexcept {
-    if (!args.args || args.argc < 1) {
-        return type_error();
-    }
-    std::string_view input;
-    if (!string_utf8_view(args.args[0], input)) {
-        return type_error();
-    }
-    auto decoded = fiber::util::form_decode(input);
-    if (!decoded) {
-        // Malformed percent escape (Java IllegalArgumentException).
-        return AbiResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
-    }
-    JsValue result = JsValue::make_string(frame.runtime, decoded->data(), decoded->size());
-    if (js_value_type(result) != JsNodeType::String) {
-        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
-    }
-    return AbiResult::success(result);
+    // Staging string throws on OOM; the guard maps it to a graceful abort.
+    return oom_guard([&] {
+        if (!args.args || args.argc < 1) {
+            return type_error();
+        }
+        std::string_view input;
+        if (!string_utf8_view(args.args[0], input)) {
+            return type_error();
+        }
+        auto decoded = fiber::util::form_decode(input);
+        if (!decoded) {
+            // Malformed percent escape (Java IllegalArgumentException).
+            return AbiResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
+        }
+        JsValue result = JsValue::make_string(frame.runtime, decoded->data(), decoded->size());
+        if (js_value_type(result) != JsNodeType::String) {
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+        }
+        return AbiResult::success(result);
+    });
 }
 
 // ---- URL.parseQuery(value) ----
@@ -205,18 +217,14 @@ AbiResult url_parse_query_fn(void * /*userdata*/, const Library::HostCallFrame &
         return AbiResult::abort(ScriptAbortReason::OutOfMemory);
     }
 
-    bool oom = false;
-    auto io = fiber::util::form_decode_query(input, [&](std::string_view k, std::string_view v) -> bool {
-        if (!aggregate_pair(heap, obj_root, k, v)) {
-            oom = true;
-            return false;
-        }
-        return true;
-    });
-    if (oom) {
-        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
-    }
+    fiber::mem::BufPool decode_pool;
+    auto io = fiber::util::form_decode_query(
+            input, [&](std::size_t size) noexcept { return decode_pool.alloc<char>(size); },
+            [&](std::string_view k, std::string_view v) noexcept { return aggregate_pair(heap, obj_root, k, v); });
     if (!io) {
+        if (io.error() == fiber::common::IoErr::NoMem) {
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+        }
         // Malformed percent escape (Java IllegalArgumentException, caught + rethrown).
         return AbiResult::exception(JsValue::make_exception(ExceptionKind::RangeError));
     }
@@ -227,33 +235,40 @@ AbiResult url_parse_query_fn(void * /*userdata*/, const Library::HostCallFrame &
 
 AbiResult url_build_query_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
                              Library::Arguments args) noexcept {
-    // buildQuery has a default (undefined) for the optional value arg, so argc >= 1.
-    JsValue arg = (args.args && args.argc >= 1) ? args.args[0] : JsValue::make_undefined();
-    JsNodeType t = js_value_type(arg);
-    if (t == JsNodeType::Null || t == JsNodeType::Undefined) {
-        // Java: null / missing -> return the value as-is.
-        return AbiResult::success(arg);
-    }
-    if (t != JsNodeType::Object) {
-        return type_error();
-    }
-    const GcObject *obj = js_value_heap_ptr<const GcObject>(arg);
-    if (obj == nullptr) {
-        return type_error();
-    }
-    GcHeap *heap = &frame.runtime;
-    if (heap == nullptr) {
-        return AbiResult::abort(ScriptAbortReason::InvalidState);
-    }
-    QueryPairSource src{
-            .obj = obj, .entry = gc_object_first_entry(obj), .arr = nullptr, .arr_idx = 0, .key_buf = std::string{}};
-    std::string out;
-    fiber::util::form_build_query(out, src);
-    JsValue result = JsValue::make_string(*heap, out.data(), out.size());
-    if (js_value_type(result) != JsNodeType::String) {
-        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
-    }
-    return AbiResult::success(result);
+    // QueryPairSource stages key/value pairs in std::string buffers (throws on
+    // OOM; its operator() is deliberately not noexcept); the guard maps it.
+    return oom_guard([&] {
+        // buildQuery has a default (undefined) for the optional value arg, so argc >= 1.
+        JsValue arg = (args.args && args.argc >= 1) ? args.args[0] : JsValue::make_undefined();
+        JsNodeType t = js_value_type(arg);
+        if (t == JsNodeType::Null || t == JsNodeType::Undefined) {
+            // Java: null / missing -> return the value as-is.
+            return AbiResult::success(arg);
+        }
+        if (t != JsNodeType::Object) {
+            return type_error();
+        }
+        const GcObject *obj = js_value_heap_ptr<const GcObject>(arg);
+        if (obj == nullptr) {
+            return type_error();
+        }
+        GcHeap *heap = &frame.runtime;
+        if (heap == nullptr) {
+            return AbiResult::abort(ScriptAbortReason::InvalidState);
+        }
+        QueryPairSource src{.obj = obj,
+                            .entry = gc_object_first_entry(obj),
+                            .arr = nullptr,
+                            .arr_idx = 0,
+                            .key_buf = std::string{}};
+        std::string out;
+        fiber::util::form_build_query(out, src);
+        JsValue result = JsValue::make_string(*heap, out.data(), out.size());
+        if (js_value_type(result) != JsNodeType::String) {
+            return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+        }
+        return AbiResult::success(result);
+    });
 }
 
 } // namespace

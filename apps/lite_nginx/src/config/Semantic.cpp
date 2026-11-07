@@ -248,6 +248,16 @@ std::expected<std::size_t, ConfigError> parse_client_max_body_size(const Directi
     return parse_size(directive, directive.args[0], "client_max_body_size");
 }
 
+std::expected<std::size_t, ConfigError> parse_script_max_heap_size(const DirectiveNode &directive) {
+    if (directive.has_block || directive.args.size() != 1) {
+        return std::unexpected(make_error(directive, "script_max_heap_size expects exactly one size argument"));
+    }
+    if (contains_variable(directive.args[0])) {
+        return std::unexpected(make_error(directive, "script_max_heap_size does not support variables"));
+    }
+    return parse_size(directive, directive.args[0], "script_max_heap_size");
+}
+
 std::expected<unsigned, ConfigError> parse_non_negative_unsigned(const DirectiveNode &directive, std::string_view value,
                                                                  const char *field_name) {
     unsigned parsed = 0;
@@ -1236,6 +1246,7 @@ std::expected<LoggingConfig, ConfigError> parse_logging(const DirectiveNode &dir
 std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &directive,
                                                           const ProxySettingsBuilder &server_proxy_defaults,
                                                           std::size_t inherited_client_max_body_size,
+                                                          std::size_t inherited_script_max_heap_size,
                                                           const GzipSettings &inherited_gzip) {
     if (!directive.has_block) {
         return std::unexpected(make_error(directive, "location must be a block"));
@@ -1259,6 +1270,7 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     bool seen_rewrite_path = false;
     bool seen_reuse_connection = false;
     bool seen_client_max_body_size = false;
+    bool seen_script_max_heap_size = false;
 
     for (const auto &child: directive.children) {
         if (child.has_block) {
@@ -1366,6 +1378,18 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
             seen_client_max_body_size = true;
             continue;
         }
+        if (child.name == "script_max_heap_size") {
+            if (seen_script_max_heap_size) {
+                return std::unexpected(make_error(child, "script_max_heap_size must not be repeated in location"));
+            }
+            auto size = parse_script_max_heap_size(child);
+            if (!size) {
+                return std::unexpected(size.error());
+            }
+            location.script_max_heap_size = *size;
+            seen_script_max_heap_size = true;
+            continue;
+        }
         if (child.name == "access_log") {
             if (seen_access_log) {
                 return std::unexpected(make_error(child, "access_log must not be repeated in location"));
@@ -1407,11 +1431,15 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     if (!seen_client_max_body_size) {
         location.client_max_body_size = inherited_client_max_body_size;
     }
+    if (!seen_script_max_heap_size) {
+        location.script_max_heap_size = inherited_script_max_heap_size;
+    }
     return location;
 }
 
 std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &directive,
                                                       std::size_t inherited_client_max_body_size,
+                                                      std::size_t inherited_script_max_heap_size,
                                                       const GzipSettings &inherited_gzip) {
     if (!directive.has_block) {
         return std::unexpected(make_error(directive, "server must be a block"));
@@ -1429,6 +1457,7 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
     bool seen_certificate_key = false;
     bool seen_access_log = false;
     bool seen_client_max_body_size = false;
+    bool seen_script_max_heap_size = false;
 
     for (const auto &child: directive.children) {
         if (child.name == "server_name") {
@@ -1526,6 +1555,18 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
             seen_client_max_body_size = true;
             continue;
         }
+        if (child.name == "script_max_heap_size") {
+            if (seen_script_max_heap_size) {
+                return std::unexpected(make_error(child, "script_max_heap_size must not be repeated in server"));
+            }
+            auto size = parse_script_max_heap_size(child);
+            if (!size) {
+                return std::unexpected(size.error());
+            }
+            server.script_max_heap_size = *size;
+            seen_script_max_heap_size = true;
+            continue;
+        }
 
         if (child.name == "access_log") {
             if (seen_access_log) {
@@ -1559,10 +1600,14 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
     if (!seen_client_max_body_size) {
         server.client_max_body_size = inherited_client_max_body_size;
     }
+    if (!seen_script_max_heap_size) {
+        server.script_max_heap_size = inherited_script_max_heap_size;
+    }
     server.gzip = resolve_gzip_settings(gzip_settings, inherited_gzip);
 
     for (const DirectiveNode *location_directive: location_directives) {
-        auto location = parse_location(*location_directive, proxy_defaults, server.client_max_body_size, server.gzip);
+        auto location = parse_location(*location_directive, proxy_defaults, server.client_max_body_size,
+                                       server.script_max_heap_size, server.gzip);
         if (!location) {
             return std::unexpected(location.error());
         }
@@ -1686,6 +1731,7 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
     bool has_tls_listen = false;
     bool seen_access_log = false;
     bool seen_client_max_body_size = false;
+    bool seen_script_max_heap_size = false;
     GzipSettingsBuilder gzip_settings;
 
     for (const auto &child: directive.children) {
@@ -1741,6 +1787,18 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
             seen_client_max_body_size = true;
             continue;
         }
+        if (child.name == "script_max_heap_size") {
+            if (seen_script_max_heap_size) {
+                return std::unexpected(make_error(child, "script_max_heap_size must not be repeated in http"));
+            }
+            auto size = parse_script_max_heap_size(child);
+            if (!size) {
+                return std::unexpected(size.error());
+            }
+            http.script_max_heap_size = *size;
+            seen_script_max_heap_size = true;
+            continue;
+        }
         if (child.name == "server") {
             server_directives.push_back(&child);
             continue;
@@ -1764,7 +1822,7 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
 
     http.gzip = resolve_gzip_settings(gzip_settings, GzipSettings{});
     for (const DirectiveNode *server_directive: server_directives) {
-        auto server = parse_server(*server_directive, http.client_max_body_size, http.gzip);
+        auto server = parse_server(*server_directive, http.client_max_body_size, http.script_max_heap_size, http.gzip);
         if (!server) {
             return std::unexpected(server.error());
         }

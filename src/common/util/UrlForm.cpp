@@ -43,16 +43,16 @@ void form_encode(std::string_view in, std::string &out) {
     }
 }
 
-bool form_decode_into(std::string_view in, std::string &out) {
-    out.clear();
-    const std::size_t len = in.size();
-    for (std::size_t i = 0; i < len; ++i) {
+bool form_percent_decode(std::string_view in, char *dst, std::size_t &len) noexcept {
+    const std::size_t in_len = in.size();
+    std::size_t written = 0;
+    for (std::size_t i = 0; i < in_len; ++i) {
         char c = in[i];
         if (c == '+') {
-            out.push_back(' ');
+            dst[written++] = ' ';
         } else if (c == '%') {
             // Need two hex digits after '%'. Java's decodeUtf8To requires i+2 < end.
-            if (i + 2 >= len) {
+            if (i + 2 >= in_len) {
                 return false;
             }
             unsigned char hi = hex_digit(in[i + 1]);
@@ -60,16 +60,28 @@ bool form_decode_into(std::string_view in, std::string &out) {
             if (hi == 0xFF || lo == 0xFF) {
                 return false;
             }
-            out.push_back(static_cast<char>((hi << 4) | lo));
+            dst[written++] = static_cast<char>((hi << 4) | lo);
             i += 2;
         } else {
-            out.push_back(c);
+            dst[written++] = c;
         }
     }
+    len = written;
+    return true;
+}
+
+bool form_decode_into(std::string_view in, std::string &out) {
+    out.resize(in.size());
+    std::size_t len = 0;
+    if (!form_percent_decode(in, out.data(), len)) {
+        out.clear();
+        return false;
+    }
+    out.resize(len);
     // Replace malformed UTF-8 with U+FFFD so the result is storable in a GcString.
     if (!fiber::json::utf8_validate(out.data(), out.size())) {
-        std::string repaired;
-        fiber::json::utf8_repair(out, repaired);
+        std::string repaired(fiber::json::utf8_repaired_size(out), '\0');
+        fiber::json::utf8_repair_into(out, repaired.data());
         out = std::move(repaired);
     }
     return true;

@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstring>
 #include <string>
+#include <string_view>
 
 #include <fiber/common/json/JsonEncode.h>
 #include <fiber/script/gc/GcInternal.h>
@@ -24,7 +26,7 @@ namespace {
 
 class StringSink final : public OutputSink {
 public:
-    [[nodiscard]] bool write(const char *data, size_t len) override {
+    [[nodiscard]] bool write(const char *data, size_t len) noexcept override {
         if (len == 0) {
             return true;
         }
@@ -35,7 +37,7 @@ public:
         return true;
     }
 
-    void reset() override { output.clear(); }
+    void reset() noexcept override { output.clear(); }
 
     std::string output;
 };
@@ -264,4 +266,170 @@ TEST(JsValueDecodeTest, RoundTripsThroughEncoder) {
     Generator gen(sink);
     EXPECT_EQ(fiber::script::json::encode_js_value(gen, *out), Generator::Result::OK);
     EXPECT_EQ(sink.output, "{\"n\":1,\"arr\":[true,null,\"x\"]}");
+}
+
+// ---- JsValueStreamDecoder ----
+
+namespace {
+
+using fiber::script::json::JsValueStreamDecoder;
+
+constexpr std::string_view kStreamDocument =
+        "{\"text\":\"plain\",\"esc\":\"a\\n\\u00e9\\ud83d\\ude00\",\"utf8\":\"\xC3\xA9\xE4\xBD\xA0\","
+        "\"numbers\":[0,-12,1.5,2.5e-3],\"nested\":{\"list\":[[],{},[1,[2,[3]]]],"
+        "\"flags\":[true,false,null]}}";
+
+std::string to_json(const JsValue &value) {
+    std::string out;
+    fiber::json::StringSink sink(out);
+    fiber::json::Generator gen(sink);
+    EXPECT_NE(fiber::script::json::encode_js_value(gen, value), fiber::json::Generator::Result::ErrorState);
+    return out;
+}
+
+std::string whole_decode(std::string_view text) {
+    GcHeap heap;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    EXPECT_EQ(fiber::script::json::decode_js_value(heap, text.data(), text.size(), out), DecodeStatus::Complete);
+    return to_json(*out);
+}
+
+} // namespace
+
+TEST(JsValueStreamDecoderTest, MatchesAWholeDecodeAtEverySplit) {
+    const std::string expected = whole_decode(kStreamDocument);
+    for (std::size_t split = 0; split <= kStreamDocument.size(); ++split) {
+        GcHeap heap;
+        GcHeap::LocalMark mark(heap);
+        ValueHandle out = heap.local_value();
+        JsValueStreamDecoder decoder(heap, out);
+        const std::string_view head = kStreamDocument.substr(0, split);
+        const std::string_view tail = kStreamDocument.substr(split);
+        (void) decoder.feed(head.data(), head.size());
+        (void) decoder.feed(tail.data(), tail.size());
+        ASSERT_EQ(decoder.finish(), DecodeStatus::Complete) << split;
+        EXPECT_EQ(to_json(*out), expected) << split;
+    }
+}
+
+TEST(JsValueStreamDecoderTest, KeepsWhatItBuiltAcrossCollections) {
+    const std::string expected = whole_decode(kStreamDocument);
+    GcHeap heap;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    JsValueStreamDecoder decoder(heap, out);
+    for (const char &byte: kStreamDocument) {
+        ASSERT_NE(decoder.feed(&byte, 1), DecodeStatus::Error);
+        heap.collect();
+    }
+    ASSERT_EQ(decoder.finish(), DecodeStatus::Complete);
+    EXPECT_EQ(to_json(*out), expected);
+}
+
+TEST(JsValueStreamDecoderTest, FinishRejectsAnUnfinishedTokenAfterTheValue) {
+    for (std::string_view text: {"1 2", "{} 3", "[] \"abc", "null tru"}) {
+        GcHeap heap;
+        GcHeap::LocalMark mark(heap);
+        ValueHandle out = heap.local_value();
+        JsValueStreamDecoder decoder(heap, out);
+        (void) decoder.feed(text.data(), text.size());
+        EXPECT_EQ(decoder.finish(), DecodeStatus::Error) << text;
+        EXPECT_FALSE(decoder.error().out_of_memory) << text;
+        EXPECT_EQ(js_value_type(*out), JsNodeType::Undefined) << text;
+    }
+}
+
+TEST(JsValueStreamDecoderTest, ReportsATokenStillSpanningChunks) {
+    GcHeap heap;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    JsValueStreamDecoder decoder(heap, out);
+    EXPECT_EQ(decoder.pending_bytes(), 0U);
+    (void) decoder.feed("[\"abcd", 6);
+    EXPECT_EQ(decoder.pending_bytes(), 5U);
+    (void) decoder.feed("efgh", 4);
+    EXPECT_EQ(decoder.pending_bytes(), 9U);
+    (void) decoder.feed("\"]", 2);
+    EXPECT_EQ(decoder.pending_bytes(), 0U);
+    EXPECT_EQ(decoder.finish(), DecodeStatus::Complete);
+}
+
+// Every limit below the document's peak must end in a clean refusal, reported as memory rather
+// than as bad JSON, leaving nothing live behind.
+TEST(JsValueStreamDecoderTest, EveryLimitFailsCleanly) {
+    std::size_t peak = 0;
+    {
+        GcHeap heap;
+        GcHeap::LocalMark mark(heap);
+        ValueHandle out = heap.local_value();
+        ASSERT_EQ(fiber::script::json::decode_js_value(heap, kStreamDocument.data(), kStreamDocument.size(), out),
+                  DecodeStatus::Complete);
+        peak = heap.stats().peak_bytes;
+    }
+    std::size_t refused = 0;
+    for (std::size_t limit = 1; limit < peak; limit += 7) {
+        GcHeap heap;
+        heap.set_max_bytes(limit);
+        {
+            GcHeap::LocalMark mark(heap);
+            ValueHandle out = heap.local_value();
+            JsValueStreamDecoder decoder(heap, out);
+            (void) decoder.feed(kStreamDocument.data(), kStreamDocument.size());
+            const DecodeStatus status = decoder.finish();
+            if (status != DecodeStatus::Complete) {
+                ++refused;
+                EXPECT_TRUE(decoder.error().out_of_memory) << limit;
+                EXPECT_EQ(js_value_type(*out), JsNodeType::Undefined) << limit;
+            }
+        }
+        heap.collect();
+        heap.collect();
+        EXPECT_EQ(heap.stats().current_bytes, 0U) << limit;
+    }
+    EXPECT_GT(refused, 0U);
+}
+
+TEST(JsValueDecodeTest, ReportsARefusedAllocationAsOutOfMemory) {
+    GcHeap heap;
+    heap.set_max_bytes(64);
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    ParseError error;
+    EXPECT_NE(fiber::script::json::decode_js_value(heap, kStreamDocument.data(), kStreamDocument.size(), out, &error),
+              DecodeStatus::Complete);
+    EXPECT_TRUE(error.out_of_memory);
+}
+
+TEST(JsValueDecodeTest, RejectsAnUnfinishedTokenAfterTheValue) {
+    for (std::string_view text: {"1 2", "{} 3", "[] \"abc", "null tru", "true -", "1 1.5"}) {
+        GcHeap heap;
+        GcHeap::LocalMark mark(heap);
+        ValueHandle out = heap.local_value();
+        ParseError error;
+        EXPECT_EQ(fiber::script::json::decode_js_value(heap, text.data(), text.size(), out, &error),
+                  DecodeStatus::Error)
+                << text;
+        EXPECT_FALSE(error.out_of_memory) << text;
+        EXPECT_EQ(js_value_type(*out), JsNodeType::Undefined) << text;
+    }
+}
+
+TEST(JsValueDecodeTest, AValueEndingAtTheEndOfInputIsComplete) {
+    for (std::string_view text: {"12", "-1.5e3", "true", "null", "\"s\"", "{}", "[]", "7 ", "{}\n", " [] \t"}) {
+        GcHeap heap;
+        GcHeap::LocalMark mark(heap);
+        ValueHandle out = heap.local_value();
+        EXPECT_EQ(fiber::script::json::decode_js_value(heap, text.data(), text.size(), out), DecodeStatus::Complete)
+                << text;
+    }
+}
+
+TEST(JsValueDecodeTest, BadJsonIsNotOutOfMemory) {
+    GcHeap heap;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    ParseError error;
+    EXPECT_EQ(fiber::script::json::decode_js_value(heap, "{bad", 4, out, &error), DecodeStatus::Error);
+    EXPECT_FALSE(error.out_of_memory);
 }

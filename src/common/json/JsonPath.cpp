@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <utility>
 
 namespace fiber::json {
@@ -13,7 +14,7 @@ namespace {
 constexpr std::size_t kMaxPathDepth = 128;
 
 JsonPathCompileError compile_error(JsonPathCompileErrorCode code, std::size_t rule_index, std::size_t offset,
-                                   std::string message) {
+                                   std::string message) noexcept {
     return JsonPathCompileError{
             .code = code,
             .rule_index = rule_index,
@@ -424,9 +425,9 @@ std::uint32_t JsonPathProgram::find_index(std::uint32_t node, std::size_t index)
     }
     const std::int32_t value = static_cast<std::int32_t>(index);
     const auto &indices = nodes_[node].indices;
-    const auto it =
-            std::lower_bound(indices.begin(), indices.end(), value,
-                             [](const IndexEdge &edge, std::int32_t expected) { return edge.index < expected; });
+    const auto it = std::lower_bound(
+            indices.begin(), indices.end(), value,
+            [](const IndexEdge &edge, std::int32_t expected) noexcept { return edge.index < expected; });
     return it != indices.end() && it->index == value ? it->child : NoNode;
 }
 
@@ -451,7 +452,18 @@ bool JsonPathProgram::subtree_active(std::uint32_t node) const noexcept {
     return subtree_active(value.wildcard_key) || subtree_active(value.wildcard_index);
 }
 
-std::expected<JsonPathProgram, JsonPathCompileError> JsonPathProgram::compile(std::span<const JsonPathRule> rules) {
+std::expected<JsonPathProgram, JsonPathCompileError>
+JsonPathProgram::compile(std::span<const JsonPathRule> rules) noexcept {
+    try {
+        return compile_rules(rules);
+    } catch (const std::bad_alloc &) {
+        // Short SSO-safe literal: the handler itself does not allocate, so noexcept holds.
+        return std::unexpected(compile_error(JsonPathCompileErrorCode::OutOfMemory, 0, 0, "out of memory"));
+    }
+}
+
+std::expected<JsonPathProgram, JsonPathCompileError>
+JsonPathProgram::compile_rules(std::span<const JsonPathRule> rules) {
     JsonPathProgram program;
     (void) program.add_node();
 
@@ -602,9 +614,10 @@ std::expected<JsonPathProgram, JsonPathCompileError> JsonPathProgram::compile(st
                 if (child == NoNode) {
                     child = program.add_node();
                     auto &indices = program.nodes_[current].indices;
-                    const auto at = std::lower_bound(
-                            indices.begin(), indices.end(), index,
-                            [](const IndexEdge &edge, std::int32_t expected) { return edge.index < expected; });
+                    const auto at = std::lower_bound(indices.begin(), indices.end(), index,
+                                                     [](const IndexEdge &edge, std::int32_t expected) noexcept {
+                                                         return edge.index < expected;
+                                                     });
                     indices.insert(at, IndexEdge{.index = index, .child = child});
                 }
                 current = child;
