@@ -406,6 +406,178 @@ TransportMetrics run_chunked_response_trailer(bool finish_body, bool use_chain) 
     return metrics;
 }
 
+// Runs handler for each pipelined request in requests, and returns what went on the wire.
+TransportMetrics run_http1_handler(std::string requests, fiber::http::HttpHandler handler) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    TransportMetrics metrics;
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        auto transport = std::make_unique<RecordingHttp1Transport>(group.at(0), metrics, std::move(requests));
+        fiber::http::Http1Connection connection(std::move(transport), handler, {});
+        co_await connection.run();
+        done.set_value();
+    });
+    EXPECT_EQ(future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+    return metrics;
+}
+
+fiber::mem::IoBufChain chain_of(std::string_view text, bool complete) {
+    fiber::mem::IoBufChain chain;
+    auto buf = fiber::mem::IoBuf::allocate(text.size());
+    EXPECT_TRUE(static_cast<bool>(buf));
+    std::memcpy(buf.writable_data(), text.data(), text.size());
+    buf.commit(text.size());
+    EXPECT_TRUE(chain.append(std::move(buf)));
+    if (complete) {
+        chain.mark_complete();
+    }
+    return chain;
+}
+
+// Sends a 15-byte body each way a handler can, then a trailer, as it would for GET.
+fiber::async::Task<void> send_body_every_way(fiber::http::HttpExchange &exchange, int status,
+                                             fiber::http::HttpBodySpec body) {
+    auto header = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = status,
+            .body = body,
+    });
+    EXPECT_TRUE(header.has_value());
+    EXPECT_TRUE(exchange.response_stats().completed);
+
+    const auto *bytes = reinterpret_cast<const std::uint8_t *>("hello");
+    auto written = co_await exchange.write(bytes, 5, false);
+    EXPECT_EQ(written.value_or(0), 5U);
+
+    fiber::mem::IoBufChain partial = chain_of("hello", true);
+    written = co_await exchange.write(partial);
+    EXPECT_EQ(written.value_or(0), 5U);
+    EXPECT_EQ(partial.readable_bytes(), 0U);
+    EXPECT_FALSE(partial.complete());
+
+    written = co_await exchange.write_all(bytes, 5, false);
+    EXPECT_EQ(written.value_or(0), 5U);
+
+    written = co_await exchange.write_all(chain_of("hello", true));
+    EXPECT_EQ(written.value_or(0), 5U);
+
+    fiber::http::HttpHeaders trailers(exchange.pool());
+    trailers.set("digest", "xyz");
+    auto trailer = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Trailer,
+            .headers = &trailers,
+            .end_stream = true,
+    });
+    EXPECT_TRUE(trailer.has_value());
+    EXPECT_EQ(exchange.response_stats().status_code, status);
+    EXPECT_EQ(exchange.response_stats().body_bytes_sent, 0U);
+}
+
+TEST(Http1ConnectionTest, HeadResponseKeepsItsLengthAndDropsTheBody) {
+    const TransportMetrics metrics = run_http1_handler(
+            "HEAD /a HTTP/1.1\r\nHost: t\r\n\r\nGET /b HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+            [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                if (exchange.method() == fiber::http::HttpMethod::Head) {
+                    co_await send_body_every_way(exchange, 200, fiber::http::HttpBodySpec::ContentLength(20));
+                    co_return;
+                }
+                auto header = co_await exchange.send_header({
+                        .kind = fiber::http::OutgoingHeaderKind::Final,
+                        .status_code = 200,
+                        .body = fiber::http::HttpBodySpec::ContentLength(2),
+                });
+                EXPECT_TRUE(header.has_value());
+                auto written = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("ok"), 2, true);
+                EXPECT_TRUE(written.has_value());
+                EXPECT_EQ(exchange.response_stats().body_bytes_sent, 2U);
+            });
+
+    EXPECT_NE(metrics.written.find("HTTP/1.1 200 OK\r\nContent-Length: 20\r\n"), std::string::npos) << metrics.written;
+    EXPECT_EQ(metrics.written.find("hello"), std::string::npos) << metrics.written;
+    EXPECT_EQ(metrics.written.find("digest"), std::string::npos) << metrics.written;
+    // The next response starts right after the header block, as a client that reads no body expects.
+    const std::size_t first_end = metrics.written.find("\r\n\r\n");
+    ASSERT_NE(first_end, std::string::npos);
+    EXPECT_EQ(metrics.written.find("HTTP/1.1 200 OK\r\n", first_end), first_end + 4) << metrics.written;
+    EXPECT_TRUE(metrics.written.ends_with("\r\n\r\nok")) << metrics.written;
+}
+
+TEST(Http1ConnectionTest, HeadResponseOfUnknownLengthHasNoFraming) {
+    for (const fiber::http::HttpBodySpec body:
+         {fiber::http::HttpBodySpec::Stream(), fiber::http::HttpBodySpec::Auto()}) {
+        const TransportMetrics metrics =
+                run_http1_handler("HEAD /a HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+                                  [body](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                                      co_await send_body_every_way(exchange, 200, body);
+                                  });
+        EXPECT_NE(metrics.written.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << metrics.written;
+        EXPECT_EQ(metrics.written.find("Content-Length"), std::string::npos) << metrics.written;
+        EXPECT_EQ(metrics.written.find("Transfer-Encoding"), std::string::npos) << metrics.written;
+        EXPECT_TRUE(metrics.written.ends_with("\r\n\r\n")) << metrics.written;
+    }
+}
+
+TEST(Http1ConnectionTest, NoContentStatusDropsBodyAndLength) {
+    for (const int status: {204, 304}) {
+        for (const fiber::http::HttpBodySpec body:
+             {fiber::http::HttpBodySpec::ContentLength(20), fiber::http::HttpBodySpec::Stream()}) {
+            const TransportMetrics metrics =
+                    run_http1_handler("GET /a HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+                                      [=](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                                          co_await send_body_every_way(exchange, status, body);
+                                      });
+            EXPECT_NE(metrics.written.find("HTTP/1.1 " + std::to_string(status)), std::string::npos) << metrics.written;
+            EXPECT_EQ(metrics.written.find("Content-Length"), std::string::npos) << metrics.written;
+            EXPECT_EQ(metrics.written.find("Transfer-Encoding"), std::string::npos) << metrics.written;
+            EXPECT_EQ(metrics.written.find("hello"), std::string::npos) << metrics.written;
+        }
+    }
+}
+
+TEST(Http1ConnectionTest, ResponseHasBodyFollowsMethodAndStatus) {
+    std::vector<std::string> seen;
+    (void) run_http1_handler(
+            "GET /a HTTP/1.1\r\nHost: t\r\n\r\nHEAD /b HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+            [&seen](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                std::string row;
+                for (const int status: {100, 199, 200, 204, 205, 304, 404, 500}) {
+                    row.push_back(exchange.response_has_body(status) ? '1' : '0');
+                }
+                seen.push_back(row);
+                co_await exchange.send_header({
+                        .kind = fiber::http::OutgoingHeaderKind::Final,
+                        .status_code = 204,
+                        .body = fiber::http::HttpBodySpec::None(),
+                        .end_stream = true,
+                });
+            });
+    ASSERT_EQ(seen.size(), 2U);
+    EXPECT_EQ(seen[0], "00101011");
+    EXPECT_EQ(seen[1], "00000000");
+}
+
+TEST(Http1ConnectionTest, ResponseWithContentMustBeAbleToSendIt) {
+    for (const fiber::http::HttpBodySpec body:
+         {fiber::http::HttpBodySpec::None(), fiber::http::HttpBodySpec::ContentLength(5)}) {
+        bool refused = false;
+        (void) run_http1_handler("GET /a HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+                                 [&refused, body](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                                     auto header = co_await exchange.send_header({
+                                             .kind = fiber::http::OutgoingHeaderKind::Final,
+                                             .status_code = 200,
+                                             .body = body,
+                                             .end_stream = true,
+                                     });
+                                     refused = !header.has_value();
+                                 });
+        EXPECT_TRUE(refused);
+    }
+}
+
 #if GTEST_HAS_DEATH_TEST
 TEST(Http1ConnectionDeathTest, TrailerDuringPartialChainChunkAsserts) {
     EXPECT_DEATH((void) run_chunked_response_trailer(false, true), "!chunk_write_active_");

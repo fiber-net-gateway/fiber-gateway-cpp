@@ -292,7 +292,7 @@ async::Task<common::IoResult<void>> GzipResponseWriter::send_header(const Outgoi
     const HttpHeaders *headers = header.headers;
     const bool intrinsic_candidate =
             options_.enabled && response_status_is_compressible(header.status_code, options_.all_body_statuses) &&
-            exchange_->method() != HttpMethod::Head && !header.end_stream && !header.body.is_none() &&
+            exchange_->response_has_body(header.status_code) && !header.end_stream && !header.body.is_none() &&
             !header.body.is_raw() &&
             (!header.body.is_content_length() || header.body.content_length() >= options_.min_length) &&
             headers != nullptr && !has_nonempty_header(*headers, "content-encoding") &&

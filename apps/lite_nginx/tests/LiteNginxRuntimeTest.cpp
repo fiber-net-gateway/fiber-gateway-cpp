@@ -4995,7 +4995,8 @@ std::string body_after_headers(std::string_view response) {
 
 // Serves source at every path, sends request on one connection and reads until the server closes it.
 std::string script_response_until_close(std::string_view source, std::string_view request,
-                                        std::string_view http_directives = {}) {
+                                        std::string_view http_directives = {},
+                                        std::string_view locations = "location /* { script_file SCRIPT_PATH; }") {
     TestScriptFile script("large_json", source);
     if (!script.ok()) {
         ADD_FAILURE() << "cannot write the script";
@@ -5009,15 +5010,16 @@ http {
     HTTP_DIRECTIVES
     server {
         server_name localhost;
-        location /* {
-            script_file SCRIPT_PATH;
-        }
+        LOCATIONS
     }
 }
 )";
     config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
     config_text.replace(config_text.find("HTTP_DIRECTIVES"), sizeof("HTTP_DIRECTIVES") - 1, http_directives);
-    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    config_text.replace(config_text.find("LOCATIONS"), sizeof("LOCATIONS") - 1, locations);
+    if (const std::size_t pos = config_text.find("SCRIPT_PATH"); pos != std::string::npos) {
+        config_text.replace(pos, sizeof("SCRIPT_PATH") - 1, script.path());
+    }
 
     auto config = ConfigLoader::load_from_string(config_text, "large_json.conf");
     if (!config.has_value()) {
@@ -5253,6 +5255,56 @@ TEST(LiteNginxRuntimeTest, HeadRequestToScriptGetsHeadersWithNoBody) {
     }
 }
 
+TEST(LiteNginxRuntimeTest, HeadRequestGetsTheHeadersOfGet) {
+    const std::string source = send_json_rows_source(10);
+    const std::string get = script_response_until_close(source, kCloseRequest);
+    const std::string head = script_response_until_close(source, kHeadCloseRequest);
+    EXPECT_NE(http_header_value(get, "Content-Length"), "");
+    EXPECT_EQ(http_header_value(head, "Content-Length"), http_header_value(get, "Content-Length"));
+    EXPECT_EQ(http_header_value(head, "Content-Type"), http_header_value(get, "Content-Type"));
+    EXPECT_TRUE(body_after_headers(head).empty()) << head.substr(0, 300);
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestFailsLikeGetWhileTheBodyIsShort) {
+    const std::string source = "resp.sendJson(200, {bad: \"\xF0\x9F\x98\x80\"[0]});";
+    const std::string get = script_response_until_close(source, kCloseRequest);
+    const std::string head = script_response_until_close(source, kHeadCloseRequest);
+    EXPECT_NE(get.find("HTTP/1.1 500 "), std::string::npos) << get;
+    EXPECT_NE(head.find("HTTP/1.1 500 "), std::string::npos) << head;
+    EXPECT_TRUE(body_after_headers(head).empty()) << head;
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestStopsEncodingALongBody) {
+    // GET would be aborted by the value at the end. HEAD never reaches it, so the connection stays up.
+    const std::string response =
+            script_response_until_close(send_json_failing_late_source(),
+                                        "HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n" + std::string(kHeadCloseRequest));
+    const std::size_t first = response.find("HTTP/1.1 200 OK\r\n");
+    ASSERT_NE(first, std::string::npos) << response;
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n", first + 1), std::string::npos) << response;
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos) << response;
+    EXPECT_TRUE(response.ends_with("\r\n\r\n")) << response;
+}
+
+TEST(LiteNginxRuntimeTest, HeadRequestToErrorPageGetsHeadersWithNoBody) {
+    const std::string closed_upstream =
+            "location /* { proxy_pass http://127.0.0.1:" + std::to_string(reserve_loopback_port()) + "; }";
+    const std::pair<std::string_view, std::string_view> cases[] = {
+            {"location /known { script_file SCRIPT_PATH; }", "HTTP/1.1 404 "},
+            {closed_upstream, "HTTP/1.1 502 "},
+    };
+    for (const auto &[locations, status_line]: cases) {
+        const std::string get = script_response_until_close("return 1;", kCloseRequest, {}, locations);
+        const std::string head = script_response_until_close("return 1;", kHeadCloseRequest, {}, locations);
+        EXPECT_NE(get.find(status_line), std::string::npos) << get;
+        EXPECT_NE(head.find(status_line), std::string::npos) << head;
+        EXPECT_FALSE(body_after_headers(get).empty()) << get;
+        EXPECT_TRUE(body_after_headers(head).empty()) << head;
+        EXPECT_EQ(http_header_value(head, "Content-Length"), http_header_value(get, "Content-Length"));
+    }
+}
+
 TEST(LiteNginxRuntimeTest, HeadRequestToFailingScriptKeepsTheStatus) {
     const std::string response = script_response_until_close("let x = 1 / 0;", kHeadCloseRequest);
     EXPECT_NE(response.find("HTTP/1.1 500 "), std::string::npos) << response;
@@ -5321,7 +5373,8 @@ enum class LargeJsonProtocol { Http2, Http3 };
 
 // Runs one request to a TLS listener serving source, over HTTP/2 or HTTP/3.
 LargeJsonOutcome fetch_large_json(LargeJsonProtocol protocol, const std::string &source,
-                                  fiber::http::HttpMethod method = fiber::http::HttpMethod::Get) {
+                                  fiber::http::HttpMethod method = fiber::http::HttpMethod::Get,
+                                  std::string_view locations = "location /* { script_file SCRIPT_PATH; }") {
     TestPemFile cert("large-json-cert", kSelfSignedCertPem);
     TestPemFile key("large-json-key", kSelfSignedKeyPem);
     TestScriptFile script("large_json_tls", source);
@@ -5339,7 +5392,7 @@ http {
         server_name localhost;
         certificate CERT_FILE;
         certificate_key KEY_FILE;
-        location /* { script_file SCRIPT_PATH; }
+        LOCATIONS
     }
 }
 )";
@@ -5347,7 +5400,10 @@ http {
     config_text.replace(config_text.find("HTTP3"), sizeof("HTTP3") - 1, http3 ? "http3" : "");
     config_text.replace(config_text.find("CERT_FILE"), sizeof("CERT_FILE") - 1, cert.path());
     config_text.replace(config_text.find("KEY_FILE"), sizeof("KEY_FILE") - 1, key.path());
-    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    config_text.replace(config_text.find("LOCATIONS"), sizeof("LOCATIONS") - 1, locations);
+    if (const std::size_t pos = config_text.find("SCRIPT_PATH"); pos != std::string::npos) {
+        config_text.replace(pos, sizeof("SCRIPT_PATH") - 1, script.path());
+    }
     auto config = ConfigLoader::load_from_string(config_text, "large_json_tls.conf");
     if (!config.has_value()) {
         ADD_FAILURE() << config.error().message;
@@ -5455,6 +5511,23 @@ TEST_P(LiteNginxLargeJsonTest, ResponseWithoutContentDropsTheBody) {
         EXPECT_EQ(outcome.status_code, status) << source;
         EXPECT_TRUE(outcome.body.empty()) << source;
         EXPECT_TRUE(outcome.body_complete) << source;
+    }
+}
+
+TEST_P(LiteNginxLargeJsonTest, HeadRequestToErrorPageGetsHeadersWithNoBody) {
+    const std::string closed_upstream =
+            "location /* { proxy_pass http://127.0.0.1:" + std::to_string(reserve_loopback_port()) + "; }";
+    const std::pair<std::string_view, int> cases[] = {
+            {"location /known { script_file SCRIPT_PATH; }", 404},
+            {closed_upstream, 502},
+    };
+    for (const auto &[locations, status]: cases) {
+        const LargeJsonOutcome outcome =
+                fetch_large_json(GetParam(), "return 1;", fiber::http::HttpMethod::Head, locations);
+        EXPECT_EQ(outcome.error, fiber::common::IoErr::None) << locations;
+        EXPECT_EQ(outcome.status_code, status) << locations;
+        EXPECT_TRUE(outcome.body.empty()) << locations;
+        EXPECT_TRUE(outcome.body_complete) << locations;
     }
 }
 

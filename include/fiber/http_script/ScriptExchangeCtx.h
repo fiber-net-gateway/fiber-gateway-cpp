@@ -136,11 +136,8 @@ public:
     // Encodes body as JSON and sends it with Content-Type application/json. A short body goes out
     // like write_raw_bytes. A longer one is sent as it is encoded, with no Content-Length: if
     // encoding then fails, the response is aborted and the client sees a broken body. body and
-    // everything it reaches must stay unchanged until this completes.
-    //
-    // The write_* functions send only the headers when the response must not have content: for a
-    // HEAD request, and for status 204 and 304. The body is then dropped, and write_json does not
-    // encode it, so an encoding failure goes unnoticed.
+    // everything it reaches must stay unchanged until this completes. When the response has no
+    // content, as for HEAD, a longer body is not encoded past the point of knowing it is longer.
     fiber::async::Task<fiber::common::IoResult<void>> write_json(int status,
                                                                  const fiber::script::JsValue &body) noexcept;
     // Flush the pending headers (status + body of known length) then write the body in a
@@ -198,8 +195,6 @@ private:
 
     [[nodiscard]] fiber::http::OutgoingHeaderBlockView final_header(int status,
                                                                     fiber::http::HttpBodySpec body) const noexcept;
-    [[nodiscard]] bool response_has_no_body(int status) const noexcept;
-    fiber::async::Task<fiber::common::IoResult<void>> send_header_only(int status) noexcept;
     fiber::async::Task<fiber::common::IoResult<void>> send_final_with_body(int status, std::size_t content_length,
                                                                            const std::uint8_t *data) noexcept;
     // Chain-body variant: encodes straight into the transport buffer (no staging copy);
