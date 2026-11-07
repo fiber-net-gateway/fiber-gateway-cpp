@@ -759,8 +759,8 @@ function JSON.parse(text: string): ScriptValue;
 function JSON.stringify(value: ScriptValue): string | undefined;
 ```
 
-- 参数/返回：顶层 `undefined` 原样返回 `undefined`；顶层 `NaN`/正负无穷返回字符串 `"null"`；其他值返回紧凑 JSON。嵌套 `undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 字符串，异常值编码为含 `position`、`name`、`message`、`meta` 的对象，普通对象按插入顺序输出。
-- 异常：无效字符串、嵌套非有限数字、迭代器或其他无法编码的值抛 `TypeError`。
+- 参数/返回：顶层 `undefined` 原样返回 `undefined`；其他值返回紧凑 JSON。`NaN`、`Infinity`、`-Infinity` 不论是否嵌套，都编码为同名的 JSON 字符串（JS 编码为 `null`，这里不同）。嵌套 `undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 字符串，异常值编码为含 `position`、`name`、`message`、`meta` 的对象，普通对象按插入顺序输出。
+- 异常：无效字符串、迭代器或其他无法编码的值抛 `TypeError`。
 - 副作用：无。
 
 ### 5.8 对象函数
@@ -1008,9 +1008,11 @@ declare namespace resp {
 #### `resp.sendJson(status, body)`
 
 - 参数：异步函数。`status` 只有整数才生效，其他类型回退为 200；`body` 接受任意可 JSON 编码的脚本值。
-- 返回：发送成功为 `null`。`undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 字符串，异常值编码为包含 `position`、`name`、`message` 和 `meta` 的对象。
-- 异常：非法字符串、非有限浮点数、迭代器等编码失败，或 header/body I/O 失败时抛 `Error`。
-- 副作用：把 `Content-Type` 替换为 `application/json`，提交全部 pending headers，以固定 Content-Length 写出 body 并结束响应流。
+- 返回：发送成功为 `null`。`undefined` 编码为 JSON `null`，`NaN`、`Infinity`、`-Infinity` 编码为同名的 JSON 字符串，`Binary` 编码为 Base64 字符串，异常值编码为包含 `position`、`name`、`message` 和 `meta` 的对象。
+- 异常：非法字符串、迭代器等编码失败，或 header/body I/O 失败时抛 `Error`。
+- 副作用：把 `Content-Type` 替换为 `application/json`，提交全部 pending headers，写出 body 并结束响应流。
+- 大响应：编码结果在 64 KiB 以内时，以固定 Content-Length 发送。超过后每编码约 64 KiB 发送一次，不带 Content-Length：HTTP/1.1 使用 chunked，HTTP/1.0 以关闭连接结束，HTTP/2 和 HTTP/3 以流结束。
+- 中途失败：在已经发送部分 body 之后才遇到无法编码的值时，状态码无法再更改，响应会被中断：HTTP/1 关闭连接，HTTP/2 和 HTTP/3 重置流。客户端只收到 JSON 的前半部分，而 HTTP/1.0 客户端无法把这种情况与正常结束区分开。异常仍可被 `catch`，但不能再发送其他响应。
 
 #### `resp.send(status)`
 
@@ -1174,7 +1176,7 @@ body 编码和自动 Content-Type：
 | 对象，且显式 Content-Type 值包含小写子串 `application/x-www-form-urlencoded` | form-urlencoded | 已有值保持不变 |
 | 其他对象、数组、数字或布尔值 | JSON | `application/json;charset=utf-8` |
 
-Content-Type 子串判断当前区分大小写。JSON/form 编码得到空 body 时按无 body 发送；当前实现的 JSON 编码失败也会退化成无 body，而不是抛异常，因此不要把迭代器、非法字符串或非有限数字作为 request body。
+Content-Type 子串判断当前区分大小写。JSON/form 编码得到空 body 时按无 body 发送；当前实现的 JSON 编码失败也会退化成无 body，而不是抛异常，因此不要把迭代器或非法字符串作为 request body。
 
 - 返回：成功后返回新对象 `{status, body}`；`status` 是最终非 1xx 上游状态，`body` 是完整响应字节的 `Binary`。只有 `includeHeaders === true` 时才有 `headers` 对象；完全相同的重复响应头键以后值覆盖前值。
 - 异常/中止：完整 URL 写入 `options.url`，或连接池获取、DNS/连接、header/body 写入、响应读取/超时失败时抛 `Error`。缺少 services 为 `InvalidState` abort，结果分配失败为 `OutOfMemory` abort。

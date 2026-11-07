@@ -103,6 +103,7 @@ Generator::Generator(OutputSink &sink) noexcept : sink_(sink) { clear(); }
 void Generator::clear() noexcept {
     sink_.reset();
     depth_ = 1;
+    bytes_written_ = 0;
     state_stack_[0] = State::Start;
 }
 
@@ -214,16 +215,7 @@ Generator::Result Generator::string(const char *str, size_t len) noexcept {
         if (result != Result::OK) {
             return result;
         }
-        if (has_option(Option::Beauty)) {
-            result = append(": ", 2);
-        } else {
-            result = append(':');
-        }
-        if (result != Result::OK) {
-            return result;
-        }
-        current_state() = State::MapValue;
-        return Result::OK;
+        return finish_key();
     }
     Result result = prefix_for_value();
     if (result != Result::OK) {
@@ -238,46 +230,64 @@ Generator::Result Generator::string(const char *str, size_t len) noexcept {
 
 Generator::Result Generator::string(const std::string &str) noexcept { return string(str.data(), str.size()); }
 
-Generator::Result Generator::string_from_chunks(StringChunkProducer producer, void *ctx) noexcept {
-    if (!producer) {
+Generator::Result Generator::string_begin() noexcept {
+    const State state = current_state();
+    const bool key = state == State::MapStart || state == State::MapKey;
+    Result result = key ? prefix_for_key() : prefix_for_value();
+    if (result != Result::OK) {
+        return result;
+    }
+    result = append('\"');
+    if (result != Result::OK) {
+        return result;
+    }
+    enter_piece(key ? State::InKeyString : State::InValueString);
+    return Result::OK;
+}
+
+Generator::Result Generator::string_append(const char *str, size_t len) noexcept {
+    const State state = current_state();
+    if (state != State::InKeyString && state != State::InValueString) {
+        return set_error(Result::ErrorState);
+    }
+    if (!str && len > 0) {
         return set_error(Result::InvalidString);
     }
-    State state = current_state();
-    if (state == State::MapStart || state == State::MapKey) {
-        Result result = prefix_for_key();
-        if (result != Result::OK) {
-            return result;
-        }
-        result = write_string_from_chunks(producer, ctx);
-        if (result != Result::OK) {
-            return result;
-        }
-        if (has_option(Option::Beauty)) {
-            result = append(": ", 2);
-        } else {
-            result = append(':');
-        }
-        if (result != Result::OK) {
-            return result;
-        }
-        current_state() = State::MapValue;
-        return Result::OK;
+    if (has_option(Option::ValidateUtf8) && !is_valid_utf8(reinterpret_cast<const unsigned char *>(str), len)) {
+        return set_error(Result::InvalidString);
     }
-    Result result = prefix_for_value();
+    return write_string_content(str, len);
+}
+
+Generator::Result Generator::string_end() noexcept {
+    const State state = current_state();
+    if (state != State::InKeyString && state != State::InValueString) {
+        return set_error(Result::ErrorState);
+    }
+    const Result result = append('\"');
     if (result != Result::OK) {
         return result;
     }
-    result = write_string_from_chunks(producer, ctx);
-    if (result != Result::OK) {
-        return result;
-    }
-    return finish_value();
+    depth_ -= 1;
+    return state == State::InKeyString ? finish_key() : finish_value();
 }
 
 Generator::Result Generator::binary(const std::uint8_t *data, size_t len) noexcept {
     if (!data && len > 0) {
         return set_error(Result::InvalidString);
     }
+    Result result = binary_begin();
+    if (result != Result::OK) {
+        return result;
+    }
+    result = binary_append(data, len);
+    if (result != Result::OK) {
+        return result;
+    }
+    return binary_end();
+}
+
+Generator::Result Generator::binary_begin() noexcept {
     Result result = prefix_for_value();
     if (result != Result::OK) {
         return result;
@@ -285,6 +295,17 @@ Generator::Result Generator::binary(const std::uint8_t *data, size_t len) noexce
     result = append('\"');
     if (result != Result::OK) {
         return result;
+    }
+    enter_piece(State::InBinary);
+    return Result::OK;
+}
+
+Generator::Result Generator::binary_append(const std::uint8_t *data, size_t len) noexcept {
+    if (current_state() != State::InBinary) {
+        return set_error(Result::ErrorState);
+    }
+    if (!data && len > 0) {
+        return set_error(Result::InvalidString);
     }
     // Whole 3-byte groups per chunk, so '=' padding can only land in the last one.
     constexpr size_t kChunkBytes = size_t{3} * 256;
@@ -293,15 +314,27 @@ Generator::Result Generator::binary(const std::uint8_t *data, size_t len) noexce
         const size_t chunk = std::min(kChunkBytes, len - pos);
         fiber::util::base64_encode_into(data + pos, chunk, encoded);
         // Not append(): EscapeSolidus applies to the '/' of the base64 alphabet.
-        result = write_string_content(encoded, fiber::util::base64_encoded_size(chunk));
+        const Result result = write_string_content(encoded, fiber::util::base64_encoded_size(chunk));
         if (result != Result::OK) {
             return result;
         }
     }
-    result = append('\"');
+    if (len % 3 != 0) {
+        current_state() = State::InBinaryTail;
+    }
+    return Result::OK;
+}
+
+Generator::Result Generator::binary_end() noexcept {
+    const State state = current_state();
+    if (state != State::InBinary && state != State::InBinaryTail) {
+        return set_error(Result::ErrorState);
+    }
+    const Result result = append('\"');
     if (result != Result::OK) {
         return result;
     }
+    depth_ -= 1;
     return finish_value();
 }
 
@@ -383,6 +416,7 @@ Generator::Result Generator::append(const char *data, size_t len) noexcept {
     if (!sink_.write(data, len)) {
         return set_error(Result::ErrorState);
     }
+    bytes_written_ += len;
     return Result::OK;
 }
 
@@ -411,6 +445,10 @@ Generator::Result Generator::prefix_for_value() noexcept {
     }
     if (state == State::MapStart || state == State::MapKey) {
         return set_error(Result::KeysMustBeString);
+    }
+    if (state == State::InKeyString || state == State::InValueString || state == State::InBinary ||
+        state == State::InBinaryTail) {
+        return set_error(Result::ErrorState);
     }
     if (state == State::ArrayStart) {
         if (has_option(Option::Beauty)) {
@@ -495,94 +533,62 @@ Generator::Result Generator::write_string_content(const char *str, size_t len) n
     if (!str && len > 0) {
         return set_error(Result::InvalidString);
     }
+    const bool escape_solidus = has_option(Option::EscapeSolidus);
     const unsigned char *data = reinterpret_cast<const unsigned char *>(str);
+    size_t run_start = 0;
     for (size_t i = 0; i < len; ++i) {
-        unsigned char ch = data[i];
-        Result result = Result::OK;
-        switch (ch) {
-            case '\"':
-                result = append("\\\"", 2);
-                break;
-            case '\\':
-                result = append("\\\\", 2);
-                break;
-            case '\b':
-                result = append("\\b", 2);
-                break;
-            case '\f':
-                result = append("\\f", 2);
-                break;
-            case '\n':
-                result = append("\\n", 2);
-                break;
-            case '\r':
-                result = append("\\r", 2);
-                break;
-            case '\t':
-                result = append("\\t", 2);
-                break;
-            case '/':
-                if (has_option(Option::EscapeSolidus)) {
-                    result = append("\\/", 2);
-                } else {
-                    result = append('/');
-                }
-                break;
-            default:
-                if (ch < 0x20) {
-                    char buf[6] = {'\\', 'u', '0', '0', '0', '0'};
-                    const char *hex = "0123456789ABCDEF";
-                    buf[4] = hex[(ch >> 4) & 0x0F];
-                    buf[5] = hex[ch & 0x0F];
-                    result = append(buf, sizeof(buf));
-                } else {
-                    result = append(static_cast<char>(ch));
-                }
-                break;
+        const unsigned char ch = data[i];
+        if (ch >= 0x20 && ch != '\"' && ch != '\\' && (ch != '/' || !escape_solidus)) {
+            continue;
         }
+        Result result = append(str + run_start, i - run_start);
         if (result != Result::OK) {
             return result;
         }
+        result = write_escape(ch);
+        if (result != Result::OK) {
+            return result;
+        }
+        run_start = i + 1;
     }
-    return Result::OK;
+    return append(str + run_start, len - run_start);
 }
 
-Generator::Result Generator::write_string_from_chunks(StringChunkProducer producer, void *ctx) noexcept {
-    if (!producer) {
-        return set_error(Result::InvalidString);
+Generator::Result Generator::write_escape(unsigned char ch) noexcept {
+    switch (ch) {
+        case '\"':
+            return append("\\\"", 2);
+        case '\\':
+            return append("\\\\", 2);
+        case '\b':
+            return append("\\b", 2);
+        case '\f':
+            return append("\\f", 2);
+        case '\n':
+            return append("\\n", 2);
+        case '\r':
+            return append("\\r", 2);
+        case '\t':
+            return append("\\t", 2);
+        case '/':
+            return append("\\/", 2);
+        default: {
+            char buf[6] = {'\\', 'u', '0', '0', '0', '0'};
+            const char *hex = "0123456789ABCDEF";
+            buf[4] = hex[(ch >> 4) & 0x0F];
+            buf[5] = hex[ch & 0x0F];
+            return append(buf, sizeof(buf));
+        }
     }
-    Result result = append('\"');
+}
+
+Generator::Result Generator::finish_key() noexcept {
+    const Result result = has_option(Option::Beauty) ? append(": ", 2) : append(':');
     if (result != Result::OK) {
         return result;
     }
-    while (true) {
-        const char *data = nullptr;
-        size_t len = 0;
-        bool done = false;
-        if (!producer(ctx, data, len, done)) {
-            return set_error(Result::InvalidString);
-        }
-        if (len > 0) {
-            if (!data) {
-                return set_error(Result::InvalidString);
-            }
-            if (has_option(Option::ValidateUtf8)) {
-                if (!is_valid_utf8(reinterpret_cast<const unsigned char *>(data), len)) {
-                    return set_error(Result::InvalidString);
-                }
-            }
-            result = write_string_content(data, len);
-            if (result != Result::OK) {
-                return result;
-            }
-        } else if (!done) {
-            return set_error(Result::InvalidString);
-        }
-        if (done) {
-            break;
-        }
-    }
-    return append('\"');
+    current_state() = State::MapValue;
+    return Result::OK;
 }
 
 Generator::Result Generator::finish_value() noexcept {
@@ -605,6 +611,11 @@ Generator::Result Generator::finish_value() noexcept {
         case State::MapStart:
         case State::MapKey:
             return set_error(Result::KeysMustBeString);
+        case State::InKeyString:
+        case State::InValueString:
+        case State::InBinary:
+        case State::InBinaryTail:
+            break;
     }
     return set_error(Result::ErrorState);
 }
@@ -624,6 +635,11 @@ Generator::Result Generator::pop() noexcept {
     }
     depth_ -= 1;
     return Result::OK;
+}
+
+void Generator::enter_piece(State state) noexcept {
+    state_stack_[depth_] = state;
+    depth_ += 1;
 }
 
 Generator::Result Generator::set_error(Result result) noexcept {

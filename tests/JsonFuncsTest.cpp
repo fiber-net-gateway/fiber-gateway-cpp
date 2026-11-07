@@ -5,6 +5,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <fiber/script/JsGc.h>
 #include <fiber/script/ScriptCompiler.h>
@@ -177,22 +178,25 @@ TEST(JsonFuncsTest, StringifyUndefinedReturnsUndefined) {
     expect_script_undefined(R"(let o = {a: 1}; return JSON.stringify(o.b);)");
 }
 
-TEST(JsonFuncsTest, StringifyNaNSerializesAsNull) {
-    GcHeap heap;
-    AbiResult result =
-            call_host_on(heap, "JSON.stringify", JsValue::make_float(std::numeric_limits<double>::quiet_NaN()));
-    ASSERT_TRUE(result.is_success());
-    ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
-    EXPECT_EQ(string_to_utf8(result.value()), "null");
+TEST(JsonFuncsTest, StringifyNonFiniteSerializesAsString) {
+    const std::pair<double, const char *> cases[] = {
+            {std::numeric_limits<double>::quiet_NaN(), "\"NaN\""},
+            {std::numeric_limits<double>::infinity(), "\"Infinity\""},
+            {-std::numeric_limits<double>::infinity(), "\"-Infinity\""},
+    };
+    for (const auto &[value, expected]: cases) {
+        GcHeap heap;
+        AbiResult result = call_host_on(heap, "JSON.stringify", JsValue::make_float(value));
+        ASSERT_TRUE(result.is_success());
+        ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
+        EXPECT_EQ(string_to_utf8(result.value()), expected);
+    }
 }
 
-TEST(JsonFuncsTest, StringifyInfinitySerializesAsNull) {
-    GcHeap heap;
-    AbiResult result =
-            call_host_on(heap, "JSON.stringify", JsValue::make_float(std::numeric_limits<double>::infinity()));
-    ASSERT_TRUE(result.is_success());
-    ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
-    EXPECT_EQ(string_to_utf8(result.value()), "null");
+TEST(JsonFuncsTest, StringifyNestedNonFiniteSerializesAsString) {
+    expect_script_string(R"(let inf = 1e308 * 10;
+        return JSON.stringify({a: [inf - inf, inf, 0 - inf]});)",
+                         R"({"a":["NaN","Infinity","-Infinity"]})");
 }
 
 // ---- round-trip ----
