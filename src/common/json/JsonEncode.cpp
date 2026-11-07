@@ -291,7 +291,7 @@ Generator::Result Generator::binary(const std::uint8_t *data, size_t len) noexce
     char encoded[fiber::util::base64_encoded_size(kChunkBytes)];
     for (size_t pos = 0; pos < len; pos += kChunkBytes) {
         const size_t chunk = std::min(kChunkBytes, len - pos);
-        fiber::util::base64_encode_to(data + pos, chunk, encoded);
+        fiber::util::base64_encode_into(data + pos, chunk, encoded);
         // Not append(): EscapeSolidus applies to the '/' of the base64 alphabet.
         result = write_string_content(encoded, fiber::util::base64_encoded_size(chunk));
         if (result != Result::OK) {

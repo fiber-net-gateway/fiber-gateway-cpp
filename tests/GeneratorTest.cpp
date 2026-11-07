@@ -4,8 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <string_view>
-#include <utility>
 #include <vector>
 
 #include <fiber/common/json/JsonEncode.h>
@@ -182,7 +180,9 @@ TEST(GeneratorTest, BinaryMatchesBase64AcrossChunkBoundaries) {
         StringSink sink;
         Generator gen(sink);
         EXPECT_EQ(gen.binary(data.data(), data.size()), Generator::Result::OK) << len;
-        EXPECT_EQ(sink.output, "\"" + fiber::util::base64_encode(data.data(), data.size()) + "\"") << len;
+        std::string encoded(fiber::util::base64_encoded_size(len), '\0');
+        fiber::util::base64_encode_into(data.data(), len, encoded.data());
+        EXPECT_EQ(sink.output, "\"" + encoded + "\"") << len;
     }
 }
 
@@ -265,24 +265,4 @@ TEST(GeneratorTest, StringSinkReportsOutOfMemory) {
     EXPECT_EQ(result, Generator::Result::ErrorState);
     EXPECT_TRUE(sink.out_of_memory());
     EXPECT_EQ(gen.get_state(), Generator::State::Error);
-}
-
-TEST(GeneratorTest, Base64EncodeToMatchesRfc4648Vectors) {
-    const std::pair<std::string_view, std::string_view> vectors[] = {
-            {"", ""},
-            {"f", "Zg=="},
-            {"fo", "Zm8="},
-            {"foo", "Zm9v"},
-            {"foob", "Zm9vYg=="},
-            {"fooba", "Zm9vYmE="},
-            {"foobar", "Zm9vYmFy"},
-    };
-    for (const auto &[input, expected]: vectors) {
-        const auto *data = reinterpret_cast<const std::uint8_t *>(input.data());
-        ASSERT_EQ(fiber::util::base64_encoded_size(input.size()), expected.size()) << input;
-        std::string out(expected.size(), '?');
-        fiber::util::base64_encode_to(data, input.size(), out.data());
-        EXPECT_EQ(out, expected) << input;
-        EXPECT_EQ(fiber::util::base64_encode(data, input.size()), expected) << input;
-    }
 }

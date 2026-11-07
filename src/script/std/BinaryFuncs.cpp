@@ -7,6 +7,7 @@
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
 #include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/std/OomGuard.h>
 
 #include <cstdint>
 #include <string>
@@ -66,6 +67,9 @@ constexpr int hex_digit(unsigned char c) noexcept {
 }
 
 // ---- binary.base64Encode: Binary -> base64 String; non-binary -> undefined ----
+// Huffman-style two-phase (cf. src/http/Huffman.h): exact size precompute, one GC
+// allocation, direct fill. No throwing std::string staging, so noexcept holds; OOM
+// maps to a graceful abort.
 
 AbiResult base64_encode_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
@@ -77,11 +81,31 @@ AbiResult base64_encode_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     if (!binary_bytes(args.args[0], data, len)) {
         return AbiResult::success(JsValue::make_undefined());
     }
-    std::string encoded = fiber::util::base64_encode(data, len);
-    return make_string_result(&frame.runtime, encoded);
+    if (len == 0) {
+        return AbiResult::success(empty_string());
+    }
+    GcHeap &heap = frame.runtime;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    GcHeap::NoGcScope no_gc(heap);
+    const std::size_t enc_len = fiber::util::base64_encoded_size(len);
+    // Base64 output is pure ASCII: utf16 length == byte length, always well-formed.
+    GcString *str = gc_new_string_wtf8_uninit(&heap, enc_len, enc_len, true);
+    if (!str) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    fiber::util::base64_encode_into(data, len, gc_string_wtf8_data(str));
+    GcString *interned = gc_detail::gc_string_intern_final(&heap, str);
+    *out = js_make_heap_ref(&interned->hdr, GcHeapKind::String);
+    return AbiResult::success(*out);
 }
 
 // ---- binary.base64Decode: String -> Binary; non-string -> undefined; invalid -> RangeError ----
+// Two-phase like encode: base64_decoded_size validates structure and yields the
+// exact length; gc_new_binary_uninit allocates; base64_decode_into fills in place.
 
 AbiResult base64_decode_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
@@ -91,15 +115,38 @@ AbiResult base64_decode_fn(void * /*userdata*/, const Library::HostCallFrame &fr
     if (!string_utf8_view(args.args[0], text)) {
         return AbiResult::success(JsValue::make_undefined());
     }
-    std::string out;
-    if (!fiber::util::base64_decode(text, out)) {
+    bool ok = false;
+    const std::size_t dec_len = fiber::util::base64_decoded_size(text, ok);
+    if (!ok) {
         // Java Base64.getDecoder().decode throws IllegalArgumentException -> RangeError.
         return range_error();
     }
-    return make_binary_result(&frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
+    if (dec_len == 0) {
+        return make_binary_result(&frame.runtime, nullptr, 0);
+    }
+    GcHeap &heap = frame.runtime;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    GcHeap::NoGcScope no_gc(heap);
+    GcBinary *bin = gc_new_binary_uninit(&heap, dec_len);
+    if (!bin) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    if (!fiber::util::base64_decode_into(text, bin->data)) {
+        // Alphabet-invalid; structure was already validated by decoded_size.
+        return range_error();
+    }
+    *out = js_make_heap_ref(&bin->hdr, GcHeapKind::Binary);
+    return AbiResult::success(*out);
 }
 
 // ---- binary.hex: Binary -> lowercase hex String; non-binary -> TypeError ----
+// Huffman-style two-phase like base64_encode_fn: exact size (2n), one GC string,
+// hex_encode writes in place. Hex output is pure ASCII: utf16 length == byte
+// length, always well-formed.
 
 AbiResult hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
@@ -111,13 +158,30 @@ AbiResult hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Libra
         // Java throws ScriptExecException -> TypeError.
         return type_error();
     }
-    std::string hex_str;
-    hex_str.resize(len * 2);
-    hex_encode(data, len, hex_str.data());
-    return make_string_result(&frame.runtime, hex_str);
+    if (len == 0) {
+        return AbiResult::success(empty_string());
+    }
+    GcHeap &heap = frame.runtime;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    GcHeap::NoGcScope no_gc(heap);
+    const std::size_t hex_len = len * 2;
+    GcString *str = gc_new_string_wtf8_uninit(&heap, hex_len, hex_len, true);
+    if (!str) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    hex_encode(data, len, gc_string_wtf8_data(str));
+    GcString *interned = gc_detail::gc_string_intern_final(&heap, str);
+    *out = js_make_heap_ref(&interned->hdr, GcHeapKind::String);
+    return AbiResult::success(*out);
 }
 
 // ---- binary.fromHex: String -> Binary; non-string -> TypeError; invalid hex -> RangeError ----
+// Two-phase like base64_decode_fn: gc_new_binary_uninit allocates, the digit
+// loop fills in place (invalid digit -> RangeError, same semantics as before).
 
 AbiResult from_hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     if (!args.args || args.argc < 1) {
@@ -131,28 +195,44 @@ AbiResult from_hex_fn(void * /*userdata*/, const Library::HostCallFrame &frame, 
         // Strict: Java's lenient truncation is intentionally not mirrored.
         return range_error();
     }
-    std::string out;
-    out.resize(text.size() / 2);
+    if (text.empty()) {
+        return make_binary_result(&frame.runtime, nullptr, 0);
+    }
+    GcHeap &heap = frame.runtime;
+    GcHeap::LocalMark mark(heap);
+    ValueHandle out = heap.local_value();
+    if (!out) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    GcHeap::NoGcScope no_gc(heap);
+    GcBinary *bin = gc_new_binary_uninit(&heap, text.size() / 2);
+    if (!bin) {
+        return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
     for (std::size_t i = 0; i < text.size(); i += 2) {
-        int hi = hex_digit(static_cast<unsigned char>(text[i]));
-        int lo = hex_digit(static_cast<unsigned char>(text[i + 1]));
+        const int hi = hex_digit(static_cast<unsigned char>(text[i]));
+        const int lo = hex_digit(static_cast<unsigned char>(text[i + 1]));
         if (hi < 0 || lo < 0) {
             return range_error();
         }
-        out[i / 2] = static_cast<char>((hi << 4) | lo);
+        bin->data[i / 2] = static_cast<std::uint8_t>((hi << 4) | lo);
     }
-    return make_binary_result(&frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
+    *out = js_make_heap_ref(&bin->hdr, GcHeapKind::Binary);
+    return AbiResult::success(*out);
 }
 
 // ---- binary.getUtf8Bytes: any -> Binary = JsonUtil.toString(value) UTF-8 bytes ----
 
 AbiResult get_utf8_bytes_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
                             Library::Arguments args) noexcept {
-    std::string out;
-    if (args.args && args.argc >= 1) {
-        node_json_to_string(args.args[0], out);
-    }
-    return make_binary_result(&frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
+    // Staging string throws on OOM; the guard maps it to a graceful abort.
+    return oom_guard([&] {
+        std::string out;
+        if (args.args && args.argc >= 1) {
+            node_json_to_string(args.args[0], out);
+        }
+        return make_binary_result(&frame.runtime, reinterpret_cast<const std::uint8_t *>(out.data()), out.size());
+    });
 }
 
 } // namespace
