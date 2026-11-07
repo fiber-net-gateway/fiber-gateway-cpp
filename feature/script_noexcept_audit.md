@@ -216,9 +216,20 @@ AbiResult oom_guard(Body &&body) noexcept {
   JSON 编码，`build_request_body`；**已修 2026-11-07**，refactor/json-noexcept 改用 `json::StringSink`，
   编码 OOM 时 `http.request` abort）+ 同文件 `object_pairs_to_form`/`apply_options_headers` ×2/
   `url_field_error`；`ResponseFuncs.cpp` `set_header_fn`/`add_header_fn`/`add_cookie_fn`；
-  `ScriptExchangeCtx.cpp` `query`/`resolve_from_request`（query decode 的 std::string 拷贝）；
+  `ScriptExchangeCtx.cpp` `query`/`resolve_from_request`（query decode 的 std::string 拷贝；**已修 2026-11-07**，
+  见下条）；
   `HttpTarget.cpp:83` `parse`；`CookieCodec.h:48` `decode_cookie_header` 模板（经 ScriptExchangeCtx
   两处 lambda 实例化报出）
+- **query 解码两段式（2026-11-07，用户定谳）**：合并 refactor/json-noexcept 后发现回归——fd96c61b 给
+  `utf8_repair` 加的 noexcept 落在 ID 15/16 的 oom_guard 调用链内，`bad_alloc` 在到达 guard 前就
+  terminate（两边单独都正常；checker 跨 TU 看不到，靠故障注入复现）。修法不是去 noexcept，而是消除分配：
+  `utf8_repair` 拆为 `utf8_repaired_size`/`utf8_repair_into`；`form_decode_query` 改为
+  `(in, alloc, sink)`（同 `encode_set_cookie` 的分配器注入），新增 `form_percent_decode`。一块
+  `in.size()` 缓冲服务全部 pair（key/value 是 in 的不相交片段），仅需修复的分量多取一块精确尺寸。
+  `query()`/`resolve_from_request` 取 exchange pool，`url_parse_query_fn` 取调用级 `BufPool`。
+  pool 内存到请求结束才释放：每个 `$query.x` 常量最多一块（名字编译期确定且逐请求记忆化），
+  总量有界。`query()` 在 `NoMem` 时不再留下半成品对象：置 undefined，下次重试（宽松策略仅限
+  格式错误）。ID 15 `URL.decodeComponent` 仍用 `std::string` + guard。
 - `HttpWebSocketProxy.cpp` `build_expected_websocket_accept`（:42）与
   `prepare_websocket_handshake`（:132）noexcept 但 `std::string::resize` 抛式
   （迁移 base64 时发现）——**已修（2026-11-06，随审计收尾追加）**：两产物均
@@ -260,7 +271,7 @@ AbiResult oom_guard(Body &&body) noexcept {
 | 13 | oom_guard → 改为 `json::StringSink` | **已修**（2026-11-06 oom_guard；2026-11-07 合入 refactor/json-noexcept 后由 sink 内部 catch 取代，guard 撤除，见 18a） |
 | 14 | oom_guard | **已修**（2026-11-06，oom_guard bad_alloc-only） |
 | 15 | oom_guard | **已修**（2026-11-06，oom_guard bad_alloc-only） |
-| 16 | oom_guard | **已修**（2026-11-06，oom_guard bad_alloc-only） |
+| 16 | oom_guard → 改为两段式 | **已修**（2026-11-06 oom_guard；2026-11-07 `form_decode_query` 改两段式，缓冲取自调用级 `BufPool`，函数体不再抛，guard 撤除，见 §6） |
 | 17 | oom_guard | **已修**（2026-11-06，oom_guard bad_alloc-only） |
 | 18a | 去 noexcept → 改为 sink 内部 catch | **已修**（2026-11-06 去 noexcept；2026-11-07 `OutputSink::write` 全面 noexcept，私有 StringSink 删除，改用 `json::StringSink`：bad_alloc 在 sink 内 catch 并置 `out_of_memory()`，`stringify_fn` 据此 abort，无需 guard） |
 | 18b | 去 noexcept | **已修**（2026-11-06；ID 17 guard 的前置） |

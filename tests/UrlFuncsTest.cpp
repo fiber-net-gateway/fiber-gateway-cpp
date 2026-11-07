@@ -7,12 +7,14 @@
 #include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/std/StdLibrary.h>
 #include "ScriptTestHelpers.h"
+#include "support/AllocFailure.h"
 
 using fiber::script::AbiResult;
 using fiber::script::GcHeap;
 using fiber::script::GcString;
 using fiber::script::JsNodeType;
 using fiber::script::JsValue;
+using fiber::script::ScriptAbortReason;
 using fiber::script::ScriptResult;
 using fiber::script::std_lib::StdLibrary;
 using fiber::test::run_script;
@@ -95,7 +97,69 @@ TEST(UrlFuncsTest, DecodeComponentMalformedEscapeThrows) {
     expect_script_string(R"(try { URL.decodeComponent('%'); return "no"; } catch (e) { return "caught"; })", "caught");
 }
 
+// Every allocation on the UTF-8 repair path must reach the host function's oom_guard: a
+// noexcept helper under the guard terminates the process instead of aborting the script.
+TEST(UrlFuncsTest, DecodeComponentRepairOomAbortsScript) {
+    if constexpr (!fiber::test::kAllocFailureAvailable) {
+        GTEST_SKIP() << "no operator new replacement in this build";
+    }
+    std::string source = "return URL.decodeComponent('";
+    for (int i = 0; i < 64; ++i) {
+        source += "%FF";
+    }
+    source += "');";
+    auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
+    ASSERT_TRUE(compiled.has_value());
+
+    std::size_t aborts = 0;
+    for (std::size_t successes = 0;; ++successes) {
+        GcHeap heap;
+        JsValue root = JsValue::make_undefined();
+        ScriptResult result;
+        {
+            fiber::test::ScopedAllocFailure out_of_memory(successes);
+            result = compiled->exec_sync(root, nullptr, heap);
+        }
+        if (result.is_success()) {
+            break;
+        }
+        ASSERT_TRUE(result.is_abort());
+        EXPECT_EQ(result.abort().reason, ScriptAbortReason::OutOfMemory);
+        ++aborts;
+    }
+    EXPECT_GE(aborts, 2U); // the decode buffer and the repair buffer each failed once
+}
+
+TEST(UrlFuncsTest, DecodeComponentRepairsMalformedUtf8) {
+    expect_script_string("return URL.decodeComponent('a%FFb');", "a\xef\xbf\xbd"
+                                                                 "b");
+}
+
 // ---- URL.parseQuery ----
+
+TEST(UrlFuncsTest, ParseQueryRepairsMalformedUtf8) {
+    expect_script_string("return URL.parseQuery('a=%FF').a;", "\xef\xbf\xbd");
+    expect_script_string("return URL.parseQuery('%C3=1')['\xef\xbf\xbd'];", "1");
+}
+
+// parseQuery has no oom_guard: its decode buffers come from a pool, so nothing may throw.
+TEST(UrlFuncsTest, ParseQueryMakesNoThrowingAllocation) {
+    if constexpr (!fiber::test::kAllocFailureAvailable) {
+        GTEST_SKIP() << "no operator new replacement in this build";
+    }
+    auto compiled = fiber::script::compile_script(StdLibrary::instance(), "return URL.parseQuery('a=%FF&%FE=b').a;");
+    ASSERT_TRUE(compiled.has_value());
+    GcHeap heap;
+    JsValue root = JsValue::make_undefined();
+    ScriptResult result;
+    {
+        // An allocation here would throw through the noexcept host function and terminate.
+        fiber::test::ScopedAllocFailure no_allocations(0);
+        result = compiled->exec_sync(root, nullptr, heap);
+    }
+    ASSERT_TRUE(result.is_success());
+    EXPECT_EQ(string_to_utf8(result.value()), "\xef\xbf\xbd");
+}
 
 TEST(UrlFuncsTest, ParseQueryRepeatedKeyAggregates) {
     expect_script_bool("let q = URL.parseQuery('a=1&a=2&b=x'); return q.a[0] === '1' && q.a[1] === '2' && q.b === 'x';",
