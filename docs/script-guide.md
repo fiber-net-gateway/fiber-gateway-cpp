@@ -1020,9 +1020,10 @@ All three send overloads honor only an integer status and otherwise use 200. The
 #### `resp.sendJson(status, body)`
 
 - Parameters: asynchronous. Only an integer `status` is honored; another type falls back to 200. `body` may be any JSON-encodable script value.
-- Return: `null` after a successful send. `undefined` encodes as JSON null, `NaN`, `Infinity`, and `-Infinity` as JSON strings of the same name, `Binary` as a Base64 string, and an exception value as an object with `position`, `name`, `message`, and `meta`.
+- Return: `null` after a successful send. `undefined` encodes as JSON null, `NaN`, `Infinity`, and `-Infinity` as JSON strings of the same name, `Binary` as a Base64 string, and an exception value as an object with `position`, `name`, `message`, and `meta`. A built-in error, such as the `RangeError` from `1 / 0`, has no such details: `position` is -1, and `message` and `meta` are `null`.
 - Exceptions: an invalid string, iterator, or other encode failure, and header/body I/O failures, throw `Error`.
 - Side effects: replaces Content-Type with `application/json`, commits all pending headers, writes the body, and ends the response stream.
+- Responses without content: a HEAD request, and status 204 or 304, send only the headers, with no Content-Length. The body is dropped without being encoded, so an encoding error in it goes unnoticed. `resp.send()` behaves the same way.
 - Large responses: a body that encodes within 64 KiB is sent with a fixed Content-Length. Past that, the body is sent about every 64 KiB as it is encoded, with no Content-Length: HTTP/1.1 uses chunked framing, HTTP/1.0 ends with the connection close, and HTTP/2 and HTTP/3 end with the stream.
 - Failure partway: if a value cannot be encoded after part of the body went out, the status can no longer change, so the response is aborted: HTTP/1 closes the connection, and HTTP/2 and HTTP/3 reset the stream. The client receives only the first part of the JSON, and an HTTP/1.0 client cannot tell this from a normal end. The error remains catchable, but no other response can be sent.
 

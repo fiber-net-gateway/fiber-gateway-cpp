@@ -193,20 +193,21 @@ fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::
     using fiber::script::JsNodeType;
     using fiber::script::ScriptResultKind;
 
+    fiber::common::IoResult<void> written;
     switch (result.kind) {
         case ScriptResultKind::Void: {
             co_await ctx.write_empty(204);
             break;
         }
         case ScriptResultKind::Value: {
-            co_await ctx.write_json(200, result.value());
+            written = co_await ctx.write_json(200, result.value());
             break;
         }
         case ScriptResultKind::Exception: {
             const fiber::script::JsValue &exc = result.exception();
             if (js_value_is_heap_ref(exc) && js_value_type(exc) == JsNodeType::Exception) {
                 LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script exception kind=heap";
-                co_await ctx.write_json(500, exc);
+                written = co_await ctx.write_json(500, exc);
             } else {
                 LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script exception kind="
                                        << fiber::script::exception_kind_name(js_value_exception_kind(exc));
@@ -220,6 +221,14 @@ fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::
             co_await ctx.write_error_json(500, fiber::script::abort_reason_name(result.abort().reason));
             break;
         }
+    }
+    // A value that cannot be encoded sends nothing, and the client still needs an answer.
+    if (!written && !ctx.response_header_sent()) {
+        LOG(LOG_SCRIPT, ERROR) << "request_id=" << log_context.request_id << " script result cannot be encoded";
+        co_await ctx.write_error_json(
+                500, written.error() == fiber::common::IoErr::NoMem
+                             ? fiber::script::abort_reason_name(fiber::script::ScriptAbortReason::OutOfMemory)
+                             : fiber::script::exception_kind_name(fiber::script::ExceptionKind::TypeError));
     }
     co_return;
 }

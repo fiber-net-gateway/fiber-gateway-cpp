@@ -247,6 +247,23 @@ TEST(JsValueEncodeTest, EncodeExceptionDefaultMeta) {
     EXPECT_EQ(sink.output, "{\"position\":-1,\"name\":\"RangeError\",\"message\":null,\"meta\":null}");
 }
 
+TEST(JsValueEncodeTest, EncodeTaggedExceptionLikeOneWithNoDetails) {
+    using fiber::script::ExceptionKind;
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+    for (const auto &[kind, name]:
+         {std::pair{ExceptionKind::TypeError, "TypeError"}, std::pair{ExceptionKind::RangeError, "RangeError"},
+          std::pair{ExceptionKind::ReferenceError, "ReferenceError"},
+          std::pair{ExceptionKind::IterationError, "IterationError"}}) {
+        const std::string expected =
+                std::string(R"({"position":-1,"name":")") + name + R"(","message":null,"meta":null})";
+        const JsValue exception = JsValue::make_exception(kind);
+        EXPECT_EQ(encode_whole(exception), expected);
+        EXPECT_EQ(encode_in_steps(exception, 0), expected);
+        EXPECT_EQ(encode_whole(array_of(heap, {exception, JsValue::make_integer(1)})), "[" + expected + ",1]");
+    }
+}
+
 TEST(JsValueEncodeTest, StepsMatchOneShotAtEveryLimit) {
     GcHeap heap;
     GcHeap::NoGcScope no_gc(heap);

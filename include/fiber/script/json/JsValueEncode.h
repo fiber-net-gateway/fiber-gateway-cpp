@@ -62,6 +62,7 @@ private:
         std::int32_t cursor; // Object: next entry, -1 at the end.
         Kind kind;
         bool key_written; // Object: the entry at cursor has its key out, its value is next.
+        ExceptionKind tagged; // Exception: what it is when exception is null, as a tagged one has no details.
     };
 
     enum class Token : std::uint8_t { None, String, Binary };

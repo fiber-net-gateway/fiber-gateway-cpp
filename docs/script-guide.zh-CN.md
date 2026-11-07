@@ -1008,9 +1008,10 @@ declare namespace resp {
 #### `resp.sendJson(status, body)`
 
 - 参数：异步函数。`status` 只有整数才生效，其他类型回退为 200；`body` 接受任意可 JSON 编码的脚本值。
-- 返回：发送成功为 `null`。`undefined` 编码为 JSON `null`，`NaN`、`Infinity`、`-Infinity` 编码为同名的 JSON 字符串，`Binary` 编码为 Base64 字符串，异常值编码为包含 `position`、`name`、`message` 和 `meta` 的对象。
+- 返回：发送成功为 `null`。`undefined` 编码为 JSON `null`，`NaN`、`Infinity`、`-Infinity` 编码为同名的 JSON 字符串，`Binary` 编码为 Base64 字符串，异常值编码为包含 `position`、`name`、`message` 和 `meta` 的对象；内置错误（如 `1 / 0` 的 `RangeError`）没有这些细节，`position` 为 -1，`message` 和 `meta` 为 `null`。
 - 异常：非法字符串、迭代器等编码失败，或 header/body I/O 失败时抛 `Error`。
 - 副作用：把 `Content-Type` 替换为 `application/json`，提交全部 pending headers，写出 body 并结束响应流。
+- 无内容的响应：HEAD 请求和状态码 204、304 只发送 header，body 被丢弃且不做编码，因此其中的编码错误不会被发现。不带 Content-Length。`resp.send()` 同样如此。
 - 大响应：编码结果在 64 KiB 以内时，以固定 Content-Length 发送。超过后每编码约 64 KiB 发送一次，不带 Content-Length：HTTP/1.1 使用 chunked，HTTP/1.0 以关闭连接结束，HTTP/2 和 HTTP/3 以流结束。
 - 中途失败：在已经发送部分 body 之后才遇到无法编码的值时，状态码无法再更改，响应会被中断：HTTP/1 关闭连接，HTTP/2 和 HTTP/3 重置流。客户端只收到 JSON 的前半部分，而 HTTP/1.0 客户端无法把这种情况与正常结束区分开。异常仍可被 `catch`，但不能再发送其他响应。
 

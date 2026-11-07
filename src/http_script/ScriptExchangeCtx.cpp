@@ -486,8 +486,26 @@ fiber::http::OutgoingHeaderBlockView ScriptExchangeCtx::final_header(int status,
     return header;
 }
 
+bool ScriptExchangeCtx::response_has_no_body(int status) const noexcept {
+    return exchange_.method() == fiber::http::HttpMethod::Head || status == 204 || status == 304;
+}
+
+fiber::async::Task<fiber::common::IoResult<void>> ScriptExchangeCtx::send_header_only(int status) noexcept {
+    fiber::http::OutgoingHeaderBlockView header = final_header(status, fiber::http::HttpBodySpec::None());
+    header.end_stream = true;
+    auto header_result = co_await response_writer_.send_header(header);
+    if (!header_result) {
+        co_return std::unexpected(header_result.error());
+    }
+    header_sent_ = true;
+    co_return fiber::common::IoResult<void>{};
+}
+
 fiber::async::Task<fiber::common::IoResult<void>>
 ScriptExchangeCtx::send_final_with_body(int status, std::size_t content_length, const std::uint8_t *data) noexcept {
+    if (response_has_no_body(status)) {
+        co_return co_await send_header_only(status);
+    }
     const fiber::http::OutgoingHeaderBlockView header =
             final_header(status, fiber::http::HttpBodySpec::ContentLength(content_length));
     auto header_result = co_await response_writer_.send_header(header);
@@ -505,6 +523,9 @@ ScriptExchangeCtx::send_final_with_body(int status, std::size_t content_length, 
 
 fiber::async::Task<fiber::common::IoResult<void>>
 ScriptExchangeCtx::send_final_with_body(int status, fiber::mem::IoBufChain body) noexcept {
+    if (response_has_no_body(status)) {
+        co_return co_await send_header_only(status);
+    }
     const fiber::http::OutgoingHeaderBlockView header =
             final_header(status, fiber::http::HttpBodySpec::ContentLength(body.readable_bytes()));
     auto header_result = co_await response_writer_.send_header(header);
@@ -526,6 +547,11 @@ ScriptExchangeCtx::send_final_with_body(int status, fiber::mem::IoBufChain body)
 fiber::async::Task<fiber::common::IoResult<void>>
 ScriptExchangeCtx::write_json(int status, const fiber::script::JsValue &body) noexcept {
     using Status = fiber::script::json::JsValueEncoder::Status;
+
+    if (response_has_no_body(status)) {
+        set_response_header("Content-Type", "application/json");
+        co_return co_await send_header_only(status);
+    }
 
     fiber::mem::IoBufChain json;
     ChainSink sink(json);
