@@ -39,7 +39,10 @@ bool header_has_token(const HttpHeaders &headers, std::string_view name, std::ui
     return false;
 }
 
-bool build_expected_websocket_accept(std::string_view key, std::string &out) noexcept {
+// SHA1(key || GUID) base64-encoded into the fixed accept buffer. Allocation-free:
+// the 28-char output length is a compile-time constant.
+bool build_expected_websocket_accept(std::string_view key, std::array<char, kWebSocketAcceptB64Len> &out) noexcept {
+    static_assert(fiber::util::base64_encoded_size(SHA_DIGEST_LENGTH) == kWebSocketAcceptB64Len);
     if (key.empty()) {
         return false;
     }
@@ -49,8 +52,8 @@ bool build_expected_websocket_accept(std::string_view key, std::string &out) noe
         SHA1_Update(&ctx, kWebSocketGuid.data(), kWebSocketGuid.size()) != 1 || SHA1_Final(digest.data(), &ctx) != 1) {
         return false;
     }
-    out = fiber::util::base64_encode(digest.data(), digest.size());
-    return out.size() == 28;
+    fiber::util::base64_encode_into(digest.data(), digest.size(), out.data());
+    return true;
 }
 
 struct WebSocketTunnelState {
@@ -136,8 +139,10 @@ bool prepare_websocket_handshake(WebSocketHandshake &handshake) noexcept {
     if (RAND_bytes(random.data(), random.size()) != 1) {
         return false;
     }
-    handshake.generated_key = fiber::util::base64_encode(random.data(), random.size());
-    return handshake.generated_key.size() == 24;
+    static_assert(fiber::util::base64_encoded_size(16) == kWebSocketKeyB64Len);
+    fiber::util::base64_encode_into(random.data(), random.size(), handshake.generated_key.data());
+    handshake.key_generated = true;
+    return true;
 }
 
 bool prepare_upstream_websocket_headers(const HttpExchange &exchange, WebSocketHandshake &handshake,
@@ -157,11 +162,11 @@ bool prepare_upstream_websocket_headers(const HttpExchange &exchange, WebSocketH
 
     std::string_view key;
     if (handshake.extended_connect()) {
-        if (handshake.generated_key.empty() || headers.set("Sec-WebSocket-Key", handshake.generated_key) == nullptr ||
+        if (!handshake.key_generated || headers.set("Sec-WebSocket-Key", handshake.key_view()) == nullptr ||
             headers.set("Sec-WebSocket-Version", "13") == nullptr) {
             return false;
         }
-        key = handshake.generated_key;
+        key = handshake.key_view();
     } else {
         key = trim_lws(exchange.request_headers().get("sec-websocket-key", kKeyHash));
         if (key.empty() || headers.set("Sec-WebSocket-Key", key) == nullptr) {
@@ -174,7 +179,11 @@ bool prepare_upstream_websocket_headers(const HttpExchange &exchange, WebSocketH
         }
     }
 
-    return build_expected_websocket_accept(key, handshake.expected_accept);
+    if (!build_expected_websocket_accept(key, handshake.expected_accept)) {
+        return false;
+    }
+    handshake.accept_ready = true;
+    return true;
 }
 
 bool valid_websocket_upgrade_response(const Http1ResponseHead &head, const WebSocketHandshake &handshake) noexcept {
@@ -184,7 +193,7 @@ bool valid_websocket_upgrade_response(const Http1ResponseHead &head, const WebSo
     return handshake.active() && head.status_code == 101 &&
            header_has_token(head.headers, "connection", kConnectionHash, "upgrade") &&
            header_has_token(head.headers, "upgrade", kUpgradeHash, "websocket") &&
-           trim_lws(head.headers.get("sec-websocket-accept", kAcceptHash)) == handshake.expected_accept;
+           trim_lws(head.headers.get("sec-websocket-accept", kAcceptHash)) == handshake.accept_view();
 }
 
 void build_downstream_websocket_headers(const Http1ResponseHead &upstream_head, HttpHeaders &headers,
@@ -213,7 +222,7 @@ void finalize_downstream_websocket_headers(HttpHeaders &headers, const WebSocket
     if (handshake.downstream == WebSocketDownstream::Http1Upgrade) {
         headers.set("Connection", "Upgrade");
         headers.set("Upgrade", "websocket");
-        headers.set("Sec-WebSocket-Accept", handshake.expected_accept);
+        headers.set("Sec-WebSocket-Accept", handshake.accept_view());
         return;
     }
 

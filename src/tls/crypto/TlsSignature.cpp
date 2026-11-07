@@ -13,6 +13,7 @@
 #include <openssl/rsa.h>
 
 #include <iterator>
+#include <string>
 
 #include <fiber/common/Assert.h>
 #include <fiber/common/util/Base64.h>
@@ -198,8 +199,13 @@ common::IoResult<std::string> extract_pem_block(std::span<const char> pem, const
             }
             b64.push_back(c);
         }
-        std::string der;
-        if (!util::base64_decode(b64, der)) {
+        bool b64_ok = false;
+        const std::size_t der_len = util::base64_decoded_size(b64, b64_ok);
+        if (!b64_ok) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        std::string der(der_len, '\0');
+        if (der_len > 0 && !util::base64_decode_into(b64, reinterpret_cast<std::uint8_t *>(der.data()))) {
             return std::unexpected(common::IoErr::Invalid);
         }
         return der;
