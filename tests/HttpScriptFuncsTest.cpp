@@ -138,9 +138,11 @@ std::shared_ptr<fiber::script::Script> compile_http_script(std::string_view sour
     return std::make_shared<fiber::script::Script>(std::move(*compiled));
 }
 
-fiber::http::HttpHandler make_script_handler(const std::shared_ptr<fiber::script::Script> &script) {
-    return [script](fiber::http::HttpExchange &exchange) -> Task<void> {
+fiber::http::HttpHandler make_script_handler(const std::shared_ptr<fiber::script::Script> &script,
+                                             std::size_t max_heap_bytes = 0) {
+    return [script, max_heap_bytes](fiber::http::HttpExchange &exchange) -> Task<void> {
         fiber::script::GcHeap heap;
+        heap.set_max_bytes(max_heap_bytes);
         fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
         fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
         auto result = co_await script->exec_async(root, &ctx, heap);
@@ -410,6 +412,124 @@ TEST(HttpScriptFuncsTest, RequestViewsAndSendJson) {
     EXPECT_TRUE(contains(result.body, "\"host\":\"localhost\"")) << result.body;
 
     s.stop();
+}
+
+// The request body is a one-shot stream: a second consumer must fail loudly, not see an
+// empty body it could mistake for what the client sent.
+TEST(HttpScriptFuncsTest, RequestBodyCanOnlyBeConsumedOnce) {
+    constexpr std::string_view kProbe = "try { %s; resp.sendJson(200, {second: \"returned\"}); }"
+                                        "catch (e) { resp.sendJson(200, {second: \"threw\"}); }";
+    const std::pair<std::string, std::string> cases[] = {
+            {"req.readBinary();", "req.readBinary()"}, {"req.discardBody();", "req.readBinary()"},
+            {"req.readBinary();", "req.readJson()"},   {"req.discardBody();", "req.readJson()"},
+            {"req.readJson();", "req.readBinary()"},
+    };
+    for (const auto &[first, second]: cases) {
+        std::string source = first;
+        std::string probe(kProbe);
+        probe.replace(probe.find("%s"), 2, second);
+        source += probe;
+
+        ServerFixture s;
+        auto script = compile_http_script(source);
+        ASSERT_NE(script, nullptr);
+        s.start(make_script_handler(script));
+
+        ClientRequest req;
+        req.method = fiber::http::HttpMethod::Post;
+        req.target = "/script";
+        req.body = "{\"a\":1}";
+        ClientResult result = s.request(std::move(req));
+
+        EXPECT_EQ(result.status_code, 200) << source;
+        EXPECT_TRUE(contains(result.body, "\"second\":\"threw\"")) << source << " -> " << result.body;
+        s.stop();
+    }
+}
+
+std::string patterned_body(std::size_t len) {
+    std::string body(len, '\0');
+    for (std::size_t i = 0; i < len; ++i) {
+        body[i] = static_cast<char>(((i * 31U) + (i >> 8)) & 0xFFU);
+    }
+    return body;
+}
+
+ClientResult post_to_script(std::string_view source, std::size_t max_heap_bytes, std::string body) {
+    ServerFixture s;
+    auto script = compile_http_script(source);
+    EXPECT_NE(script, nullptr);
+    s.start(make_script_handler(script, max_heap_bytes));
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Post;
+    req.target = "/script";
+    req.body = std::move(body);
+    ClientResult result = s.request(std::move(req));
+    s.stop();
+    return result;
+}
+
+// Larger than one 64 KiB read, so the binary stays rooted across several suspensions.
+TEST(HttpScriptFuncsTest, ReadBinaryCopiesAKnownLengthBodyAcrossReads) {
+    const std::string body = patterned_body(std::size_t{300} * 1024);
+    ClientResult result = post_to_script("resp.send(200, req.readBinary());", std::size_t{1024} * 1024, body);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_EQ(result.body.size(), body.size());
+    EXPECT_TRUE(result.body == body);
+}
+
+TEST(HttpScriptFuncsTest, ReadBinarySurvivesLaterCollections) {
+    const std::string body = patterned_body(std::size_t{100} * 1024);
+    ClientResult result = post_to_script("let b = req.readBinary();"
+                                         "let g = strings.repeat(\"x\", 8000000);"
+                                         "g = strings.repeat(\"y\", 8000000);"
+                                         "g = strings.repeat(\"z\", 8000000);"
+                                         "resp.send(200, b);",
+                                         0, body);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(result.body == body);
+}
+
+TEST(HttpScriptFuncsTest, ReadBinaryOfAnEmptyBodyIsEmpty) {
+    ClientResult result = post_to_script("resp.sendJson(200, {size: length(req.readBinary())});", 1024, "");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"size\":0")) << result.body;
+}
+
+// The limit is soft, so a heap already past it must not turn "no body" into a refusal.
+TEST(HttpScriptFuncsTest, ReadBinaryOfAnEmptyBodyIgnoresAFullHeap) {
+    ClientResult result = post_to_script("let keep = strings.repeat(\"x\", 4096);"
+                                         "resp.sendJson(200, {size: length(req.readBinary()), keep: length(keep)});",
+                                         1024, "");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"size\":0")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"keep\":4096")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, ReadBinaryOverTheHeapLimitThrowsCatchably) {
+    ClientResult result = post_to_script("try { req.readBinary(); resp.sendJson(200, {read: true}); }"
+                                         "catch (e) { resp.sendJson(200, {caught: e}); }",
+                                         1024, patterned_body(4096));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
+    EXPECT_FALSE(contains(result.body, "\"read\":true")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, RefusedBodyIsConsumedForLaterReads) {
+    ClientResult result = post_to_script("try { req.readBinary(); } catch (e) { }"
+                                         "try { req.readBinary(); resp.sendJson(200, {second: \"returned\"}); }"
+                                         "catch (e) { resp.sendJson(200, {second: e}); }",
+                                         1024, patterned_body(4096));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "already consumed")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, HeapLimitCollectsGarbageBeforeRefusingABody) {
+    const std::string body = patterned_body(std::size_t{500} * 1024);
+    ClientResult result = post_to_script("strings.repeat(\"x\", 900000); resp.send(200, req.readBinary());",
+                                         std::size_t{1024} * 1024, body);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(result.body == body);
 }
 
 // A >16KiB JSON body spans multiple sink nodes: the chain-encoded response must arrive

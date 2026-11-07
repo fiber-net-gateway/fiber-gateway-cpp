@@ -193,6 +193,9 @@ enum class LocationKind : unsigned char {
     Script,
 };
 
+// A script request's GC heap is capped here unless configured otherwise; 0 means unlimited.
+inline constexpr std::size_t kDefaultScriptMaxHeapSize = static_cast<std::size_t>(64) * 1024 * 1024;
+
 struct LocationConfig {
     SourceLocation location;
     // The url pattern handed verbatim to RoutePathMatcher: a bare static pattern matches
@@ -206,6 +209,7 @@ struct LocationConfig {
     ProxySettings proxy;
     GzipSettings gzip;
     std::size_t client_max_body_size = 0;
+    std::size_t script_max_heap_size = kDefaultScriptMaxHeapSize;
     bool reuse_connection = true;
     // nullopt inherits the enclosing server; Off explicitly disables an inherited log.
     std::optional<AccessLogConfig> access_log;
@@ -219,6 +223,7 @@ struct ServerConfig {
     ProxySettings proxy_defaults;
     GzipSettings gzip;
     std::size_t client_max_body_size = 0;
+    std::size_t script_max_heap_size = kDefaultScriptMaxHeapSize;
     std::vector<LocationConfig> locations;
     // nullopt inherits the enclosing http block; Off explicitly disables an inherited log.
     std::optional<AccessLogConfig> access_log;
@@ -231,6 +236,7 @@ struct HttpConfig {
     ConnectionPoolConfig connection_pool;
     GzipSettings gzip;
     std::size_t client_max_body_size = 0;
+    std::size_t script_max_heap_size = kDefaultScriptMaxHeapSize;
     // nullopt and Off both resolve to disabled at the root http scope.
     std::optional<AccessLogConfig> access_log;
 };

@@ -84,6 +84,57 @@ TEST(JsGcTest, StatsStartEmptyAndExcludeRootHandleStorage) {
     EXPECT_EQ(initial.gc_count, 0U);
 }
 
+TEST(JsGcTest, EnsureCanAllocIsUnlimitedByDefault) {
+    GcHeap heap;
+    EXPECT_EQ(heap.max_bytes(), 0U);
+    EXPECT_TRUE(heap.ensure_can_alloc(std::numeric_limits<std::size_t>::max()));
+    EXPECT_EQ(heap.stats().gc_count, 0U);
+}
+
+TEST(JsGcTest, EnsureCanAllocOnlyCollectsWhenItWouldHelp) {
+    GcHeap heap;
+    heap.set_max_bytes(1024);
+    EXPECT_TRUE(heap.ensure_can_alloc(1024));
+    EXPECT_FALSE(heap.ensure_can_alloc(1025));
+    EXPECT_FALSE(heap.ensure_can_alloc(std::numeric_limits<std::size_t>::max()));
+    EXPECT_EQ(heap.stats().gc_count, 0U);
+}
+
+TEST(JsGcTest, EnsureCanAllocReclaimsGarbageMadeJustBefore) {
+    GcHeap heap;
+    const std::string text(4096, 'g');
+    {
+        GcHeap::LocalMark mark(heap);
+        ValueHandle garbage = heap.local_value();
+        ASSERT_TRUE(garbage);
+        *garbage = JsValue::make_string(heap, text.data(), text.size());
+        ASSERT_EQ(js_value_type(*garbage), JsNodeType::String);
+    }
+    const std::size_t held = heap.stats().current_bytes;
+    ASSERT_GE(held, text.size());
+
+    // The string is still inside its first-collection protection: one pass is not enough.
+    heap.set_max_bytes(held + 16);
+    EXPECT_TRUE(heap.ensure_can_alloc(text.size()));
+    EXPECT_EQ(heap.stats().gc_count, 2U);
+    EXPECT_EQ(heap.stats().current_bytes, 0U);
+}
+
+TEST(JsGcTest, EnsureCanAllocRefusesWhenLiveDataFillsTheHeap) {
+    GcHeap heap;
+    const std::string text(4096, 'l');
+    ValueHandle live = heap.global_value();
+    ASSERT_TRUE(live);
+    *live = JsValue::make_string(heap, text.data(), text.size());
+    ASSERT_EQ(js_value_type(*live), JsNodeType::String);
+
+    heap.set_max_bytes(heap.stats().current_bytes + 16);
+    EXPECT_FALSE(heap.ensure_can_alloc(1024));
+    EXPECT_EQ(heap.stats().gc_count, 2U);
+    EXPECT_EQ(js_value_type(*live), JsNodeType::String);
+    EXPECT_TRUE(heap.ensure_can_alloc(16));
+}
+
 TEST(JsGcTest, StatsCountObjectStorageAndCompletedCollections) {
     GcHeap heap;
     constexpr std::uint8_t payload[] = {1, 2, 3};

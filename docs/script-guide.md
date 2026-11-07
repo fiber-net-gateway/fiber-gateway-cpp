@@ -949,15 +949,15 @@ These four functions take no arguments, throw no catchable exception, and do not
 
 - Parameters: none; asynchronous.
 - Return: reads the entire request body and constructs the corresponding script value.
-- Exceptions: an empty body, body-read failure, or invalid JSON throws `Error` with a fixed message. The detailed JSON byte offset is not exposed.
+- Exceptions: an empty body, an already consumed body, body-read failure, or invalid JSON throws `Error` with a fixed message. The detailed JSON byte offset is not exposed.
 - Side effects: consumes the request body and materializes the complete body and decoded tree in memory. The function sets no size limit.
 
 #### `req.readBinary()`
 
 - Parameters: none; asynchronous.
 - Return: a new `Binary` containing the complete request body; an empty body produces a zero-length binary.
-- Exceptions: a read failure throws `Error`; allocation failure aborts with `OutOfMemory`.
-- Side effects: consumes the body and materializes it contiguously in memory, without its own size limit.
+- Exceptions: a body that does not fit the host's heap limit throws a catchable exception named `OutOfMemory`; an already consumed body or a read failure throws `Error`; allocation failure aborts with `OutOfMemory`.
+- Side effects: consumes the body and materializes it contiguously in memory, up to the heap limit the host configures. A refused body is read and discarded first, unless the client is still waiting on `Expect: 100-continue`, so the script can carry on from a known state.
 
 #### `req.discardBody()`
 
@@ -966,7 +966,7 @@ These four functions take no arguments, throw no catchable exception, and do not
 - Exceptions: the current implementation ignores an underlying drain error and throws no catchable exception. Missing context aborts with `InvalidState`.
 - Side effects: consumes and discards the remaining request body.
 
-The request body is a one-shot stream. Do not combine these three operations or read the body before a `service.proxyPass()` that needs to forward it. Public services should enforce request-body limits in the HTTP layer.
+The request body is a one-shot stream. Once any of these three operations or a `service.proxyPass()` has started on it, `readJson()`, `readBinary()`, and a `proxyPass()` that would forward it throw `Error`, even if the first attempt failed. `discardBody()` stays a no-op. Body reads and discards give up after 60 seconds without progress. Public services should enforce request-body limits in the HTTP layer.
 
 ### 6.2 Response functions: `resp.*`
 

@@ -140,6 +140,7 @@ Top level:
 - `access_log <logger-name> "<script-template>";` or `access_log off;` - select the logger
   category and synchronous message template; inherited by `server` and `location`.
 - `client_max_body_size <size>;` - request-body limit inherited by `server` and `location`.
+- `script_max_heap_size <size>;` - script GC heap limit inherited by `server` and `location`.
 - `gzip on|off;`, `gzip_types <mime-type>...;`, `gzip_min_length <size>;`, and
   `gzip_comp_level <1..9>;` - response compression settings inherited independently by
   `server` and `location`.
@@ -181,6 +182,7 @@ Top level:
 
 - `access_log <logger-name> "<script-template>";` or `access_log off;`
 - `client_max_body_size <size>;`
+- `script_max_heap_size <size>;`
 - `gzip on|off;`, `gzip_types <mime-type>...;`, `gzip_min_length <size>;`, and
   `gzip_comp_level <1..9>;`
 - `server_name <name> [name ...];`
@@ -199,6 +201,7 @@ Top level:
 
 - `access_log <logger-name> "<script-template>";` or `access_log off;`
 - `client_max_body_size <size>;`
+- `script_max_heap_size <size>;`
 - `gzip on|off;`, `gzip_types <mime-type>...;`, `gzip_min_length <size>;`, and
   `gzip_comp_level <1..9>;`
 - `proxy_pass upstream://<upstream_name>;`
@@ -244,6 +247,14 @@ non-buffered proxy behavior. Buffering is memory-only and does not spill to a te
 disables the limit. A known `Content-Length` above the limit is rejected with 413 before an
 upstream connection is acquired. Streaming or chunked bodies are checked incrementally and are
 rejected as soon as the limit is crossed.
+
+`script_max_heap_size` limits how large a body `req.readBinary()` may load into a script request's
+GC heap; a body that does not fit is refused. It accepts the same sizes and scoping as
+`client_max_body_size`; the default is 64 MiB and `0` disables the limit. The limit applies per
+request, not per process. A body without a `Content-Length` is held outside the heap until it is
+complete, so its peak memory can reach about twice the limit. Other script allocations do not check
+the limit yet. Set `client_max_body_size` as well: a refused body is still read and discarded before
+the script continues.
 
 For HTTP/1.1 `Expect: 100-continue`, lite-nginx sends `100 Continue` lazily when the selected
 proxy or script first reads an allowed body. A request whose known length is already too large

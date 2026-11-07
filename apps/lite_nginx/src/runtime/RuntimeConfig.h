@@ -136,6 +136,7 @@ struct LocationRuntime {
     ProxyBufferingRuntime buffering;
     GzipRuntime gzip;
     std::size_t client_max_body_size = 0;
+    std::size_t script_max_heap_size = 0;
     std::uint32_t upstream_index = 0;
     AccessLogId access_log = kDisabledAccessLog;
     bool host_header_overridden = false;

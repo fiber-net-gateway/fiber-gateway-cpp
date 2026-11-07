@@ -763,6 +763,10 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     if (websocket.active()) {
         req_end_stream = true;
     }
+    // Announcing a body that can no longer be sent would leave the upstream waiting for it.
+    if (!req_end_stream && ctx->request_body_consumed()) {
+        co_return error_exn(*heap, "http.proxyPass: request body already consumed");
+    }
 
     fiber::http::Http1RequestHead head;
     head.method = method;
@@ -782,6 +786,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         co_return error_exn(*heap, "http.proxyPass: send request header failed");
     }
     if (!req_end_stream) {
+        ctx->mark_request_body_consumed();
         const ScriptRequestBody request_body = ctx->request_body();
         for (;;) {
             auto body_result = co_await request_body.read(kBodyChunkSize);
