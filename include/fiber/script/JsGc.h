@@ -132,15 +132,15 @@ public:
     void maybe_collect_for_alloc(std::size_t bytes);
     [[nodiscard]] bool no_gc_active() const noexcept { return no_gc_depth_ != 0; }
 
-    // Soft cap on GC-accounted bytes; 0 means unlimited. Only ensure_can_alloc honors it:
-    // allocations themselves are not refused, so code allocating on behalf of untrusted
-    // input must ask first.
-    void set_max_bytes(std::size_t max_bytes) noexcept { max_bytes_ = max_bytes; }
+    // Limit on GC-accounted bytes; 0 means unlimited. An allocation past it fails as if the
+    // allocator were out of memory.
+    void set_max_bytes(std::size_t max_bytes) noexcept;
     [[nodiscard]] std::size_t max_bytes() const noexcept { return max_bytes_; }
     // Whether size more bytes fit under max_bytes(), collecting first when they do not and
-    // collecting could help. Allocations cannot collect for themselves (they run inside a
-    // NoGcScope), so call this before entering one, with every live value rooted. True is
-    // not a promise that the allocator will succeed.
+    // collecting could help. An allocation cannot collect for itself (it runs inside a
+    // NoGcScope), so a large one should ask first, outside any scope and with every live
+    // value rooted, or garbage may get it refused. True is not a promise that the allocator
+    // will succeed.
     [[nodiscard]] bool ensure_can_alloc(std::size_t size) noexcept;
 
     GcHeader *head = nullptr;
@@ -168,6 +168,7 @@ private:
     friend void gc_detail::gc_free_storage(GcHeap *heap, void *ptr, std::size_t bytes) noexcept;
     friend void gc_detail::gc_account_add(GcHeap *heap, std::size_t bytes);
 
+    void limit_threshold() noexcept;
     [[nodiscard]] LocalState mark_local() const noexcept;
     void restore_local(LocalState state) noexcept;
     void enter_no_gc() noexcept;

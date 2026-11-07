@@ -949,8 +949,8 @@ These four functions take no arguments, throw no catchable exception, and do not
 
 - Parameters: none; asynchronous.
 - Return: reads the entire request body and constructs the corresponding script value.
-- Exceptions: an empty body, an already consumed body, body-read failure, or invalid JSON throws `Error` with a fixed message. The detailed JSON byte offset is not exposed.
-- Side effects: consumes the request body and materializes the complete body and decoded tree in memory. The function sets no size limit.
+- Exceptions: a document that does not fit the host's heap limit throws a catchable exception named `OutOfMemory`; an empty body, an already consumed body, body-read failure, or invalid JSON throws `Error` with a fixed message. The detailed JSON byte offset is not exposed.
+- Side effects: consumes the request body, decoding it as it arrives, so only the decoded tree stays in memory. It counts toward the heap limit the host configures, and the body is read to its end even when it is refused or invalid.
 
 #### `req.readBinary()`
 

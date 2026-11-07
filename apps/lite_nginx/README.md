@@ -248,13 +248,15 @@ disables the limit. A known `Content-Length` above the limit is rejected with 41
 upstream connection is acquired. Streaming or chunked bodies are checked incrementally and are
 rejected as soon as the limit is crossed.
 
-`script_max_heap_size` limits how large a body `req.readBinary()` may load into a script request's
-GC heap; a body that does not fit is refused. It accepts the same sizes and scoping as
+`script_max_heap_size` limits a script request's GC heap, for everything the script allocates; an
+allocation past it fails as out of memory. It accepts the same sizes and scoping as
 `client_max_body_size`; the default is 64 MiB and `0` disables the limit. The limit applies per
-request, not per process. A body without a `Content-Length` is held outside the heap until it is
-complete, so its peak memory can reach about twice the limit. Other script allocations do not check
-the limit yet. Set `client_max_body_size` as well: a refused body is still read and discarded before
-the script continues.
+request, not per process. `req.readBinary()` and `req.readJson()` refuse a body that does not fit
+with a catchable exception. JSON counts as what it decodes to, typically several times the size of
+the text and up to about 40 times for documents made of empty containers. A body read by
+`req.readBinary()` without a `Content-Length` is held outside the heap until it is complete, so its
+peak memory can reach about twice the limit. Set `client_max_body_size` as well: a refused body is
+still read and discarded before the script continues.
 
 For HTTP/1.1 `Expect: 100-continue`, lite-nginx sends `100 Continue` lazily when the selected
 proxy or script first reads an allowed body. A request whose known length is already too large

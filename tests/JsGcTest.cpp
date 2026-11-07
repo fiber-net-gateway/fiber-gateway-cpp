@@ -135,6 +135,60 @@ TEST(JsGcTest, EnsureCanAllocRefusesWhenLiveDataFillsTheHeap) {
     EXPECT_TRUE(heap.ensure_can_alloc(16));
 }
 
+TEST(JsGcTest, EnsureCanAllocAlwaysFitsNothing) {
+    GcHeap heap;
+    const std::string text(4096, 'l');
+    ValueHandle live = heap.global_value();
+    ASSERT_TRUE(live);
+    *live = JsValue::make_string(heap, text.data(), text.size());
+    heap.set_max_bytes(16);
+    EXPECT_TRUE(heap.ensure_can_alloc(0));
+    EXPECT_EQ(heap.stats().gc_count, 0U);
+}
+
+TEST(JsGcTest, AllocationsPastTheLimitFailLikeTheAllocatorDid) {
+    GcHeap heap;
+    heap.set_max_bytes(1024);
+    const std::string large(2048, 'x');
+    const std::string small(64, 'y');
+    GcHeap::LocalMark mark(heap);
+    ValueHandle value = heap.local_value();
+    ASSERT_TRUE(value);
+
+    *value = JsValue::make_string(heap, large.data(), large.size());
+    EXPECT_NE(js_value_type(*value), JsNodeType::String);
+    EXPECT_LE(heap.stats().current_bytes, heap.max_bytes());
+
+    *value = JsValue::make_string(heap, small.data(), small.size());
+    EXPECT_EQ(js_value_type(*value), JsNodeType::String);
+}
+
+TEST(JsGcTest, LimitKeepsTheCollectionThresholdBelowIt) {
+    GcHeap heap;
+    constexpr std::size_t kLimit = std::size_t{64} * 1024;
+    heap.set_max_bytes(kLimit);
+    EXPECT_LE(heap.threshold, kLimit);
+    heap.collect();
+    EXPECT_LE(heap.threshold, kLimit);
+}
+
+// Live data stays tiny here, so a refusal would be garbage taking memory it need not hold.
+TEST(JsGcTest, GarbageAloneNeverReachesTheLimit) {
+    GcHeap heap;
+    constexpr std::size_t kLimit = std::size_t{64} * 1024;
+    heap.set_max_bytes(kLimit);
+    const std::string text(4096, 'g');
+    for (int i = 0; i < 2000; ++i) {
+        GcHeap::LocalMark mark(heap);
+        ValueHandle garbage = heap.local_value();
+        ASSERT_TRUE(garbage);
+        *garbage = JsValue::make_string(heap, text.data(), text.size());
+        ASSERT_EQ(js_value_type(*garbage), JsNodeType::String) << i;
+    }
+    EXPECT_GT(heap.stats().gc_count, 0U);
+    EXPECT_LE(heap.stats().peak_bytes, kLimit);
+}
+
 TEST(JsGcTest, StatsCountObjectStorageAndCompletedCollections) {
     GcHeap heap;
     constexpr std::uint8_t payload[] = {1, 2, 3};

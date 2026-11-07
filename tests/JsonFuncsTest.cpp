@@ -200,3 +200,21 @@ TEST(JsonFuncsTest, StringifyInfinitySerializesAsNull) {
 TEST(JsonFuncsTest, RoundTripObject) {
     expect_script_bool(R"(return JSON.stringify(JSON.parse('{"a":1,"b":[2,3]}')) === '{"a":1,"b":[2,3]}';)", true);
 }
+
+// A failed allocation says nothing about the text, so it must not reach the script as a
+// SyntaxError it could catch and misreport.
+TEST(JsonFuncsTest, ParseOutOfMemoryAbortsInsteadOfThrowingSyntaxError) {
+    // One large allocation: the heap stays nearly empty, so a SyntaxError could still be built.
+    const std::string document = "\"" + std::string(4000, 'x') + "\"";
+    const std::string source =
+            "try { JSON.parse('" + document + R"('); return "parsed"; } catch (e) { return "caught"; })";
+    auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
+    ASSERT_TRUE(compiled.has_value());
+
+    GcHeap heap;
+    heap.set_max_bytes(2048);
+    JsValue root = JsValue::make_undefined();
+    ScriptResult result = compiled->exec_sync(root, nullptr, heap);
+    ASSERT_TRUE(result.is_abort());
+    EXPECT_EQ(result.abort().reason, ScriptAbortReason::OutOfMemory);
+}

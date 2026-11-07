@@ -65,6 +65,7 @@ public:
     void finish_chunk(std::size_t consumed) noexcept;
     [[nodiscard]] std::size_t bytes_consumed() const noexcept;
     [[nodiscard]] std::size_t stream_offset() const noexcept;
+    [[nodiscard]] std::size_t partial_bytes() const noexcept { return partial_.size; }
 
 private:
     enum class ScanStatus : std::uint8_t {

@@ -77,6 +77,10 @@ public:
 
     [[nodiscard]] std::size_t bytes_consumed() const noexcept { return last_bytes_consumed_; }
 
+    // Size of a token still spanning chunks. It is held here until it completes, however long
+    // it gets, so a caller bounding its memory has to watch this as well.
+    [[nodiscard]] std::size_t pending_bytes() const noexcept { return lexer_.partial_bytes(); }
+
 private:
     [[nodiscard]] DecodeStatus parse_internal(const char *data, std::size_t len, bool final) noexcept {
         last_bytes_consumed_ = 0;

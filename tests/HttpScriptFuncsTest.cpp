@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -496,14 +497,154 @@ TEST(HttpScriptFuncsTest, ReadBinaryOfAnEmptyBodyIsEmpty) {
     EXPECT_TRUE(contains(result.body, "\"size\":0")) << result.body;
 }
 
-// The limit is soft, so a heap already past it must not turn "no body" into a refusal.
+// A heap close to its limit must not turn "no body" into a refusal.
 TEST(HttpScriptFuncsTest, ReadBinaryOfAnEmptyBodyIgnoresAFullHeap) {
-    ClientResult result = post_to_script("let keep = strings.repeat(\"x\", 4096);"
+    ClientResult result = post_to_script("let keep = strings.repeat(\"x\", 3000);"
                                          "resp.sendJson(200, {size: length(req.readBinary()), keep: length(keep)});",
-                                         1024, "");
+                                         4096, "");
     EXPECT_EQ(result.status_code, 200);
     EXPECT_TRUE(contains(result.body, "\"size\":0")) << result.body;
-    EXPECT_TRUE(contains(result.body, "\"keep\":4096")) << result.body;
+    EXPECT_TRUE(contains(result.body, "\"keep\":3000")) << result.body;
+}
+
+std::string json_array_of_arrays(std::size_t count) {
+    std::string body = "[";
+    for (std::size_t i = 0; i < count; ++i) {
+        body += "[],";
+    }
+    body.back() = ']';
+    return body;
+}
+
+constexpr std::string_view kReadJsonProbe = "try { let v = req.readJson(); resp.sendJson(200, {n: length(v)}); }"
+                                            "catch (e) { resp.sendJson(200, {caught: e}); }";
+
+TEST(HttpScriptFuncsTest, ReadJsonDecodesABodySpanningReads) {
+    ClientResult result = post_to_script(kReadJsonProbe, 0, json_array_of_arrays(100000));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"n\":100000")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonDecodesAStringSpanningReads) {
+    ClientResult result = post_to_script(kReadJsonProbe, 0, "\"" + std::string(std::size_t{300} * 1024, 'a') + "\"");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"n\":307200")) << result.body;
+}
+
+// The text is not what the limit protects: only what it decodes to counts.
+TEST(HttpScriptFuncsTest, ReadJsonOfMostlyWhitespaceFitsAFarSmallerHeap) {
+    ClientResult result = post_to_script("resp.sendJson(200, {v: req.readJson()});", 8192,
+                                         std::string(std::size_t{200} * 1024, ' ') + "7");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"v\":7")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonThatOutgrowsTheHeapThrowsCatchably) {
+    ClientResult result = post_to_script(kReadJsonProbe, std::size_t{64} * 1024, json_array_of_arrays(20000));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonRefusesAStringThatCannotFit) {
+    ClientResult result = post_to_script(kReadJsonProbe, std::size_t{16} * 1024,
+                                         "\"" + std::string(std::size_t{300} * 1024, 'a') + "\"");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
+}
+
+// Decoding cannot collect, so garbage has to be reclaimed before a chunk that may not fit.
+TEST(HttpScriptFuncsTest, ReadJsonReclaimsWhatTheScriptLeftBehind) {
+    ClientResult result = post_to_script("strings.repeat(\"x\", 40000);"
+                                         "strings.repeat(\"y\", 10000);"
+                                         "resp.sendJson(200, {n: length(req.readJson())});",
+                                         std::size_t{64} * 1024, json_array_of_arrays(500));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "\"n\":500")) << result.body;
+}
+
+// Counts what is read before the body is given up. The response cannot show this: without a
+// limit on a token spanning reads, the outcome is the same, after holding the whole token.
+class WatchedBody {
+public:
+    explicit WatchedBody(fiber::http::HttpExchange &exchange) noexcept : exchange_(exchange) {}
+
+    Task<fiber::common::IoResult<fiber::mem::IoBufChain>> read_body(std::size_t max_bytes,
+                                                                    std::chrono::milliseconds timeout) noexcept {
+        auto result = co_await exchange_.read_body(max_bytes, timeout);
+        if (result) {
+            bytes_read_ += result->readable_bytes();
+        }
+        co_return result;
+    }
+
+    Task<fiber::common::IoResult<void>> discard_body(std::chrono::milliseconds timeout) noexcept {
+        discarded_after_ = bytes_read_;
+        co_return co_await exchange_.discard_body(timeout);
+    }
+
+    fiber::common::IoResult<void> abort(fiber::common::IoErr reason) noexcept { return exchange_.abort(reason); }
+
+    [[nodiscard]] std::size_t discarded_after() const noexcept { return discarded_after_; }
+
+private:
+    fiber::http::HttpExchange &exchange_;
+    std::size_t bytes_read_ = 0;
+    std::size_t discarded_after_ = 0;
+};
+
+TEST(HttpScriptFuncsTest, ReadJsonGivesUpOnALongTokenAsSoonAsItCannotFit) {
+    constexpr std::size_t kHeapLimit = std::size_t{16} * 1024;
+    constexpr std::size_t kTokenBytes = std::size_t{1024} * 1024;
+    ServerFixture s;
+    auto script = compile_http_script(kReadJsonProbe);
+    ASSERT_NE(script, nullptr);
+    auto discarded_after = std::make_shared<std::atomic<std::size_t>>(0);
+    s.start([script, discarded_after](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        heap.set_max_bytes(kHeapLimit);
+        WatchedBody body(exchange);
+        fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, fiber::http_script::ScriptConnectionInfo{},
+                                                  fiber::http_script::make_script_request_body(body)};
+        fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
+        auto result = co_await script->exec_async(root, &ctx, heap);
+        (void) result;
+        discarded_after->store(body.discarded_after());
+        co_return;
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Post;
+    req.target = "/script";
+    req.body = "\"" + std::string(kTokenBytes, 'a') + "\"";
+    ClientResult result = s.request(std::move(req));
+    s.stop();
+
+    EXPECT_TRUE(contains(result.body, "OutOfMemory")) << result.body;
+    EXPECT_GT(discarded_after->load(), 0U);
+    EXPECT_LT(discarded_after->load(), kTokenBytes / 2);
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonReportsBadJsonAsIt) {
+    for (std::string_view body: {"{bad", "1 2", "[1,", "\"open"}) {
+        ClientResult result = post_to_script(kReadJsonProbe, 0, std::string(body));
+        EXPECT_EQ(result.status_code, 200);
+        EXPECT_TRUE(contains(result.body, "invalid json body")) << body << " -> " << result.body;
+    }
+}
+
+TEST(HttpScriptFuncsTest, ReadJsonOfAnEmptyBodySaysSo) {
+    ClientResult result = post_to_script(kReadJsonProbe, 0, "");
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "client did not sent body")) << result.body;
+}
+
+TEST(HttpScriptFuncsTest, BodyRefusedByReadJsonIsConsumed) {
+    ClientResult result = post_to_script("try { req.readJson(); } catch (e) { }"
+                                         "try { req.readBinary(); resp.sendJson(200, {second: \"returned\"}); }"
+                                         "catch (e) { resp.sendJson(200, {second: e}); }",
+                                         0, "{bad" + std::string(100000, 'x'));
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_TRUE(contains(result.body, "already consumed")) << result.body;
 }
 
 TEST(HttpScriptFuncsTest, ReadBinaryOverTheHeapLimitThrowsCatchably) {
