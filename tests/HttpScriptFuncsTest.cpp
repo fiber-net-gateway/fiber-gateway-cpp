@@ -33,6 +33,7 @@
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 
+#include <fiber/common/json/JsonEncode.h>
 #include <fiber/common/util/RoutePathMatcher.h>
 #include <fiber/http_script/ExchangeConstExtension.h>
 #include <fiber/http_script/HttpScriptLib.h>
@@ -44,6 +45,7 @@
 #include <fiber/script/Script.h>
 #include <fiber/script/ScriptCompiler.h>
 #include <fiber/script/ScriptResult.h>
+#include <fiber/script/json/JsValueEncode.h>
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
 
@@ -776,6 +778,46 @@ TEST(HttpScriptFuncsTest, ProxyPassResponseBodyWritesWaitThirtySecondsWhateverTh
     EXPECT_EQ(proxy_pass_body_timeouts("").write, std::chrono::seconds(30));
     EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 500}").write, std::chrono::seconds(30));
     EXPECT_EQ(proxy_pass_body_timeouts("{timeout: 90000}").write, std::chrono::seconds(30));
+}
+
+std::string json_of(const fiber::script::JsValue &value) {
+    std::string out;
+    fiber::json::StringSink sink(out);
+    fiber::json::Generator gen(sink);
+    (void) fiber::script::json::encode_js_value(gen, value);
+    return out;
+}
+
+// The heap limit makes the second pair fail while the first fits. The view is cached once built,
+// so keeping that half-built object would hide the second pair for the rest of the request.
+TEST(HttpScriptFuncsTest, QueryOutOfMemoryLeavesNoPartialObjectAndRetries) {
+    const std::string large(4096, 'b');
+    struct Views {
+        fiber::script::JsNodeType refused = fiber::script::JsNodeType::Null;
+        std::string retried;
+    };
+    auto views = std::make_shared<Views>();
+    ServerFixture s;
+    s.start([views](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        fiber::http_script::ScriptExchangeCtx ctx{exchange, heap};
+        heap.set_max_bytes(2048);
+        views->refused = fiber::script::js_value_type(ctx.query());
+        heap.set_max_bytes(0);
+        views->retried = json_of(ctx.query());
+        (void) co_await ctx.write_empty(204);
+        co_return;
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/x?a=1&b=" + large;
+    ClientResult result = s.request(std::move(req));
+    s.stop();
+
+    EXPECT_EQ(result.status_code, 204);
+    EXPECT_EQ(views->refused, fiber::script::JsNodeType::Undefined);
+    EXPECT_EQ(views->retried, "{\"a\":\"1\",\"b\":\"" + large + "\"}");
 }
 
 TEST(HttpScriptFuncsTest, ReadJsonReportsBadJsonAsIt) {
