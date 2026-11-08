@@ -1,7 +1,5 @@
 #include <fiber/http_script/ScriptExchangeCtx.h>
 
-#include <arpa/inet.h>
-
 #include <fiber/common/Assert.h>
 #include <fiber/common/json/JsonEncode.h>
 #include <fiber/common/util/CookieCodec.h>
@@ -195,25 +193,14 @@ fiber::script::AbiResult ScriptExchangeCtx::remote_address_constant() noexcept {
         return fiber::script::AbiResult::success(remote_addr_constant_);
     }
 
-    std::array<char, INET6_ADDRSTRLEN> buffer{};
-    const auto &ip = exchange_.remote_addr().ip();
-    const void *source = nullptr;
-    int family = AF_INET;
-    std::array<std::uint8_t, fiber::net::IpAddress::kV4Size> v4{};
-    if (ip.is_v4()) {
-        v4 = ip.v4_bytes();
-        source = v4.data();
-    } else {
-        family = AF_INET6;
-        source = ip.v6_bytes().data();
-    }
-    const char *result = ::inet_ntop(family, source, buffer.data(), static_cast<socklen_t>(buffer.size()));
-    if (result == nullptr) {
+    std::array<char, fiber::net::IpAddress::kMaxTextLen> buffer{};
+    std::string_view text = exchange_.remote_addr().ip().to_string_view(buffer);
+    if (text.empty()) {
         remote_addr_constant_ = fiber::script::JsValue::make_null();
         return fiber::script::AbiResult::success(remote_addr_constant_);
     }
 
-    std::string_view value = copy_to_pool(exchange_.pool(), result);
+    std::string_view value = copy_to_pool(exchange_.pool(), text);
     if (value.data() == nullptr) {
         return fiber::script::AbiResult::abort(fiber::script::ScriptAbortReason::OutOfMemory);
     }
