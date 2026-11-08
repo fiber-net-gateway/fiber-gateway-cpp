@@ -132,6 +132,17 @@ public:
     void maybe_collect_for_alloc(std::size_t bytes);
     [[nodiscard]] bool no_gc_active() const noexcept { return no_gc_depth_ != 0; }
 
+    // Limit on GC-accounted bytes; 0 means unlimited. An allocation past it fails as if the
+    // allocator were out of memory.
+    void set_max_bytes(std::size_t max_bytes) noexcept;
+    [[nodiscard]] std::size_t max_bytes() const noexcept { return max_bytes_; }
+    // Whether size more bytes fit under max_bytes(), collecting first when they do not and
+    // collecting could help. An allocation cannot collect for itself (it runs inside a
+    // NoGcScope), so a large one should ask first, outside any scope and with every live
+    // value rooted, or garbage may get it refused. True is not a promise that the allocator
+    // will succeed.
+    [[nodiscard]] bool ensure_can_alloc(std::size_t size) noexcept;
+
     GcHeader *head = nullptr;
     std::size_t bytes = 0;
     std::size_t threshold = 1 << 20;
@@ -157,6 +168,7 @@ private:
     friend void gc_detail::gc_free_storage(GcHeap *heap, void *ptr, std::size_t bytes) noexcept;
     friend void gc_detail::gc_account_add(GcHeap *heap, std::size_t bytes);
 
+    void limit_threshold() noexcept;
     [[nodiscard]] LocalState mark_local() const noexcept;
     void restore_local(LocalState state) noexcept;
     void enter_no_gc() noexcept;
@@ -191,6 +203,7 @@ private:
     std::uint64_t allocation_count_ = 0;
     std::uint64_t free_count_ = 0;
     std::size_t peak_bytes_ = 0;
+    std::size_t max_bytes_ = 0;
     std::uint64_t gc_count_ = 0;
     std::uint64_t gc_freed_bytes_total_ = 0;
 };

@@ -282,11 +282,23 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::send_header(const Outgo
         co_return std::unexpected(response_write_error_);
     }
     if (header.kind == OutgoingHeaderKind::Trailer) {
+        if (response_body_discarded_) {
+            co_return common::IoResult<void>{};
+        }
         FIBER_ASSERT(header.end_stream);
         FIBER_ASSERT(response_stats_.header_sent);
         FIBER_ASSERT(!response_stats_.completed);
     }
-    auto result = co_await io_->send_header(*this, header, timeout);
+    OutgoingHeaderBlockView outgoing = header;
+    const bool headers_only =
+            header.kind == OutgoingHeaderKind::Final && !header.body.is_raw() && !response_has_body(header.status_code);
+    if (headers_only) {
+        outgoing.end_stream = true;
+        if (method_ != HttpMethod::Head || !header.body.is_content_length()) {
+            outgoing.body = HttpBodySpec::None();
+        }
+    }
+    auto result = co_await io_->send_header(*this, outgoing, timeout);
     if (!result) {
         record_response_write_error(result.error());
         co_return result;
@@ -294,7 +306,8 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::send_header(const Outgo
     if (header.kind == OutgoingHeaderKind::Final) {
         response_stats_.status_code = header.status_code;
         response_stats_.header_sent = true;
-        response_stats_.completed = header.end_stream;
+        response_stats_.completed = outgoing.end_stream;
+        response_body_discarded_ = headers_only;
     } else if (header.kind == OutgoingHeaderKind::Trailer && header.end_stream) {
         response_stats_.completed = true;
     }
@@ -337,6 +350,9 @@ fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_all(mem::IoBufC
         co_return std::unexpected(response_write_error_);
     }
     const std::size_t intended = chunk.readable_bytes();
+    if (response_body_discarded_) {
+        co_return intended;
+    }
     const bool end = chunk.complete();
     auto result = co_await io_->write_all(*this, std::move(chunk), timeout);
     if (!result) {
@@ -360,6 +376,9 @@ fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_all(const uint8
     }
     if (response_write_error_ != common::IoErr::None) {
         co_return std::unexpected(response_write_error_);
+    }
+    if (response_body_discarded_) {
+        co_return len;
     }
     auto result = co_await io_->write_all(*this, buf, len, end, timeout);
     if (!result) {
@@ -385,6 +404,11 @@ fiber::async::Task<common::IoResult<size_t>> HttpExchange::write(mem::IoBufChain
         co_return std::unexpected(response_write_error_);
     }
     const std::size_t intended = chunk.readable_bytes();
+    if (response_body_discarded_) {
+        chunk.consume(intended);
+        chunk.clear_complete();
+        co_return intended;
+    }
     const bool end = chunk.complete();
     auto result = co_await io_->write(*this, chunk, timeout);
     if (!result) {
@@ -408,6 +432,9 @@ fiber::async::Task<common::IoResult<size_t>> HttpExchange::write(const uint8_t *
     }
     if (response_write_error_ != common::IoErr::None) {
         co_return std::unexpected(response_write_error_);
+    }
+    if (response_body_discarded_) {
+        co_return len;
     }
     auto result = co_await io_->write(*this, buf, len, end, timeout);
     if (!result) {

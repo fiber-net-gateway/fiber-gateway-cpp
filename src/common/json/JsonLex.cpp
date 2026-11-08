@@ -15,6 +15,11 @@ bool set_parse_error(ParseError &error, const char *message, std::size_t offset)
     return false;
 }
 
+bool set_out_of_memory(ParseError &error, std::size_t offset) noexcept {
+    error.out_of_memory = true;
+    return set_parse_error(error, "out of memory", offset);
+}
+
 bool is_ws(char ch) noexcept { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'; }
 
 bool is_digit(unsigned char ch) noexcept { return ch >= '0' && ch <= '9'; }
@@ -39,7 +44,7 @@ int hex_value(char ch) noexcept {
 bool append_utf8(Buffer &scratch, std::uint32_t codepoint, ParseError &error, std::size_t offset) noexcept {
     if (codepoint <= 0x7F) {
         if (!scratch.append(static_cast<char>(codepoint))) {
-            return set_parse_error(error, "out of memory", offset);
+            return set_out_of_memory(error, offset);
         }
         return true;
     }
@@ -49,7 +54,7 @@ bool append_utf8(Buffer &scratch, std::uint32_t codepoint, ParseError &error, st
                 static_cast<char>(0x80 | (codepoint & 0x3F)),
         };
         if (!scratch.append(bytes, sizeof(bytes))) {
-            return set_parse_error(error, "out of memory", offset);
+            return set_out_of_memory(error, offset);
         }
         return true;
     }
@@ -63,7 +68,7 @@ bool append_utf8(Buffer &scratch, std::uint32_t codepoint, ParseError &error, st
                 static_cast<char>(0x80 | (codepoint & 0x3F)),
         };
         if (!scratch.append(bytes, sizeof(bytes))) {
-            return set_parse_error(error, "out of memory", offset);
+            return set_out_of_memory(error, offset);
         }
         return true;
     }
@@ -75,7 +80,7 @@ bool append_utf8(Buffer &scratch, std::uint32_t codepoint, ParseError &error, st
                 static_cast<char>(0x80 | (codepoint & 0x3F)),
         };
         if (!scratch.append(bytes, sizeof(bytes))) {
-            return set_parse_error(error, "out of memory", offset);
+            return set_out_of_memory(error, offset);
         }
         return true;
     }
@@ -143,14 +148,14 @@ bool Buffer::append(const char *src, std::size_t len) noexcept {
 }
 
 bool Lexer::TokenReader::read(unsigned char &ch) noexcept {
-    if (prefix && prefix_pos < prefix->size) {
+    if (prefix && prefix_pos < prefix_end) {
         ch = static_cast<unsigned char>(prefix->data[prefix_pos++]);
-    } else if (data_pos < len) {
-        ch = static_cast<unsigned char>(data[data_pos++]);
-    } else {
+        return true; // already held by out
+    }
+    if (data_pos >= len) {
         return false;
     }
-
+    ch = static_cast<unsigned char>(data[data_pos++]);
     if (out && !out->append(static_cast<char>(ch))) {
         failed = true;
         return false;
@@ -159,10 +164,10 @@ bool Lexer::TokenReader::read(unsigned char &ch) noexcept {
 }
 
 void Lexer::TokenReader::unread() noexcept {
-    if (out && out->size > 0) {
-        out->size -= 1;
-    }
     if (data_pos > 0) {
+        if (out && out->size > 0) {
+            out->size -= 1;
+        }
         data_pos -= 1;
         return;
     }
@@ -175,17 +180,15 @@ std::size_t Lexer::TokenReader::input_consumed() const noexcept { return data_po
 
 std::size_t Lexer::TokenReader::total_consumed() const noexcept { return prefix_pos + data_pos; }
 
-Lexer::~Lexer() noexcept {
-    partial_.reset();
-    token_storage_.reset();
-}
+Lexer::~Lexer() noexcept { partial_.reset(); }
 
 void Lexer::reset() noexcept {
     stream_offset_ = 0;
     last_bytes_consumed_ = 0;
     partial_offset_ = 0;
+    partial_resume_pos_ = 0;
+    partial_has_escape_ = false;
     partial_.clear();
-    token_storage_.clear();
 }
 
 void Lexer::finish_chunk(std::size_t consumed) noexcept {
@@ -223,7 +226,7 @@ Lexer::Utf8Status Lexer::scan_utf8_codepoint(TokenReader &reader, unsigned char 
         unsigned char next = 0;
         if (!reader.read(next)) {
             if (reader.failed) {
-                set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                set_out_of_memory(error, token_offset + reader.total_consumed());
                 return Utf8Status::Error;
             }
             if (!final) {
@@ -249,20 +252,22 @@ Lexer::Utf8Status Lexer::scan_utf8_codepoint(TokenReader &reader, unsigned char 
 Lexer::ScanStatus Lexer::scan_string(TokenReader &reader, bool final, ParseError &error, std::size_t token_offset,
                                      ScannedToken &out) noexcept {
     unsigned char ch = 0;
-    if (!reader.read(ch) || ch != '"') {
+    if (out.resume_pos == 0 && (!reader.read(ch) || ch != '"')) {
         if (reader.failed) {
-            set_parse_error(error, "out of memory", token_offset);
+            set_out_of_memory(error, token_offset);
         } else {
             set_parse_error(error, "invalid string", token_offset);
         }
         return ScanStatus::Error;
     }
 
-    bool has_escape = false;
+    bool has_escape = out.has_escape;
     while (true) {
+        out.resume_pos = reader.total_consumed();
+        out.has_escape = has_escape;
         if (!reader.read(ch)) {
             if (reader.failed) {
-                set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                set_out_of_memory(error, token_offset + reader.total_consumed());
                 return ScanStatus::Error;
             }
             if (!final) {
@@ -282,7 +287,7 @@ Lexer::ScanStatus Lexer::scan_string(TokenReader &reader, bool final, ParseError
             has_escape = true;
             if (!reader.read(ch)) {
                 if (reader.failed) {
-                    set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                    set_out_of_memory(error, token_offset + reader.total_consumed());
                     return ScanStatus::Error;
                 }
                 if (!final) {
@@ -305,7 +310,7 @@ Lexer::ScanStatus Lexer::scan_string(TokenReader &reader, bool final, ParseError
                     for (int idx = 0; idx < 4; ++idx) {
                         if (!reader.read(ch)) {
                             if (reader.failed) {
-                                set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                                set_out_of_memory(error, token_offset + reader.total_consumed());
                                 return ScanStatus::Error;
                             }
                             if (!final) {
@@ -349,7 +354,7 @@ Lexer::ScanStatus Lexer::scan_literal(TokenReader &reader, bool final, ParseErro
         unsigned char ch = 0;
         if (!reader.read(ch)) {
             if (reader.failed) {
-                set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                set_out_of_memory(error, token_offset + reader.total_consumed());
                 return ScanStatus::Error;
             }
             if (!final) {
@@ -376,7 +381,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
     unsigned char ch = 0;
     if (!reader.read(ch)) {
         if (reader.failed) {
-            set_parse_error(error, "out of memory", token_offset);
+            set_out_of_memory(error, token_offset);
             return ScanStatus::Error;
         }
         if (!final) {
@@ -389,7 +394,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
     if (ch == '-') {
         if (!reader.read(ch)) {
             if (reader.failed) {
-                set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                set_out_of_memory(error, token_offset + reader.total_consumed());
                 return ScanStatus::Error;
             }
             if (!final) {
@@ -403,7 +408,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
     if (ch == '0') {
         if (!reader.read(ch)) {
             if (reader.failed) {
-                set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                set_out_of_memory(error, token_offset + reader.total_consumed());
                 return ScanStatus::Error;
             }
             if (!final) {
@@ -423,7 +428,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
         while (true) {
             if (!reader.read(ch)) {
                 if (reader.failed) {
-                    set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                    set_out_of_memory(error, token_offset + reader.total_consumed());
                     return ScanStatus::Error;
                 }
                 if (!final) {
@@ -448,7 +453,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
         kind = TokenKind::Double;
         if (!reader.read(ch)) {
             if (reader.failed) {
-                set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                set_out_of_memory(error, token_offset + reader.total_consumed());
                 return ScanStatus::Error;
             }
             if (!final) {
@@ -464,7 +469,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
         do {
             if (!reader.read(ch)) {
                 if (reader.failed) {
-                    set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                    set_out_of_memory(error, token_offset + reader.total_consumed());
                     return ScanStatus::Error;
                 }
                 if (!final) {
@@ -483,7 +488,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
         kind = TokenKind::Double;
         if (!reader.read(ch)) {
             if (reader.failed) {
-                set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                set_out_of_memory(error, token_offset + reader.total_consumed());
                 return ScanStatus::Error;
             }
             if (!final) {
@@ -495,7 +500,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
         if (ch == '+' || ch == '-') {
             if (!reader.read(ch)) {
                 if (reader.failed) {
-                    set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                    set_out_of_memory(error, token_offset + reader.total_consumed());
                     return ScanStatus::Error;
                 }
                 if (!final) {
@@ -512,7 +517,7 @@ Lexer::ScanStatus Lexer::scan_number(TokenReader &reader, bool final, ParseError
         do {
             if (!reader.read(ch)) {
                 if (reader.failed) {
-                    set_parse_error(error, "out of memory", token_offset + reader.total_consumed());
+                    set_out_of_memory(error, token_offset + reader.total_consumed());
                     return ScanStatus::Error;
                 }
                 if (!final) {
@@ -551,11 +556,13 @@ LexStatus Lexer::scan_current(const char *data, std::size_t len, std::size_t &of
     if (status == ScanStatus::NeedMore) {
         partial_.clear();
         if (!partial_.append(data + start, len - start)) {
-            set_parse_error(error, "out of memory", token_offset);
+            set_out_of_memory(error, token_offset);
             offset = len;
             return LexStatus::Error;
         }
         partial_offset_ = token_offset;
+        partial_resume_pos_ = scanned.resume_pos;
+        partial_has_escape_ = scanned.has_escape;
         offset = len;
         return LexStatus::NeedMore;
     }
@@ -582,11 +589,13 @@ LexStatus Lexer::scan_current_literal(const char *data, std::size_t len, std::si
     if (status == ScanStatus::NeedMore) {
         partial_.clear();
         if (!partial_.append(data + start, len - start)) {
-            set_parse_error(error, "out of memory", token_offset);
+            set_out_of_memory(error, token_offset);
             offset = len;
             return LexStatus::Error;
         }
         partial_offset_ = token_offset;
+        partial_resume_pos_ = scanned.resume_pos;
+        partial_has_escape_ = scanned.has_escape;
         offset = len;
         return LexStatus::NeedMore;
     }
@@ -603,13 +612,53 @@ LexStatus Lexer::scan_current_literal(const char *data, std::size_t len, std::si
     return LexStatus::Ok;
 }
 
+// True when the held number ends in a digit run that any further digit extends. A lone leading
+// zero is the exception: a digit after it is an error now, not once the token ends, and a token
+// held past the end of a document would never be scanned at all.
+bool Lexer::partial_in_digit_run() const noexcept {
+    const char *token = partial_.data;
+    const std::size_t size = partial_.size;
+    if (!is_digit(static_cast<unsigned char>(token[size - 1]))) {
+        return false;
+    }
+    const bool lone_zero = token[size - 1] == '0' && (size == 1 || (size == 2 && token[0] == '-'));
+    return !lone_zero;
+}
+
 LexStatus Lexer::continue_partial(const char *data, std::size_t len, std::size_t &offset, bool final, Token &out,
                                   ParseError &error) noexcept {
-    token_storage_.clear();
-    TokenReader reader{.prefix = &partial_, .data = data + offset, .len = len - offset, .out = &token_storage_};
-    ScannedToken scanned;
-    ScanStatus status = ScanStatus::Error;
     const unsigned char first = static_cast<unsigned char>(partial_.data[0]);
+    const bool is_literal = first == 't' || first == 'f' || first == 'n';
+    // Rescanning a long token for every chunk is quadratic, so neither long kind does: a string
+    // resumes at its last clean boundary, and a number in a digit run waits for a byte that can
+    // change its state, which happens only a few times per token. Literals are at most five bytes.
+    if (first != '"' && !is_literal && !final && partial_in_digit_run()) {
+        std::size_t run_end = offset;
+        while (run_end < len && is_digit(static_cast<unsigned char>(data[run_end]))) {
+            run_end += 1;
+        }
+        if (run_end == len) {
+            if (!partial_.append(data + offset, len - offset)) {
+                set_out_of_memory(error, partial_offset_ + partial_.size);
+                return LexStatus::Error;
+            }
+            offset = len;
+            return LexStatus::NeedMore;
+        }
+    }
+
+    TokenReader reader{.prefix = &partial_,
+                       .data = data + offset,
+                       .len = len - offset,
+                       .out = &partial_,
+                       .prefix_pos = first == '"' ? partial_resume_pos_ : 0,
+                       .prefix_end = partial_.size};
+    ScannedToken scanned;
+    if (first == '"') {
+        scanned.resume_pos = partial_resume_pos_;
+        scanned.has_escape = partial_has_escape_;
+    }
+    ScanStatus status = ScanStatus::Error;
 
     if (first == '"') {
         status = scan_string(reader, final, error, partial_offset_, scanned);
@@ -625,10 +674,8 @@ LexStatus Lexer::continue_partial(const char *data, std::size_t len, std::size_t
 
     offset += reader.input_consumed();
     if (status == ScanStatus::NeedMore) {
-        Buffer tmp = partial_;
-        partial_ = token_storage_;
-        token_storage_ = tmp;
-        token_storage_.clear();
+        partial_resume_pos_ = scanned.resume_pos;
+        partial_has_escape_ = scanned.has_escape;
         return LexStatus::NeedMore;
     }
     if (status == ScanStatus::Error) {
@@ -636,11 +683,13 @@ LexStatus Lexer::continue_partial(const char *data, std::size_t len, std::size_t
     }
 
     out.kind = scanned.kind;
-    out.data = token_storage_.data + scanned.data_offset;
+    out.data = partial_.data + scanned.data_offset;
     out.len = scanned.data_len;
     out.offset = partial_offset_;
     partial_.clear();
     partial_offset_ = 0;
+    partial_resume_pos_ = 0;
+    partial_has_escape_ = false;
     return LexStatus::Ok;
 }
 
@@ -651,7 +700,6 @@ LexStatus Lexer::next(const char *data, std::size_t len, std::size_t &offset, bo
         return continue_partial(data, len, offset, final, out, error);
     }
 
-    token_storage_.clear();
     while (offset < len && is_ws(data[offset])) {
         offset += 1;
     }
@@ -737,7 +785,7 @@ bool decode_string(TokenKind kind, const char *data, std::size_t len, Buffer &sc
         const unsigned char ch = static_cast<unsigned char>(data[pos]);
         if (ch != '\\') {
             if (!scratch.append(static_cast<char>(ch))) {
-                return set_parse_error(error, "out of memory", offset + pos);
+                return set_out_of_memory(error, offset + pos);
             }
             pos += 1;
             continue;
@@ -754,32 +802,32 @@ bool decode_string(TokenKind kind, const char *data, std::size_t len, Buffer &sc
             case '\\':
             case '/':
                 if (!scratch.append(esc)) {
-                    return set_parse_error(error, "out of memory", offset + pos);
+                    return set_out_of_memory(error, offset + pos);
                 }
                 break;
             case 'b':
                 if (!scratch.append('\b')) {
-                    return set_parse_error(error, "out of memory", offset + pos);
+                    return set_out_of_memory(error, offset + pos);
                 }
                 break;
             case 'f':
                 if (!scratch.append('\f')) {
-                    return set_parse_error(error, "out of memory", offset + pos);
+                    return set_out_of_memory(error, offset + pos);
                 }
                 break;
             case 'n':
                 if (!scratch.append('\n')) {
-                    return set_parse_error(error, "out of memory", offset + pos);
+                    return set_out_of_memory(error, offset + pos);
                 }
                 break;
             case 'r':
                 if (!scratch.append('\r')) {
-                    return set_parse_error(error, "out of memory", offset + pos);
+                    return set_out_of_memory(error, offset + pos);
                 }
                 break;
             case 't':
                 if (!scratch.append('\t')) {
-                    return set_parse_error(error, "out of memory", offset + pos);
+                    return set_out_of_memory(error, offset + pos);
                 }
                 break;
             case 'u': {

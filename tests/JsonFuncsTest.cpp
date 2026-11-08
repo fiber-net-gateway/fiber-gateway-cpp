@@ -5,6 +5,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <fiber/script/JsGc.h>
 #include <fiber/script/ScriptCompiler.h>
@@ -177,26 +178,56 @@ TEST(JsonFuncsTest, StringifyUndefinedReturnsUndefined) {
     expect_script_undefined(R"(let o = {a: 1}; return JSON.stringify(o.b);)");
 }
 
-TEST(JsonFuncsTest, StringifyNaNSerializesAsNull) {
-    GcHeap heap;
-    AbiResult result =
-            call_host_on(heap, "JSON.stringify", JsValue::make_float(std::numeric_limits<double>::quiet_NaN()));
-    ASSERT_TRUE(result.is_success());
-    ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
-    EXPECT_EQ(string_to_utf8(result.value()), "null");
+TEST(JsonFuncsTest, StringifyNonFiniteSerializesAsString) {
+    const std::pair<double, const char *> cases[] = {
+            {std::numeric_limits<double>::quiet_NaN(), "\"NaN\""},
+            {std::numeric_limits<double>::infinity(), "\"Infinity\""},
+            {-std::numeric_limits<double>::infinity(), "\"-Infinity\""},
+    };
+    for (const auto &[value, expected]: cases) {
+        GcHeap heap;
+        AbiResult result = call_host_on(heap, "JSON.stringify", JsValue::make_float(value));
+        ASSERT_TRUE(result.is_success());
+        ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
+        EXPECT_EQ(string_to_utf8(result.value()), expected);
+    }
 }
 
-TEST(JsonFuncsTest, StringifyInfinitySerializesAsNull) {
-    GcHeap heap;
-    AbiResult result =
-            call_host_on(heap, "JSON.stringify", JsValue::make_float(std::numeric_limits<double>::infinity()));
-    ASSERT_TRUE(result.is_success());
-    ASSERT_EQ(js_value_type(result.value()), JsNodeType::String);
-    EXPECT_EQ(string_to_utf8(result.value()), "null");
+TEST(JsonFuncsTest, StringifyNestedNonFiniteSerializesAsString) {
+    expect_script_string(R"(let inf = 1e308 * 10;
+        return JSON.stringify({a: [inf - inf, inf, 0 - inf]});)",
+                         R"({"a":["NaN","Infinity","-Infinity"]})");
 }
 
 // ---- round-trip ----
 
 TEST(JsonFuncsTest, RoundTripObject) {
     expect_script_bool(R"(return JSON.stringify(JSON.parse('{"a":1,"b":[2,3]}')) === '{"a":1,"b":[2,3]}';)", true);
+}
+
+TEST(JsonFuncsTest, ParseRejectsAnUnfinishedTokenAfterTheValue) {
+    for (std::string_view text: {"1 2", "{} 3", "[] tru"}) {
+        SCOPED_TRACE(text);
+        expect_script_string("try { JSON.parse('" + std::string(text) +
+                                     R"('); return "parsed"; } catch (e) { return "caught"; })",
+                             "caught");
+    }
+}
+
+// A failed allocation says nothing about the text, so it must not reach the script as a
+// SyntaxError it could catch and misreport.
+TEST(JsonFuncsTest, ParseOutOfMemoryAbortsInsteadOfThrowingSyntaxError) {
+    // One large allocation: the heap stays nearly empty, so a SyntaxError could still be built.
+    const std::string document = "\"" + std::string(4000, 'x') + "\"";
+    const std::string source =
+            "try { JSON.parse('" + document + R"('); return "parsed"; } catch (e) { return "caught"; })";
+    auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
+    ASSERT_TRUE(compiled.has_value());
+
+    GcHeap heap;
+    heap.set_max_bytes(2048);
+    JsValue root = JsValue::make_undefined();
+    ScriptResult result = compiled->exec_sync(root, nullptr, heap);
+    ASSERT_TRUE(result.is_abort());
+    EXPECT_EQ(result.abort().reason, ScriptAbortReason::OutOfMemory);
 }

@@ -18,6 +18,7 @@
 #include <fiber/common/util/Crc32.h>
 #include <fiber/compression/GzipEncoder.h>
 
+#include "support/AllocFailure.h"
 #include "support/ZlibReference.h"
 
 namespace {
@@ -274,10 +275,13 @@ std::string gunzip_incremental(std::string_view member, std::size_t chunk) {
 // matching delete resolves here — an alloc-dealloc-mismatch storm under ASan
 // for every test in the binary.
 
-#if !defined(__SANITIZE_THREAD__) && !(defined(__has_feature) && __has_feature(thread_sanitizer))
+#if FIBER_TEST_REPLACES_OPERATOR_NEW
 
 void *operator new(std::size_t size) {
     ++g_thread_allocations;
+    if (fiber::test::consume_alloc_attempt()) {
+        throw std::bad_alloc();
+    }
     void *ptr = std::malloc(size ? size : 1);
     if (ptr == nullptr) {
         throw std::bad_alloc();
@@ -298,6 +302,9 @@ void *operator new[](std::size_t size, const std::nothrow_t & /*unused*/) noexce
 
 void *operator new(std::size_t size, std::align_val_t alignment) {
     ++g_thread_allocations;
+    if (fiber::test::consume_alloc_attempt()) {
+        throw std::bad_alloc();
+    }
     void *ptr = nullptr;
     if (::posix_memalign(&ptr, static_cast<std::size_t>(alignment), size ? size : 1) != 0) {
         throw std::bad_alloc();

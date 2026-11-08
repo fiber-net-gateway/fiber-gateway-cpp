@@ -225,11 +225,6 @@ Http1HeaderParseBufferOptions header_parse_buffer_options(const Http1ServerOptio
     };
 }
 
-bool response_must_not_have_body(const HttpExchange &exchange, int status_code) noexcept {
-    return exchange.method() == HttpMethod::Head || (status_code >= 100 && status_code < 200) || status_code == 204 ||
-           status_code == 304;
-}
-
 // RFC 9110 sections 7.8 and 9.3.6: only a 101, or a 2xx answering CONNECT, turns the connection into a tunnel.
 bool response_opens_tunnel(const HttpExchange &exchange, int status_code) noexcept {
     return status_code == 101 || (exchange.method() == HttpMethod::Connect && status_code >= 200 && status_code < 300);
@@ -669,20 +664,12 @@ common::IoErr Http1ExchangeIo::prepare_final_header(const HttpExchange &exchange
     if (raw_stream && header.end_stream) {
         return common::IoErr::Invalid;
     }
-    const bool must_not_have_body = !raw_stream && response_must_not_have_body(exchange, header.status_code);
-    if (body_spec.is_none() && !must_not_have_body) {
+    if (body_spec.is_none() && exchange.response_has_body(header.status_code)) {
         return common::IoErr::Invalid;
     }
-    if (must_not_have_body) {
-        if (body_spec.is_stream()) {
-            return common::IoErr::Invalid;
-        }
-        if (body_spec.is_content_length() && body_spec.content_length() != 0) {
-            return common::IoErr::Invalid;
-        }
-    }
     if (header.end_stream) {
-        if (body_spec.is_content_length() && body_spec.content_length() != 0) {
+        // A HEAD response states the length of the content it does not send.
+        if (body_spec.is_content_length() && body_spec.content_length() != 0 && exchange.method() != HttpMethod::Head) {
             return common::IoErr::Invalid;
         }
         if (body_spec.is_stream()) {
@@ -998,7 +985,10 @@ fiber::async::Task<common::IoResult<void>> Http1ExchangeIo::send_header(HttpExch
             if (err != common::IoErr::None) {
                 co_return std::unexpected(err);
             }
-            co_return co_await write_response_header(exchange, header.end_stream, 0, false, timeout);
+            const std::size_t declared_len = header.end_stream && response_body_spec_.is_content_length()
+                                                     ? response_body_spec_.content_length()
+                                                     : 0;
+            co_return co_await write_response_header(exchange, header.end_stream, declared_len, false, timeout);
         }
         case OutgoingHeaderKind::Trailer:
             FIBER_ASSERT(response_phase_ == ResponsePhase::HeaderSent ||

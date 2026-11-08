@@ -7,6 +7,7 @@
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
 #include <fiber/script/Numeric.h>
+#include <fiber/script/std/OomGuard.h>
 
 #include <cstdint>
 #include <random>
@@ -89,58 +90,61 @@ AbiResult random_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*
 // ---- rand.canary(ratio, ...keys) ----
 
 AbiResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/, Library::Arguments args) noexcept {
-    if (!args.args || args.argc < 1) {
-        // ratio is required; the resolver rejects arity < 1, but guard defensively.
-        return AbiResult::success(JsValue::make_boolean(false));
-    }
-    const JsValue &ratio_val = args.args[0];
-
-    // Jackson's asLong(0L): non-numeric collapses to 0 (never throws). Mirror that lenient
-    // extraction so a non-numeric ratio simply evaluates to false.
-    std::int64_t ratio = 0;
-    switch (js_value_type(ratio_val)) {
-        case JsNodeType::Integer:
-            ratio = js_value_int64(ratio_val);
-            break;
-        case JsNodeType::Float:
-            ratio = double_to_int64_saturated(js_value_double(ratio_val));
-            break;
-        case JsNodeType::Boolean:
-            ratio = js_value_bool(ratio_val) ? 1 : 0;
-            break;
-        default:
-            ratio = 0;
-            break;
-    }
-
-    if (ratio <= 0) {
-        return AbiResult::success(JsValue::make_boolean(false));
-    }
-    if (ratio >= 100) {
-        return AbiResult::success(JsValue::make_boolean(true));
-    }
-
-    // No keys -> random bucket, as in Java (non-deterministic).
-    if (args.argc == 1) {
-        bool hit = next_bounded(100) < ratio;
-        return AbiResult::success(JsValue::make_boolean(hit));
-    }
-
-    // With keys -> deterministic bucket from CRC-32 over the non-empty key texts. A single
-    // CRC instance is updated once per key in order (cumulative), matching Java. Key text
-    // mirrors Jackson's asText() via node_as_text (null -> "null"); see NodeText.h.
-    fiber::util::Crc32 crc;
-    for (std::uint32_t i = 1; i < args.argc; ++i) {
-        std::string text;
-        node_as_text(args.args[i], text);
-        if (text.empty()) {
-            continue;
+    // Per-key staging strings throw on OOM; the guard maps it to a graceful abort.
+    return oom_guard([&] {
+        if (!args.args || args.argc < 1) {
+            // ratio is required; the resolver rejects arity < 1, but guard defensively.
+            return AbiResult::success(JsValue::make_boolean(false));
         }
-        crc.update(text);
-    }
-    const std::uint32_t crc_value = crc.value();
-    bool hit = (static_cast<std::uint64_t>(crc_value) % 100U) < static_cast<std::uint64_t>(ratio);
-    return AbiResult::success(JsValue::make_boolean(hit));
+        const JsValue &ratio_val = args.args[0];
+
+        // Jackson's asLong(0L): non-numeric collapses to 0 (never throws). Mirror that lenient
+        // extraction so a non-numeric ratio simply evaluates to false.
+        std::int64_t ratio = 0;
+        switch (js_value_type(ratio_val)) {
+            case JsNodeType::Integer:
+                ratio = js_value_int64(ratio_val);
+                break;
+            case JsNodeType::Float:
+                ratio = double_to_int64_saturated(js_value_double(ratio_val));
+                break;
+            case JsNodeType::Boolean:
+                ratio = js_value_bool(ratio_val) ? 1 : 0;
+                break;
+            default:
+                ratio = 0;
+                break;
+        }
+
+        if (ratio <= 0) {
+            return AbiResult::success(JsValue::make_boolean(false));
+        }
+        if (ratio >= 100) {
+            return AbiResult::success(JsValue::make_boolean(true));
+        }
+
+        // No keys -> random bucket, as in Java (non-deterministic).
+        if (args.argc == 1) {
+            bool hit = next_bounded(100) < ratio;
+            return AbiResult::success(JsValue::make_boolean(hit));
+        }
+
+        // With keys -> deterministic bucket from CRC-32 over the non-empty key texts. A single
+        // CRC instance is updated once per key in order (cumulative), matching Java. Key text
+        // mirrors Jackson's asText() via node_as_text (null -> "null"); see NodeText.h.
+        fiber::util::Crc32 crc;
+        for (std::uint32_t i = 1; i < args.argc; ++i) {
+            std::string text;
+            node_as_text(args.args[i], text);
+            if (text.empty()) {
+                continue;
+            }
+            crc.update(text);
+        }
+        const std::uint32_t crc_value = crc.value();
+        bool hit = (static_cast<std::uint64_t>(crc_value) % 100U) < static_cast<std::uint64_t>(ratio);
+        return AbiResult::success(JsValue::make_boolean(hit));
+    });
 }
 
 } // namespace

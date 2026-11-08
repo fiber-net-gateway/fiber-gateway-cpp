@@ -1,9 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include <fiber/common/json/JsonDecode.h>
 #include <fiber/common/json/JsonParser.h>
 
 using fiber::json::JsonParser;
@@ -242,6 +247,127 @@ TEST(JsonParserTest, HandlesEveryTwoChunkSplit) {
         EXPECT_EQ(drain(parser, actual), JsonParser::Status::Complete)
                 << (parser.error().message ? parser.error().message : "");
         EXPECT_EQ(actual, expected);
+    }
+}
+
+TEST(JsonParserTest, HandlesEveryByteArrivingAlone) {
+    const std::string json =
+            "{\"esc\":\"a\\n\\\"\\\\\\u00e9\\ud83d\\ude00b\",\"utf8\":\"\xC3\xA9\xE4\xBD\xA0\xF0\x9F\x98\x80\","
+            "\"numbers\":[0,-0,10,-12,1.5,0.25,1e5,1E+2,2.5e-3,123456789012345678901234567890],"
+            "\"literals\":[true,false,null]}";
+    const std::vector<TokenSnapshot> expected = parse_complete(json);
+
+    JsonParser parser;
+    std::vector<TokenSnapshot> actual;
+    for (const char &byte: json) {
+        ASSERT_TRUE(parser.feed(&byte, 1));
+        ASSERT_EQ(drain(parser, actual), JsonParser::Status::NeedMore)
+                << (parser.error().message ? parser.error().message : "");
+    }
+    parser.finish();
+    EXPECT_EQ(drain(parser, actual), JsonParser::Status::Complete)
+            << (parser.error().message ? parser.error().message : "");
+    EXPECT_EQ(actual, expected);
+}
+
+// Each chunk ends where the held token looks like a number that could go on; the next byte
+// decides. These pin that holding digits never swallows a byte belonging to the next token.
+TEST(JsonParserTest, NumberEndingAtAChunkBoundaryKeepsTheFollowingBytes) {
+    struct Case {
+        std::string_view first;
+        std::string_view second;
+        std::string_view third;
+        std::string_view error;
+    };
+    static constexpr Case kCases[] = {
+            {.first = "[1", .second = "2", .third = "3]", .error = ""},
+            {.first = "[1", .second = "2", .third = ".5]", .error = ""},
+            {.first = "[1", .second = "2", .third = "e3]", .error = ""},
+            {.first = "[1", .second = "2", .third = ",3]", .error = ""},
+            {.first = "[1", .second = "2", .third = "-3]", .error = "invalid number"},
+            {.first = "[0", .second = "1", .third = "]", .error = "leading zero in number"},
+            {.first = "[-0", .second = "1", .third = "]", .error = "leading zero in number"},
+            {.first = "[10", .second = "1", .third = "]", .error = ""},
+            {.first = "[0.0", .second = "1", .third = "]", .error = ""},
+    };
+    for (const Case &c: kCases) {
+        const std::string json = std::string(c.first) + std::string(c.second) + std::string(c.third);
+        SCOPED_TRACE(json);
+
+        JsonParser whole;
+        ASSERT_TRUE(whole.feed(json.data(), json.size()));
+        whole.finish();
+        std::vector<TokenSnapshot> expected;
+        const JsonParser::Status expected_status = drain(whole, expected);
+        EXPECT_EQ(expected_status == JsonParser::Status::Error, !c.error.empty());
+        if (!c.error.empty()) {
+            EXPECT_EQ(std::string_view(whole.error().message), c.error);
+        }
+
+        JsonParser split;
+        std::vector<TokenSnapshot> actual;
+        JsonParser::Status status = JsonParser::Status::NeedMore;
+        for (std::string_view part: {c.first, c.second, c.third}) {
+            if (status != JsonParser::Status::NeedMore) {
+                break;
+            }
+            ASSERT_TRUE(split.feed(part.data(), part.size()));
+            status = drain(split, actual);
+        }
+        if (status == JsonParser::Status::NeedMore) {
+            split.finish();
+            status = drain(split, actual);
+        }
+        EXPECT_EQ(status, expected_status);
+        EXPECT_EQ(actual, expected);
+        if (!c.error.empty()) {
+            EXPECT_EQ(std::string_view(split.error().message), c.error);
+            EXPECT_EQ(split.error().offset, whole.error().offset);
+        }
+    }
+}
+
+// The document is already complete when the second zero arrives, so nothing would look at a
+// token held at that point: the error has to surface as the byte comes in.
+TEST(JsonParserTest, LeadingZeroAfterADocumentFailsAsItArrives) {
+    fiber::json::DecodeCallbacks callbacks;
+    fiber::json::Decoder<> decoder(callbacks);
+    EXPECT_NE(decoder.parse("null0", 5), fiber::json::DecodeStatus::Error);
+    EXPECT_EQ(decoder.parse("0", 1), fiber::json::DecodeStatus::Error);
+    EXPECT_STREQ(decoder.error().message, "leading zero in number");
+}
+
+std::string escaped_run(std::size_t bytes) {
+    std::string run;
+    run.reserve(bytes);
+    while (run.size() < bytes) {
+        run += "\\n";
+    }
+    return run;
+}
+
+// Rescanning the held token per chunk made this take tens of seconds; the bound is far above
+// a linear scan and far below that, so it only trips on a return to quadratic behaviour.
+TEST(JsonParserTest, LongTokensInSmallChunksStayLinear) {
+    constexpr std::size_t kTokenBytes = std::size_t{4} * 1024 * 1024;
+    constexpr std::size_t kChunkBytes = 1024;
+    const std::string documents[] = {
+            "\"" + std::string(kTokenBytes, 'a') + "\"",
+            "\"" + escaped_run(kTokenBytes) + "\"",
+            "1" + std::string(kTokenBytes, '2'),
+            "1.5e" + std::string(kTokenBytes, '3'),
+    };
+    for (const std::string &json: documents) {
+        const auto start = std::chrono::steady_clock::now();
+        JsonParser parser;
+        std::vector<TokenSnapshot> tokens;
+        for (std::size_t pos = 0; pos < json.size(); pos += kChunkBytes) {
+            ASSERT_TRUE(parser.feed(json.data() + pos, std::min(kChunkBytes, json.size() - pos)));
+            ASSERT_EQ(drain(parser, tokens), JsonParser::Status::NeedMore);
+        }
+        parser.finish();
+        ASSERT_EQ(drain(parser, tokens), JsonParser::Status::Complete);
+        EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(3));
     }
 }
 

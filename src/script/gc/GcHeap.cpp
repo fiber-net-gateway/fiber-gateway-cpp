@@ -6,6 +6,7 @@
 
 #include <fiber/common/Assert.h>
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -140,6 +141,7 @@ GcCollectStats GcHeap::collect() {
     gc_mark_protected_new_objects(this);
     gc_sweep_unmarked(this);
     threshold = next_threshold(bytes);
+    limit_threshold();
     collecting_ = false;
     gc_count_ += 1;
     gc_freed_bytes_total_ += before - bytes;
@@ -155,6 +157,41 @@ void GcHeap::maybe_collect_for_alloc(std::size_t alloc_bytes) {
         return;
     }
     collect();
+}
+
+// A collection only runs between allocations, so it has to be asked for while room is left:
+// with the threshold above the limit, garbage alone would get allocations refused. Half the
+// remaining room keeps collections from crowding in as the heap nears the limit.
+void GcHeap::limit_threshold() noexcept {
+    if (max_bytes_ == 0) {
+        return;
+    }
+    const std::size_t room = max_bytes_ > bytes ? max_bytes_ - bytes : 0;
+    threshold = std::max<std::size_t>(std::min(threshold, bytes + (room / 2)), 1);
+}
+
+void GcHeap::set_max_bytes(std::size_t max_bytes) noexcept {
+    max_bytes_ = max_bytes;
+    limit_threshold();
+}
+
+bool GcHeap::ensure_can_alloc(std::size_t size) noexcept {
+    FIBER_ASSERT(!no_gc_active());
+    if (max_bytes_ == 0 || size == 0 || saturating_add(bytes, size) <= max_bytes_) {
+        return true;
+    }
+    if (size > max_bytes_) {
+        return false; // no collection can make room
+    }
+    // Two passes: an object survives the first collection after it is linked, so garbage
+    // the script made just before this call is only reclaimed by the second.
+    for (int pass = 0; pass < 2; ++pass) {
+        collect();
+        if (saturating_add(bytes, size) <= max_bytes_) {
+            return true;
+        }
+    }
+    return false;
 }
 
 GcHeap::LocalState GcHeap::mark_local() const noexcept {

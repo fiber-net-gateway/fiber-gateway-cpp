@@ -64,10 +64,12 @@ struct QuicClientIdentity {
 
 // Prefer separate endpoint instances for server admission and outbound client
 // connections so their UDP binding policies can be configured independently.
-// Client endpoints should disable udp.reuse_addr and udp.reuse_port to reserve
-// exclusive local ports: even bind(0) can reuse a live UDP port with SO_REUSEADDR,
-// routing replies to an endpoint that does not own the destination connection ID.
-// Server endpoints may need port reuse for their worker/listener configuration.
+// udp.reuse_addr defaults to false here (net::UdpBindOptions defaults it to
+// true): with SO_REUSEADDR even bind(0) can hand out a live UDP port, and the
+// kernel then delivers that port's datagrams to whichever socket bound last,
+// an endpoint that does not own the destination connection ID. Keep it off for
+// client endpoints and ephemeral binds; server endpoints that share a port
+// across workers opt in to udp.reuse_port (and reuse_addr) explicitly.
 class QuicUdpEndpoint : public common::NonCopyable, public common::NonMovable {
 public:
     struct StatelessResponseLimit {
@@ -87,7 +89,7 @@ public:
     struct EndpointOptions {
         net::SocketAddress bind_addr{};
         std::size_t max_connections = 1024;
-        net::UdpBindOptions udp{};
+        net::UdpBindOptions udp{.reuse_addr = false};
         QuicSendScheduler::Options send{};
         std::size_t max_recv_datagrams_per_wakeup = kQuicUdpDefaultMaxRecvDatagramsPerWakeup;
         std::size_t max_recv_bytes_per_wakeup = kQuicUdpDefaultMaxRecvBytesPerWakeup;
@@ -120,7 +122,7 @@ public:
         net::SocketAddress bind_addr{};
         std::size_t max_connections = 1024;
         const net::TlsServerParam *tls = nullptr;
-        net::UdpBindOptions udp{};
+        net::UdpBindOptions udp{.reuse_addr = false};
         QuicSendScheduler::Options send{};
         QuicTransportSettings transport{};
         std::chrono::milliseconds keepalive_interval{0};

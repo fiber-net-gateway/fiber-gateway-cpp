@@ -17,7 +17,7 @@ namespace dto = fiber::nacos::dto;
 
 class StringSink final : public OutputSink {
 public:
-    [[nodiscard]] bool write(const char *data, std::size_t len) override {
+    [[nodiscard]] bool write(const char *data, std::size_t len) noexcept override {
         output.append(data ? data : "", len);
         return data != nullptr || len == 0;
     }

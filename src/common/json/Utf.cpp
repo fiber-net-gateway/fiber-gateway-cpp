@@ -4,7 +4,40 @@
 
 #include <fiber/common/json/Utf.h>
 
+#include <cstring>
+
 namespace fiber::json {
+
+namespace {
+
+constexpr std::string_view kReplacementChar = "\xEF\xBF\xBD"; // U+FFFD
+
+// One walk shared by sizing (dst == nullptr) and writing, so the two passes cannot drift.
+// Returns the repaired byte count.
+std::size_t utf8_repair_walk(std::string_view src, char *dst) noexcept {
+    const char *data = src.data();
+    const std::size_t len = src.size();
+    std::size_t pos = 0;
+    std::size_t written = 0;
+    while (pos < len) {
+        const std::size_t start = pos;
+        std::uint32_t codepoint = 0;
+        std::string_view piece;
+        if (utf8_next_codepoint(data, len, pos, codepoint)) {
+            piece = {data + start, pos - start};
+        } else {
+            piece = kReplacementChar;
+            ++pos;
+        }
+        if (dst != nullptr) {
+            std::memcpy(dst + written, piece.data(), piece.size());
+        }
+        written += piece.size();
+    }
+    return written;
+}
+
+} // namespace
 
 bool utf8_next_codepoint(const char *data, std::size_t len, std::size_t &pos, std::uint32_t &codepoint) noexcept {
     unsigned char ch = static_cast<unsigned char>(data[pos]);
@@ -134,21 +167,8 @@ bool utf8_write_utf16(const char *data, std::size_t len, char16_t *dst, std::siz
     return out_pos == dst_len;
 }
 
-void utf8_repair(std::string_view src, std::string &out) {
-    const char *data = src.data();
-    const std::size_t len = src.size();
-    std::size_t pos = 0;
-    while (pos < len) {
-        const std::size_t start = pos;
-        std::uint32_t codepoint = 0;
-        if (utf8_next_codepoint(data, len, pos, codepoint)) {
-            out.append(data + start, pos - start);
-        } else {
-            // Ill-formed byte: emit U+FFFD and skip a single byte.
-            out.append("\xEF\xBF\xBD", 3);
-            ++pos;
-        }
-    }
-}
+std::size_t utf8_repaired_size(std::string_view src) noexcept { return utf8_repair_walk(src, nullptr); }
+
+void utf8_repair_into(std::string_view src, char *dst) noexcept { (void) utf8_repair_walk(src, dst); }
 
 } // namespace fiber::json

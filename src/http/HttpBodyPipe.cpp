@@ -11,53 +11,6 @@
 namespace fiber::http {
 namespace {
 
-// Sources hand each read over in the buffer it was received into, sized by
-// the read's max_bytes rather than by what arrived. Aggregating trickled
-// reads node for node would pin one read-sized block per few bytes until low
-// water (~400 MB for 5-byte reads under the 48 KiB default), so a node using
-// at most 1/kCoalesceRatio of its capacity is copied into spare room at the
-// chain's tail instead. So is a node that small next to a coalesce buffer,
-// however exactly sized: kept, it would end the run and send the next sparse
-// read to a fresh coalesce buffer. Every node left zero-copy then fills
-// 1/kCoalesceRatio of both its own storage and any coalesce buffer opened
-// after it, keeping pinned storage within 2 * kCoalesceRatio of the
-// buffered bytes plus one coalesce buffer.
-constexpr std::size_t kCoalesceRatio = 8;
-constexpr std::size_t kCoalesceCapacity = static_cast<std::size_t>(16 * 1024) - mem::kIoBufControlBlockSize;
-
-bool append_coalescing(mem::IoBufChain &dst, mem::IoBufChain &&src, std::size_t coalesce_capacity) noexcept {
-    if (dst.complete()) {
-        return false;
-    }
-    const bool complete = src.complete();
-    const std::size_t small_bytes = coalesce_capacity / kCoalesceRatio;
-    while (mem::IoBufNode *node = src.pop_front_node()) {
-        const std::size_t bytes = node->buf.readable();
-        if (bytes != 0 && (bytes <= small_bytes || bytes <= node->buf.capacity() / kCoalesceRatio)) {
-            mem::IoBuf *tail = dst.back();
-            // Only a sole owner may write a buffer's free region: another
-            // handle to the storage (a source still receiving into it, a sink
-            // retaining it) may claim the same bytes.
-            if (tail == nullptr || !tail->unique() || tail->tailroom() < bytes) {
-                mem::IoBuf fresh = mem::IoBuf::allocate(std::max(bytes, coalesce_capacity));
-                tail = fresh && dst.append(std::move(fresh)) ? dst.back() : nullptr;
-            }
-            if (tail != nullptr) {
-                std::memcpy(tail->writable_data(), node->buf.readable_data(), bytes);
-                dst.commit_tailroom(bytes);
-                event::EventLoop::current().io_buf_node_pool().release(node);
-                continue;
-            }
-            // Out of memory for a coalesce buffer: keep the node as delivered.
-        }
-        dst.append_node(node);
-    }
-    if (complete) {
-        dst.mark_complete();
-    }
-    return true;
-}
-
 bool valid_options(const HttpBodyPipeOptions &options) noexcept {
     return options.buffer_size > 0 && options.low_water <= options.buffer_size &&
            options.read_timeout > std::chrono::milliseconds::zero() &&
@@ -97,6 +50,40 @@ HttpBodyPipeResult pipe_error(common::IoErr code, HttpBodyPipePhase phase) noexc
 
 } // namespace
 
+bool append_coalescing(mem::IoBufChain &dst, mem::IoBufChain &&src, std::size_t coalesce_capacity,
+                       std::size_t ratio) noexcept {
+    if (dst.complete()) {
+        return false;
+    }
+    const bool complete = src.complete();
+    const std::size_t small_bytes = coalesce_capacity / ratio;
+    while (mem::IoBufNode *node = src.pop_front_node()) {
+        const std::size_t bytes = node->buf.readable();
+        if (bytes != 0 && (bytes <= small_bytes || bytes <= node->buf.capacity() / ratio)) {
+            mem::IoBuf *tail = dst.back();
+            // Only a sole owner may write a buffer's free region: another
+            // handle to the storage (a source still receiving into it, a sink
+            // retaining it) may claim the same bytes.
+            if (tail == nullptr || !tail->unique() || tail->tailroom() < bytes) {
+                mem::IoBuf fresh = mem::IoBuf::allocate(std::max(bytes, coalesce_capacity));
+                tail = fresh && dst.append(std::move(fresh)) ? dst.back() : nullptr;
+            }
+            if (tail != nullptr) {
+                std::memcpy(tail->writable_data(), node->buf.readable_data(), bytes);
+                dst.commit_tailroom(bytes);
+                event::EventLoop::current().io_buf_node_pool().release(node);
+                continue;
+            }
+            // Out of memory for a coalesce buffer: keep the node as delivered.
+        }
+        dst.append_node(node);
+    }
+    if (complete) {
+        dst.mark_complete();
+    }
+    return true;
+}
+
 async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBodyPipeWriter sink,
                                                const HttpBodyPipeOptions &options) noexcept {
     if (!source.valid() || !sink.valid() || !valid_options(options)) {
@@ -113,7 +100,7 @@ async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBo
     // An unbuffered read is written out before the next one, so it never pins
     // more than itself and copying it would buy nothing.
     const bool coalesce = options.low_water != kUnbufferedBodyPipeLowWater;
-    const std::size_t coalesce_capacity = std::min(options.buffer_size, kCoalesceCapacity);
+    const std::size_t coalesce_capacity = std::min(options.buffer_size, kBodyCoalesceCapacity);
 
     for (;;) {
         if (!write_started && (!refill.empty() || refill.complete())) {

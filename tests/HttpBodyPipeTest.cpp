@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <future>
 #include <limits>
 #include <utility>
@@ -466,6 +467,57 @@ TEST(HttpBodyPipeTest, ZeroLowWaterReportsFlushFailureAsWriteError) {
     EXPECT_EQ(reader.abort_reason(), IoErr::BrokenPipe);
     EXPECT_EQ(writer.abort_calls(), 1U);
     EXPECT_EQ(writer.abort_reason(), IoErr::BrokenPipe);
+}
+
+struct HeldStorage {
+    std::size_t bytes = 0;
+    std::size_t storage = 0;
+};
+
+// Accumulates sparse 10 KiB reads, each in its own 64 KiB read buffer, the way a body held
+// for later use does.
+DetachedTask hold_sparse_reads(std::size_t ratio, std::promise<HeldStorage> *promise) {
+    constexpr std::size_t kReadBuffer = std::size_t{64} * 1024;
+    constexpr std::size_t kReadBytes = std::size_t{10} * 1024;
+    IoBufChain held;
+    for (int i = 0; i < 100; ++i) {
+        fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(kReadBuffer);
+        std::memset(node.writable_data(), 'x', kReadBytes);
+        node.commit(kReadBytes);
+        IoBufChain read;
+        read.append(std::move(node));
+        EXPECT_TRUE(fiber::http::append_coalescing(held, std::move(read), fiber::http::kBodyCoalesceCapacity, ratio));
+    }
+    HeldStorage result{.bytes = held.readable_bytes()};
+    for (const fiber::mem::IoBufNode *node = held.front_node(); node != nullptr; node = node->next) {
+        result.storage += node->buf.capacity();
+    }
+    promise->set_value(result);
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+HeldStorage held_storage_for_ratio(std::size_t ratio) {
+    fiber::event::EventLoopGroup group(1);
+    std::promise<HeldStorage> promise;
+    auto future = promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() { return hold_sparse_reads(ratio, &promise); });
+    HeldStorage result = future.get();
+    group.join();
+    return result;
+}
+
+TEST(HttpBodyPipeTest, CoalesceRatioBoundsStorageHeldForSparseReads) {
+    const HeldStorage pipe_ratio = held_storage_for_ratio(fiber::http::kDefaultBodyCoalesceRatio);
+    EXPECT_EQ(pipe_ratio.bytes, std::size_t{100} * 10 * 1024);
+    // Above 1/8 of the read buffer: the default keeps every read zero-copy.
+    EXPECT_EQ(pipe_ratio.storage, std::size_t{100} * 64 * 1024);
+
+    constexpr std::size_t kHeldRatio = 2;
+    const HeldStorage tight = held_storage_for_ratio(kHeldRatio);
+    EXPECT_EQ(tight.bytes, pipe_ratio.bytes);
+    EXPECT_LE(tight.storage, (2 * kHeldRatio * tight.bytes) + fiber::http::kBodyCoalesceCapacity);
 }
 
 TEST(HttpBodyPipeTest, CoalescesTrickledReadsInsteadOfPinningEachReadBuffer) {

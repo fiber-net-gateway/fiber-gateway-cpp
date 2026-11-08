@@ -322,6 +322,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 runtime_location.pattern = location.pattern;
                 runtime_location.gzip = make_gzip_runtime(location.gzip);
                 runtime_location.client_max_body_size = location.client_max_body_size;
+                runtime_location.script_max_heap_size = location.script_max_heap_size;
                 const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
 
                 // Add the route first so the matcher extracts the pattern's path variable
