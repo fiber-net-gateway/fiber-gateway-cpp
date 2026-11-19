@@ -88,6 +88,38 @@ struct ClientResult {
     int second_status = 0;
 };
 
+// Response-head capture for tests that must inspect response header fields as
+// the client decoded them (order included), not just the status and body.
+struct HeaderProbeResult {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    bool connected = false;
+    int status = 0;
+    std::string content_type{};
+    std::vector<std::string> set_cookies{};
+    std::string body{};
+};
+
+fiber::async::Task<void> write_two_cookies(fiber::http::HttpExchange &exchange) {
+    constexpr std::string_view kBody = "ok";
+    fiber::http::HttpHeaders headers(exchange.pool());
+    headers.add("set-cookie", "a=1; Path=/; HttpOnly");
+    headers.add("set-cookie", "b=2; Path=/; Secure");
+    headers.set("content-type", "text/plain");
+    headers.set("content-length", std::to_string(kBody.size()));
+    auto sent = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 200,
+            .headers = &headers,
+            .body = fiber::http::HttpBodySpec::ContentLength(kBody.size()),
+            .end_stream = false,
+    });
+    if (!sent) {
+        co_return;
+    }
+    (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true, 2s);
+    co_return;
+}
+
 // One HTTP/3 request over a fresh QUIC connection. `hold` (when valid) keeps
 // the connection open after the response so a test can drain the server while
 // a client is still attached.
@@ -189,6 +221,106 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
     connection.shutdown(fiber::http::Http3ErrorCode::NoError);
     // Let the CONNECTION_CLOSE actually reach the wire before tearing the
     // endpoint down; otherwise the server sees a peer that simply vanished.
+    co_await fiber::async::sleep(50ms);
+    co_await endpoint.shutdown();
+    co_await connection.wait_closed();
+    promise->set_value(std::move(result));
+    co_return;
+}
+
+// One HTTP/3 request whose response head is captured field-by-field (in wire
+// order), so duplicate field names survive visibly in the result.
+DetachedTask run_http3_client_header_probe(fiber::event::EventLoop *loop, fiber::net::SocketAddress server_addr,
+                                           std::string cert_path, std::string_view path,
+                                           std::promise<HeaderProbeResult> *promise) {
+    HeaderProbeResult result{};
+    fiber::quic::QuicUdpEndpoint endpoint(*loop);
+    fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
+    endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    auto endpoint_ready = endpoint.init(endpoint_options);
+    if (!endpoint_ready) {
+        result.error = endpoint_ready.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(cert_path));
+    if (!trust_store) {
+        result.error = trust_store.error();
+        co_await endpoint.shutdown();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    fiber::http::Http3Client::Options client_options{};
+    client_options.tls.trust_store = trust_store->get();
+    client_options.tls.verify_peer = true;
+    fiber::http::Http3Client client(endpoint, client_options);
+
+    auto started = endpoint.start();
+    if (!started) {
+        result.error = started.error();
+        co_await endpoint.shutdown();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    fiber::http::Http3ClientConnectOptions connect_options{};
+    connect_options.remote_addr = server_addr;
+    connect_options.server_name = "localhost";
+    connect_options.handshake_timeout = 3s;
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
+    if (!connected) {
+        result.error = connected.error().io_error;
+        co_await endpoint.shutdown();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+    result.connected = true;
+
+    {
+        fiber::mem::BufPool pool;
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
+        auto sent = co_await exchange.send_request_header(
+                {
+                        .method = fiber::http::HttpMethod::Get,
+                        .scheme = "https",
+                        .authority = "localhost",
+                        .path = path,
+                },
+                true, 3s);
+        if (!sent) {
+            result.error = sent.error();
+        } else {
+            auto head = co_await exchange.read_header(5s);
+            if (!head || *head == nullptr) {
+                result.error = head ? fiber::common::IoErr::Invalid : head.error();
+            } else {
+                result.status = (*head)->status_code;
+                for (const auto &field: (*head)->headers) {
+                    const std::string_view name = field.lowcase_view();
+                    if (name == "set-cookie") {
+                        result.set_cookies.emplace_back(field.value_view());
+                    } else if (name == "content-type") {
+                        result.content_type.assign(field.value_view());
+                    }
+                }
+                bool complete = false;
+                while (result.error == fiber::common::IoErr::None && !complete) {
+                    auto chunk = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024), 5s);
+                    if (!chunk) {
+                        result.error = chunk.error();
+                        break;
+                    }
+                    complete = chunk->complete();
+                    result.body.append(chain_to_string(std::move(*chunk)));
+                }
+            }
+        }
+    }
+
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
     co_await fiber::async::sleep(50ms);
     co_await endpoint.shutdown();
     co_await connection.wait_closed();
@@ -521,6 +653,60 @@ TEST(Http3EndpointTest, ServesHttp3Requests) {
     running.stop_and_join();
     EXPECT_EQ(running.server->state(), Server::State::Stopped);
 
+    group.stop();
+    group.join();
+    client_group.stop();
+    client_group.join();
+}
+
+// Set-Cookie is the one response header that must never be comma-merged
+// (RFC 9110 §5.7). The full server roundtrip must keep two set-cookie field
+// lines as two field lines: HttpHeaders::add, the ServerHttp3Request field
+// walk, QPACK encoding, wire, client QPACK decode and the client's response
+// HttpHeaders all have to preserve every line and its order. A merge or
+// first-wins drop anywhere on that path turns this red.
+TEST(Http3EndpointTest, ServerPreservesRepeatedSetCookieInResponseHeader) {
+    TestCredential tls;
+    ASSERT_TRUE(tls.init());
+
+    fiber::event::EventLoopGroup group(1);
+    fiber::event::EventLoopGroup client_group(1);
+    group.start();
+    client_group.start();
+
+    RunningServer running;
+    running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
+    running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
+            .address = {fiber::net::IpAddress::loopback_v4(), 0},
+            .tls = tls_options(tls.credential),
+            .handler = [](fiber::http::HttpExchange &exchange) { return write_two_cookies(exchange); },
+    });
+    ASSERT_NE(running.endpoint, nullptr);
+    ASSERT_TRUE(running.server->start().has_value());
+    spawn_serve(running, group.at(0));
+
+    const fiber::net::SocketAddress server_addr = running.endpoint->local_addr();
+    ASSERT_NE(server_addr.port(), 0);
+
+    std::promise<HeaderProbeResult> promise;
+    auto future = promise.get_future();
+    const std::string cert_path = tls.cert.path();
+    fiber::async::spawn(client_group.at(0), [&client_group, server_addr, cert_path, &promise]() {
+        return run_http3_client_header_probe(&client_group.at(0), server_addr, cert_path, "/cookies", &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(15s), std::future_status::ready);
+    HeaderProbeResult result = future.get();
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_TRUE(result.connected);
+    EXPECT_EQ(result.status, 200);
+    EXPECT_EQ(result.content_type, "text/plain");
+    ASSERT_EQ(result.set_cookies.size(), 2U);
+    EXPECT_EQ(result.set_cookies[0], "a=1; Path=/; HttpOnly");
+    EXPECT_EQ(result.set_cookies[1], "b=2; Path=/; Secure");
+    EXPECT_EQ(result.body, "ok");
+
+    running.stop_and_join();
     group.stop();
     group.join();
     client_group.stop();

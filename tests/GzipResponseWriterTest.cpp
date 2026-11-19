@@ -393,6 +393,49 @@ TEST(GzipResponseWriterTest, CompressesBodyAndRewritesHeaders) {
     });
 }
 
+// prepare_filtered_headers re-emits every incoming field with add_view and its
+// drop list (content-length, transfer-encoding, accept-ranges, content-encoding,
+// etag) has no room for set-cookie; a filtering or first-wins regression would
+// silently merge or drop cookies on every gzipped response.
+TEST(GzipResponseWriterTest, KeepsRepeatedSetCookieFieldsWhenFiltering) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        const std::string body = html_payload(1000);
+
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Set-Cookie", "a=1; Path=/; HttpOnly");
+            headers.add("Set-Cookie", "b=2; Path=/; Secure");
+            headers.add("Content-Length", std::to_string(body.size()));
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1U);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(field_count(h, "Set-Cookie"), 2U);
+        std::vector<std::string> cookies;
+        for (const auto &field: h.fields) {
+            if (field.first == "Set-Cookie") {
+                cookies.push_back(field.second);
+            }
+        }
+        ASSERT_EQ(cookies.size(), 2U);
+        EXPECT_EQ(cookies[0], "a=1; Path=/; HttpOnly");
+        EXPECT_EQ(cookies[1], "b=2; Path=/; Secure");
+        EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
+        EXPECT_EQ(field_count(h, "Content-Length"), 0U);
+    });
+}
+
 TEST(GzipResponseWriterTest, EmptyChunkedBodyProducesEmptyMember) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();

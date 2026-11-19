@@ -479,6 +479,118 @@ TEST(Http3QpackEncoderTest, EncodesNonStaticSchemeUsingStaticNameReference) {
     });
 }
 
+// Set-Cookie is the one response header that must never be comma-merged
+// (RFC 9110 §5.7: field lines with the same name are ordered lists only when
+// comma-joining is defined, and Set-Cookie defines none). The cases below pin
+// the QPACK wire forms a repeated set-cookie response depends on.
+
+TEST(Http3QpackEncoderTest, EncodesSetCookieUsingStaticNameReference) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"), "a=b"),
+                  IoErr::None);
+
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // set-cookie -> QPACK static index 14 (0-based), non-empty value has no
+        // entry -> Literal Field Line with Static Name Reference: 0x50|14 = 0x5E,
+        // then raw value length 0x03 (H=0).
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5e, 0x03, 'a', '=', 'b'}));
+
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "set-cookie=a=b");
+    });
+}
+
+TEST(Http3QpackEncoderTest, EncodesEmptySetCookieAsIndexedStaticField) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"), ""), IoErr::None);
+
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // The static entry at index 14 carries the empty value, so an empty
+        // set-cookie is an exact match: Indexed Field Line, 0xc0|14 = 0xce.
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0xce}));
+
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "set-cookie=");
+    });
+}
+
+TEST(Http3QpackEncoderTest, EncodesRepeatedSetCookieAsSeparateFieldLines) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"),
+                                      "a=1; Path=/; HttpOnly"),
+                  IoErr::None);
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"),
+                                      "b=2; Path=/; Secure"),
+                  IoErr::None);
+
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // Two independent field lines, one per cookie: neither merged with a
+        // comma nor collapsed to the first value.
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        std::vector<std::uint8_t> expected{0x00, 0x00};
+        expected.push_back(0x5e);
+        expected.push_back(0x15);
+        for (const char c: std::string_view{"a=1; Path=/; HttpOnly"}) {
+            expected.push_back(static_cast<std::uint8_t>(c));
+        }
+        expected.push_back(0x5e);
+        expected.push_back(0x13);
+        for (const char c: std::string_view{"b=2; Path=/; Secure"}) {
+            expected.push_back(static_cast<std::uint8_t>(c));
+        }
+        EXPECT_EQ(bytes, expected);
+
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 2U);
+        EXPECT_EQ(recorder.fields[0], "set-cookie=a=1; Path=/; HttpOnly");
+        EXPECT_EQ(recorder.fields[1], "set-cookie=b=2; Path=/; Secure");
+    });
+}
+
+TEST(Http3QpackEncoderTest, RoundTripsHuffmanEncodedSetCookieValue) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
+        // Typical session-id cookie: "sid=" plus 60 hex characters.
+        std::string value = "sid=";
+        for (std::size_t i = 0; i < 60; ++i) {
+            value.push_back("0123456789abcdef"[i % 16]);
+        }
+
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1});
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"), value),
+                  IoErr::None);
+
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        ASSERT_GT(bytes.size(), 4U);
+        EXPECT_EQ(bytes[2], 0x5e);
+        // Huffman bit set on the value length prefix, and the encoded length
+        // (fits one prefix byte here) must be shorter than the raw value.
+        EXPECT_NE(bytes[3] & 0x80U, 0U);
+        EXPECT_LT(bytes[3] & 0x7fU, value.size());
+
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "set-cookie=" + value);
+        EXPECT_EQ(recorder.huff_value_count, 1U);
+        EXPECT_EQ(recorder.raw_value_count, 0U);
+    });
+}
+
 TEST(Http3QpackEncoderTest, EncodesRootPathAsIndexedField) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
         Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});

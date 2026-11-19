@@ -91,6 +91,15 @@ std::string recv_all(int fd) {
     return out;
 }
 
+std::size_t count_substrings(std::string_view haystack, std::string_view needle) {
+    std::size_t count = 0;
+    for (std::size_t pos = haystack.find(needle); pos != std::string_view::npos;
+         pos = haystack.find(needle, pos + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
 // Appends to `out` until it contains `expected`; false on EOF, error or the socket's receive timeout.
 bool recv_until(int fd, std::string &out, std::string_view expected) {
     std::array<char, 4096> buf{};
@@ -313,6 +322,67 @@ TEST(Http1ServerTest, BasicGet) {
     ::close(client);
 
     EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("ok"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+// Set-Cookie must never be comma-merged (RFC 9110 §5.7): each cookie is its
+// own field line on the h1 wire. The serializer (Http1ExchangeIo
+// encode_header_fields) walks every field, so two cookies must appear as two
+// independent "Set-Cookie: ..." CRLF lines in order, with no comma join and no
+// first-line-wins drop.
+TEST(Http1ServerTest, ResponseKeepsRepeatedSetCookieAsSeparateFieldLines) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            fiber::http::HttpHeaders headers(exchange.pool());
+            headers.add("Set-Cookie", "a=1; Path=/; HttpOnly");
+            headers.add("Set-Cookie", "b=2; Path=/; Secure");
+            headers.set("Content-Type", "text/plain");
+            auto header_result = co_await send_final_header(exchange, 200, &headers,
+                                                            fiber::http::ResponseBodySpec::ContentLength(2), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>("ok"), 2, true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    int client = connect_client(port);
+    ASSERT_GE(client, 0);
+
+    const char *request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("200"), std::string::npos);
+    // Exactly two Set-Cookie lines, each intact and independently terminated;
+    // a comma merge would leave one line carrying both values.
+    EXPECT_EQ(count_substrings(response, "Set-Cookie:"), 2U);
+    EXPECT_NE(response.find("Set-Cookie: a=1; Path=/; HttpOnly\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Set-Cookie: b=2; Path=/; Secure\r\n"), std::string::npos);
+    EXPECT_LT(response.find("Set-Cookie: a=1; Path=/; HttpOnly\r\n"),
+              response.find("Set-Cookie: b=2; Path=/; Secure\r\n"));
+    EXPECT_EQ(response.find(", b=2"), std::string::npos);
     EXPECT_NE(response.find("ok"), std::string::npos);
 
     fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });

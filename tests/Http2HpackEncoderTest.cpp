@@ -408,4 +408,101 @@ TEST(Http2HpackEncoderTest, CanceledBlockDoesNotAffectNextBlock) {
     });
 }
 
+// Set-Cookie must never be comma-merged across field lines (RFC 9110 §5.7);
+// these cases pin the HPACK forms a repeated set-cookie response depends on.
+
+TEST(Http2HpackEncoderTest, EncodesSetCookieUsingStaticNameReference) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
+        Http2HpackEncoder encoder({.huffman_threshold = 1024});
+        Http2HpackEncoderIoBufWriter writer(encoder);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"), "a=b"),
+                  IoErr::None);
+
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // set-cookie -> HPACK static index 55; without-indexing literal with a
+        // static name reference: 4-bit prefix saturates at 15 (0x0f), then
+        // 55-15=40 (0x28), then the raw value length 0x03 (H=0).
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x20, 0x0f, 0x28, 0x03, 'a', '=', 'b'}));
+
+        Http2HpackDecoder decoder;
+        ASSERT_TRUE(decoder.init());
+        DecodeRecorder recorder;
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "set-cookie=a=b");
+    });
+}
+
+TEST(Http2HpackEncoderTest, EncodesEmptySetCookieAsIndexedStaticField) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
+        Http2HpackEncoder encoder({.huffman_threshold = 1024});
+        Http2HpackEncoderIoBufWriter writer(encoder);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"), ""), IoErr::None);
+
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // RFC 7541 Appendix A gives static entry 55 ("set-cookie") the empty
+        // value, so an empty set-cookie is an exact match and indexes directly:
+        // 0x80|55 = 0xb7.
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x20, 0xb7}));
+
+        Http2HpackDecoder decoder;
+        ASSERT_TRUE(decoder.init());
+        DecodeRecorder recorder;
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "set-cookie=");
+    });
+}
+
+TEST(Http2HpackEncoderTest, EncodesRepeatedSetCookieAsSeparateFieldLines) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool & /*pool*/) {
+        Http2HpackEncoder encoder({.huffman_threshold = 1024});
+        Http2HpackEncoderIoBufWriter writer(encoder);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"),
+                                      "a=1; Path=/; HttpOnly"),
+                  IoErr::None);
+        ASSERT_EQ(writer.encode_field("set-cookie", fiber::http::http_header_name_hash("set-cookie"),
+                                      "b=2; Path=/; Secure"),
+                  IoErr::None);
+
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // Two independent field lines, one per cookie; no dynamic-table
+        // insertion anywhere, so both blocks and both lines are byte-stable.
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        std::vector<std::uint8_t> expected{0x20};
+        expected.push_back(0x0f);
+        expected.push_back(0x28);
+        expected.push_back(0x15);
+        for (const char c: std::string_view{"a=1; Path=/; HttpOnly"}) {
+            expected.push_back(static_cast<std::uint8_t>(c));
+        }
+        expected.push_back(0x0f);
+        expected.push_back(0x28);
+        expected.push_back(0x13);
+        for (const char c: std::string_view{"b=2; Path=/; Secure"}) {
+            expected.push_back(static_cast<std::uint8_t>(c));
+        }
+        EXPECT_EQ(bytes, expected);
+
+        Http2HpackDecoder decoder;
+        ASSERT_TRUE(decoder.init());
+        DecodeRecorder recorder;
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+        ASSERT_EQ(recorder.fields.size(), 2U);
+        EXPECT_EQ(recorder.fields[0], "set-cookie=a=1; Path=/; HttpOnly");
+        EXPECT_EQ(recorder.fields[1], "set-cookie=b=2; Path=/; Secure");
+    });
+}
+
 } // namespace
